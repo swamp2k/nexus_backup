@@ -6,7 +6,7 @@ on:
       - "v*"
 
 permissions:
-  contents: read
+  contents: write
   packages: write
 
 jobs:
@@ -77,3 +77,33 @@ jobs:
           build-args: |
             NEXUS_BACKUP_VERSION=${{ needs.version.outputs.version }}
             NEXUS_BACKUP_REVISION=${{ github.sha }}
+
+  workstation:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: apps/workstation-agent/go.mod
+          cache-dependency-path: apps/workstation-agent/go.mod
+      - name: Test workstation agent
+        working-directory: apps/workstation-agent
+        run: go test ./...
+      - name: Build Windows workstation agent
+        working-directory: apps/workstation-agent
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          mkdir -p ../../dist
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags="-X main.version=$VERSION -s -w" -o ../../dist/nexus-backup-workstation-windows-amd64.exe .
+          cd ../../dist
+          sha256sum nexus-backup-workstation-windows-amd64.exe > nexus-backup-workstation-windows-amd64.exe.sha256
+      - name: Publish GitHub release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          prerelease: ${{ needs.version.outputs.stable != 'true' }}
+          generate_release_notes: true
+          files: |
+            dist/nexus-backup-workstation-windows-amd64.exe
+            dist/nexus-backup-workstation-windows-amd64.exe.sha256
