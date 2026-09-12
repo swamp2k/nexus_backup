@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { normalizeInventoryEvent, persistRepositoryInventory } from "./repository-inventory.mjs";
 
 const TOOLS = new Set(["restic", "rclone"]);
 const STREAMS = new Set(["stdout", "stderr"]);
@@ -8,13 +9,19 @@ const MAX_SUMMARY_JSON = 65_536;
 
 export async function recordRuntimeEvents(
   db,
-  { jobId, attempt, agentId, events, now = new Date(), logLimit = 500 },
+  { jobId, attempt, agentId, events, expectedRepositoryId, now = new Date(), logLimit = 500 },
 ) {
-  const normalized = normalizeRuntimeEvents(events, now);
+  const normalized = normalizeRuntimeEvents(events, now, { expectedRepositoryId });
   const statements = [];
+  const inventories = [];
   let wroteLog = false;
 
   for (const event of normalized) {
+    if (event.type === "inventory") {
+      inventories.push(event);
+      continue;
+    }
+
     if (event.type === "progress") {
       statements.push(db.prepare(`
         INSERT INTO backup_job_runtime_progress (
@@ -96,6 +103,16 @@ export async function recordRuntimeEvents(
   }
 
   if (statements.length > 0) await db.batch(statements);
+  for (const inventory of inventories) {
+    await persistRepositoryInventory(db, {
+      jobId,
+      attempt,
+      agentId,
+      expectedRepositoryId,
+      event: inventory,
+      at: now,
+    });
+  }
   return normalized.length;
 }
 
@@ -142,12 +159,20 @@ export async function getRuntimeTelemetry(db, jobId, attempt, { logLimit = 200 }
   };
 }
 
-export function normalizeRuntimeEvents(value, now = new Date()) {
+export function normalizeRuntimeEvents(value, now = new Date(), { expectedRepositoryId } = {}) {
   if (!Array.isArray(value) || value.length === 0) {
     throw new RangeError("events must be a non-empty array");
   }
   if (value.length > MAX_BATCH) throw new RangeError(`events may contain at most ${MAX_BATCH} items`);
-  return value.map((event) => normalizeRuntimeEvent(event, now));
+  let inventoryCount = 0;
+  return value.map((event) => {
+    if (isRecord(event) && event.type === "inventory") {
+      inventoryCount += 1;
+      if (inventoryCount > 1) throw new RangeError("runtime batch may contain at most one inventory event");
+      return normalizeInventoryEvent(event, expectedRepositoryId, now);
+    }
+    return normalizeRuntimeEvent(event, now);
+  });
 }
 
 function normalizeRuntimeEvent(value, now) {
@@ -188,7 +213,7 @@ function normalizeRuntimeEvent(value, now) {
     return { type, tool, data: value.data, at };
   }
 
-  throw new RangeError("runtime event type must be log, progress, or summary");
+  throw new RangeError("runtime event type must be log, progress, summary, or inventory");
 }
 
 function normalizeAt(value, fallback) {
