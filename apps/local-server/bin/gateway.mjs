@@ -7,6 +7,7 @@ import { loadSanitizedAgentConfig } from "../lib/dashboard-data.mjs";
 import { confirmationPhrase, createLocalAuth } from "../lib/local-auth.mjs";
 import { assertRecentRestorePreview, normalizeRestoreScope, queueRestoreExecution } from "../lib/restore-execution.mjs";
 import { openSqliteD1 } from "../lib/sqlite-d1.mjs";
+import { createTransferCleanupService } from "../lib/transfer-cleanup.mjs";
 import { createTransferRuleService } from "../lib/transfer-rules.mjs";
 
 const publicHost = process.env.NEXUS_BACKUP_HOST?.trim() || "0.0.0.0";
@@ -31,6 +32,7 @@ const transferService = createTransferRuleService({
   enqueueJob,
   loadAgentConfig: () => loadSanitizedAgentConfig(agentConfigPath),
 });
+const transferCleanupService = createTransferCleanupService({ db, enqueueJob });
 
 let transferSchedulerRunning = false;
 async function runTransferScheduler() {
@@ -40,6 +42,10 @@ async function runTransferScheduler() {
     const result = await transferService.runDue();
     if (result.scans > 0 || result.transfers > 0) log("info", "transfer scheduler queued work", { scans: result.scans, transfers: result.transfers });
     for (const failure of result.failures) log("error", "transfer scheduler action failed", failure);
+
+    const cleanup = await transferCleanupService.runDue();
+    if (cleanup.queued > 0 || cleanup.reconciled > 0) log("info", "transfer cleanup scheduler updated work", { queued: cleanup.queued, reconciled: cleanup.reconciled });
+    for (const failure of cleanup.failures) log("error", "transfer cleanup action failed", failure);
   } catch (error) {
     log("error", "transfer scheduler failed", { error: serializeError(error) });
   } finally {
@@ -101,7 +107,7 @@ const gateway = createServer(async (request, response) => {
       const upstream = await fetch(`${internalBase}/v1/local/info`, { headers: { accept: "application/json" } });
       const data = await upstream.json().catch(() => ({}));
       if (!upstream.ok) throw statusError(upstream.status, data.message || `Local info failed with ${upstream.status}`);
-      sendJson(response, 200, { ...data, localAuth: true, restoreExecution: true, transferRules: true, transferSchedulerIntervalMs });
+      sendJson(response, 200, { ...data, localAuth: true, restoreExecution: true, transferRules: true, transferCleanup: true, transferSchedulerIntervalMs });
       return;
     }
 

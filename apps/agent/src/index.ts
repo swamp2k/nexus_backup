@@ -4,6 +4,7 @@ export * from "./default-executor.js";
 export * from "./execution-events.js";
 export * from "./executor.js";
 export * from "./http-control-plane.js";
+export * from "./managed-cleanup-executor.js";
 export * from "./managed-transfer-executor.js";
 export * from "./process-runner.js";
 export * from "./rclone-discovery-executor.js";
