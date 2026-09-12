@@ -7,7 +7,8 @@ import { ToolExitError } from "./process-runner.js";
 import type { AgentRuntimeConfig } from "./runtime-config.js";
 
 const MAX_FILES = 5000;
-const MAX_JSON = 600_000;
+const MAX_RAW_JSON = 800_000;
+const MAX_EVENT_JSON = 600_000;
 
 interface DiscoveryPayload {
   ruleId: string;
@@ -38,16 +39,13 @@ export class RcloneDiscoveryExecutor implements JobExecutor {
     const payload = parsePayload(job.payload);
     const endpoint = this.#config.rcloneEndpoint(payload.sourceEndpointId);
     const source = joinTarget(endpoint.fs, payload.sourcePath);
-    const entries: DiscoveryEntry[] = [];
-    let encodedSize = 2;
+    const chunks: string[] = [];
+    let rawSize = 0;
 
     const args = [
-      "lsf", source,
+      "lsjson", source,
       "--recursive",
       "--files-only",
-      "--format", "pst",
-      "--separator", "\t",
-      "--time-format", "RFC3339Nano",
       ...(this.#config.tools.rcloneArgs ?? []),
     ];
     if (this.#config.tools.rcloneConfigPath) args.push("--config", this.#config.tools.rcloneConfigPath);
@@ -57,23 +55,31 @@ export class RcloneDiscoveryExecutor implements JobExecutor {
       args,
     }, signal, {
       stdout: (line) => {
-        const entry = parseLine(line);
-        if (!entry || !pathAllowed(entry.relPath, payload.includes, payload.excludes)) return;
-        if (entries.length >= MAX_FILES) throw new Error(`transfer discovery exceeds ${MAX_FILES} files; narrow the rule with include/exclude filters`);
-        encodedSize += JSON.stringify(entry).length + 1;
-        if (encodedSize > MAX_JSON) throw new Error("transfer discovery result is too large; narrow the rule with include/exclude filters");
-        entries.push(entry);
+        rawSize += line.length + 1;
+        if (rawSize > MAX_RAW_JSON) throw new Error("transfer discovery result is too large; narrow the rule with include/exclude filters");
+        chunks.push(line);
       },
       stderr: (line) => this.#events.emit({ type: "log", tool: "rclone", stream: "stderr", message: compactRcloneLog(line) }),
     });
-
     if (result.exitCode !== 0) throw new ToolExitError("rclone", result);
-    this.#events.emit({
-      type: "transfer-discovery",
-      tool: "rclone",
-      ruleId: payload.ruleId,
-      entries,
-    });
+
+    let raw: unknown;
+    try { raw = JSON.parse(chunks.join("\n")); }
+    catch { throw new Error("rclone discovery returned invalid JSON"); }
+    if (!Array.isArray(raw)) throw new Error("rclone discovery did not return a JSON file list");
+
+    const entries: DiscoveryEntry[] = [];
+    let encodedSize = 2;
+    for (const item of raw) {
+      const entry = parseLsjsonItem(item);
+      if (!pathAllowed(entry.relPath, payload.includes, payload.excludes)) continue;
+      if (entries.length >= MAX_FILES) throw new Error(`transfer discovery exceeds ${MAX_FILES} files; narrow the rule with include/exclude filters`);
+      encodedSize += JSON.stringify(entry).length + 1;
+      if (encodedSize > MAX_EVENT_JSON) throw new Error("filtered transfer discovery result is too large; narrow the rule with include/exclude filters");
+      entries.push(entry);
+    }
+
+    this.#events.emit({ type: "transfer-discovery", tool: "rclone", ruleId: payload.ruleId, entries });
     this.#events.emit({
       type: "summary",
       tool: "rclone",
@@ -94,16 +100,15 @@ function parsePayload(value: unknown): DiscoveryPayload {
   };
 }
 
-function parseLine(line: string): DiscoveryEntry | null {
-  if (!line) return null;
-  const match = /^(.*)\t(\d+)\t(.+)$/.exec(line);
-  if (!match?.[1] || match[2] === undefined || !match[3]) throw new Error("rclone discovery returned an unexpected lsf row");
-  const relPath = normalizeObjectPath(match[1]);
-  const size = Number(match[2]);
+function parseLsjsonItem(value: unknown): DiscoveryEntry {
+  if (!isRecord(value) || value.IsDir === true) throw new Error("rclone discovery returned an invalid file entry");
+  const relPath = normalizeObjectPath(value.Path);
+  const size = Number(value.Size);
   if (!Number.isSafeInteger(size) || size < 0) throw new Error(`invalid rclone file size for ${relPath}`);
-  const parsedTime = Date.parse(match[3]);
-  if (!Number.isFinite(parsedTime)) throw new Error(`invalid rclone modification time for ${relPath}`);
-  return { relPath, size, modTime: new Date(parsedTime).toISOString() };
+  if (typeof value.ModTime !== "string" || !Number.isFinite(Date.parse(value.ModTime))) {
+    throw new Error(`invalid rclone modification time for ${relPath}`);
+  }
+  return { relPath, size, modTime: new Date(value.ModTime).toISOString() };
 }
 
 function pathAllowed(rel: string, includes: readonly string[], excludes: readonly string[]): boolean {
@@ -150,7 +155,8 @@ function normalizeBase(value: unknown): string {
   return normalized;
 }
 
-function normalizeObjectPath(value: string): string {
+function normalizeObjectPath(value: unknown): string {
+  if (typeof value !== "string") throw new Error("rclone file path must be a string");
   const normalized = value.replaceAll("\\", "/").replace(/^\/+|\/+$/g, "");
   if (!normalized || normalized.split("/").some((part) => !part || part === "." || part === "..")) throw new Error("rclone returned an unsafe relative path");
   return normalized;
