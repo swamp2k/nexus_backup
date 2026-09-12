@@ -13,37 +13,34 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
 type backupResult struct {
-	SnapshotID       string
-	FilesNew         int64
-	FilesChanged     int64
-	FilesUnmodified  int64
-	DataAdded        int64
-	Duration         time.Duration
-	Partial          bool
-	Err              error
+	SnapshotID      string
+	FilesNew        int64
+	FilesChanged    int64
+	FilesUnmodified int64
+	DataAdded       int64
+	Duration        time.Duration
+	Partial         bool
+	Err             error
 }
 
 type resticJSON struct {
-	MessageType       string   `json:"message_type"`
-	PercentDone       float64  `json:"percent_done"`
-	TotalBytes        int64    `json:"total_bytes"`
-	BytesDone         int64    `json:"bytes_done"`
-	TotalFiles        int64    `json:"total_files"`
-	FilesDone         int64    `json:"files_done"`
-	CurrentFiles      []string `json:"current_files"`
-	SnapshotID        string   `json:"snapshot_id"`
-	FilesNew          int64    `json:"files_new"`
-	FilesChanged      int64    `json:"files_changed"`
-	FilesUnmodified   int64    `json:"files_unmodified"`
-	DataAdded         int64    `json:"data_added"`
-	Error             string   `json:"error"`
-	During            string   `json:"during"`
-	Item              string   `json:"item"`
+	MessageType     string   `json:"message_type"`
+	PercentDone     float64  `json:"percent_done"`
+	TotalBytes      int64    `json:"total_bytes"`
+	BytesDone       int64    `json:"bytes_done"`
+	TotalFiles      int64    `json:"total_files"`
+	FilesDone       int64    `json:"files_done"`
+	CurrentFiles    []string `json:"current_files"`
+	SnapshotID      string   `json:"snapshot_id"`
+	FilesNew        int64    `json:"files_new"`
+	FilesChanged    int64    `json:"files_changed"`
+	FilesUnmodified int64    `json:"files_unmodified"`
+	DataAdded       int64    `json:"data_added"`
+	Error           string   `json:"error"`
 }
 
 func executeResticBackup(cfg config, run workstationRun, report func(backupProgress)) backupResult {
@@ -58,13 +55,11 @@ func executeResticBackup(cfg config, run workstationRun, report func(backupProgr
 		"RESTIC_REPOSITORY="+cfg.Repository,
 		"RESTIC_PASSWORD_FILE="+cfg.PasswordFile,
 	)
-	if cfg.AutoInit {
-		if err := ensureRepository(cfg.ResticPath, env); err != nil {
-			return backupResult{Duration: time.Since(started), Err: err}
-		}
+	if err := ensureRepository(cfg.ResticPath, env, cfg.Repository, cfg.AutoInit); err != nil {
+		return backupResult{Duration: time.Since(started), Err: err}
 	}
 
-	hostname, _ := os.Hostname()
+	hostname, _ := os.HostName()
 	tag := "nexus-workstation:" + run.DeviceID
 	args := []string{"backup", "--json", "--host", hostname, "--tag", tag}
 	if runtime.GOOS == "windows" {
@@ -103,23 +98,22 @@ func runBackupCommand(resticPath string, env, args []string, report func(backupP
 		return backupResult{Err: err}
 	}
 
-	var mu sync.Mutex
-	var stderrText strings.Builder
-	stderrDone := make(chan struct{})
+	stderrDone := make(chan string, 1)
 	go func() {
-		defer close(stderrDone)
-		_, _ = io.Copy(&limitedWriter{w: &stderrText, remaining: 64 * 1024}, stderr)
+		var text strings.Builder
+		_, _ = io.Copy(&limitedWriter{w: &text, remaining: 64 * 1024}, stderr)
+		stderrDone <- text.String()
 	}()
 
 	var result backupResult
 	var parseErr error
+	var resticErrors []string
 	lastReport := time.Time{}
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 64*1024), 2*1024*1024)
 	for scanner.Scan() {
-		line := scanner.Bytes()
 		var message resticJSON
-		if err := json.Unmarshal(line, &message); err != nil {
+		if err := json.Unmarshal(scanner.Bytes(), &message); err != nil {
 			continue
 		}
 		switch message.MessageType {
@@ -146,26 +140,28 @@ func runBackupCommand(resticPath string, env, args []string, report func(backupP
 			result.FilesUnmodified = message.FilesUnmodified
 			result.DataAdded = message.DataAdded
 		case "error":
-			mu.Lock()
-			if message.Error != "" {
-				if stderrText.Len() > 0 {
-					stderrText.WriteString("; ")
-				}
-				stderrText.WriteString(message.Error)
+			if message.Error != "" && len(resticErrors) < 20 {
+				resticErrors = append(resticErrors, message.Error)
 			}
-			mu.Unlock()
 		}
 	}
 	if err := scanner.Err(); err != nil {
 		parseErr = err
 	}
 	waitErr := cmd.Wait()
-	<-stderrDone
+	stderrText := <-stderrDone
 	if parseErr != nil {
 		return backupResult{Err: fmt.Errorf("read restic output: %w", parseErr)}
 	}
 	if waitErr != nil {
-		message := strings.TrimSpace(stderrText.String())
+		parts := make([]string, 0, 2)
+		if text := strings.TrimSpace(stderrText); text != "" {
+			parts = append(parts, text)
+		}
+		if len(resticErrors) > 0 {
+			parts = append(parts, strings.Join(resticErrors, "; "))
+		}
+		message := strings.TrimSpace(strings.Join(parts, "; "))
 		if message == "" {
 			message = waitErr.Error()
 		}
@@ -187,23 +183,45 @@ func runBackupCommand(resticPath string, env, args []string, report func(backupP
 	return result
 }
 
-func ensureRepository(resticPath string, env []string) error {
+func ensureRepository(resticPath string, env []string, repository string, autoInit bool) error {
+	if localRepositoryPath(repository) != "" {
+		configPath := filepath.Join(localRepositoryPath(repository), "config")
+		_, statErr := os.Stat(configPath)
+		if errors.Is(statErr, os.ErrNotExist) {
+			if !autoInit {
+				return errors.New("local restic repository does not exist and autoInit is disabled")
+			}
+			initCmd := exec.Command(resticPath, "init")
+			initCmd.Env = env
+			output, err := initCmd.CombinedOutput()
+			if err != nil {
+				return fmt.Errorf("initialize local restic repository: %s", boundedText(output, 4000))
+			}
+			return nil
+		}
+		if statErr != nil {
+			return fmt.Errorf("inspect local restic repository: %w", statErr)
+		}
+	}
+
 	check := exec.Command(resticPath, "cat", "config")
 	check.Env = env
-	if err := check.Run(); err == nil {
-		return nil
-	}
-	initCmd := exec.Command(resticPath, "init")
-	initCmd.Env = env
-	output, err := initCmd.CombinedOutput()
+	output, err := check.CombinedOutput()
 	if err != nil {
-		text := strings.TrimSpace(string(output))
-		if len(text) > 4000 {
-			text = text[:4000]
-		}
-		return fmt.Errorf("initialize restic repository: %s", text)
+		return fmt.Errorf("open restic repository: %s", boundedText(output, 4000))
 	}
 	return nil
+}
+
+func localRepositoryPath(repository string) string {
+	repository = strings.TrimSpace(repository)
+	if repository == "" {
+		return ""
+	}
+	if filepath.IsAbs(repository) || strings.HasPrefix(repository, `\\`) {
+		return filepath.Clean(repository)
+	}
+	return ""
 }
 
 func applyRetention(resticPath string, env []string, tag string, retention retentionPolicy) error {
@@ -224,11 +242,7 @@ func applyRetention(resticPath string, env []string, tag string, retention reten
 	cmd.Env = env
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		text := strings.TrimSpace(string(output))
-		if len(text) > 4000 {
-			text = text[:4000]
-		}
-		return fmt.Errorf("restic forget/prune: %s", text)
+		return fmt.Errorf("restic forget/prune: %s", boundedText(output, 4000))
 	}
 	return nil
 }
@@ -271,6 +285,17 @@ func validateRepositoryConfig(cfg config) error {
 		return errors.New("restic password file is empty")
 	}
 	return nil
+}
+
+func boundedText(value []byte, max int) string {
+	text := strings.TrimSpace(string(value))
+	if text == "" {
+		return "command failed without output"
+	}
+	if len(text) > max {
+		return text[:max] + " [truncated]"
+	}
+	return text
 }
 
 type limitedWriter struct {
