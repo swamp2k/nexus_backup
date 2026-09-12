@@ -35,7 +35,7 @@ export class ResticBrowseExecutor implements JobExecutor {
       type: "log",
       tool: "restic",
       stream: "stdout",
-      message: `Browsing snapshot ${payload.snapshotId.slice(0, 8)} at ${payload.path}`,
+      message: `Browsing snapshot ${payload.snapshotId.slice(0, 8)}`,
     });
 
     const result = await this.#runner.run({
@@ -129,7 +129,8 @@ function requireSnapshotId(value: unknown): string {
 }
 
 function requireSnapshotPath(value: unknown): string {
-  const path = requireString(value, "path", 1, 4096);
+  if (typeof value !== "string" || value.length < 1 || value.length > 4096) throw new Error("path must be 1-4096 characters");
+  const path = value;
   if (!path.startsWith("/")) throw new Error("snapshot path must be absolute");
   if (path.includes("\0")) throw new Error("snapshot path contains an invalid character");
   if (path.split("/").some((segment) => segment === "." || segment === "..")) {
