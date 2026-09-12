@@ -34,6 +34,12 @@ export interface RepositorySnapshotBrowseEntryEvent {
   permissions: string | null;
 }
 
+export interface TransferDiscoveryEntryEvent {
+  relPath: string;
+  size: number;
+  modTime: string;
+}
+
 export type ExecutionEvent =
   | {
       type: "log";
@@ -75,6 +81,12 @@ export type ExecutionEvent =
       entries: readonly RepositorySnapshotBrowseEntryEvent[];
       entryLimit: number;
       truncated: boolean;
+    }
+  | {
+      type: "transfer-discovery";
+      tool: "rclone";
+      ruleId: string;
+      entries: readonly TransferDiscoveryEntryEvent[];
     };
 
 export type ExecutionProgressEvent = Extract<ExecutionEvent, { type: "progress" }>;

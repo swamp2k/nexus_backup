@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { normalizeInventoryEvent, persistRepositoryInventory } from "./repository-inventory.mjs";
 import { normalizeSnapshotBrowseEvent, persistSnapshotBrowse } from "./snapshot-restore.mjs";
+import { normalizeTransferDiscoveryEvent, persistTransferDiscovery } from "./transfer-rules.mjs";
 
 const TOOLS = new Set(["restic", "rclone"]);
 const STREAMS = new Set(["stdout", "stderr"]);
-const RUNTIME_KINDS = new Set(["standard", "inventory", "snapshot-browse"]);
+const RUNTIME_KINDS = new Set(["standard", "inventory", "snapshot-browse", "transfer-discovery"]);
 const MAX_BATCH = 100;
 const MAX_MESSAGE = 16_000;
 const MAX_SUMMARY_JSON = 65_536;
@@ -20,6 +21,7 @@ export async function recordRuntimeEvents(
     expectedRepositoryId,
     expectedSnapshotId,
     expectedPath,
+    expectedRuleId,
     now = new Date(),
     logLimit = 500,
   },
@@ -29,21 +31,18 @@ export async function recordRuntimeEvents(
     expectedRepositoryId,
     expectedSnapshotId,
     expectedPath,
+    expectedRuleId,
   });
   const statements = [];
   const inventories = [];
   const browses = [];
+  const discoveries = [];
   let wroteLog = false;
 
   for (const event of normalized) {
-    if (event.type === "inventory") {
-      inventories.push(event);
-      continue;
-    }
-    if (event.type === "snapshot-browse") {
-      browses.push(event);
-      continue;
-    }
+    if (event.type === "inventory") { inventories.push(event); continue; }
+    if (event.type === "snapshot-browse") { browses.push(event); continue; }
+    if (event.type === "transfer-discovery") { discoveries.push(event); continue; }
 
     if (event.type === "progress") {
       statements.push(db.prepare(`
@@ -64,18 +63,10 @@ export async function recordRuntimeEvents(
           eta_seconds = excluded.eta_seconds,
           errors = excluded.errors
       `).bind(
-        jobId,
-        attempt,
-        agentId,
-        event.tool,
-        event.at,
-        event.bytesDone ?? null,
-        event.bytesTotal ?? null,
-        event.filesDone ?? null,
-        event.filesTotal ?? null,
-        event.speedBytesPerSecond ?? null,
-        event.etaSeconds ?? null,
-        event.errors ?? null,
+        jobId, attempt, agentId, event.tool, event.at,
+        event.bytesDone ?? null, event.bytesTotal ?? null,
+        event.filesDone ?? null, event.filesTotal ?? null,
+        event.speedBytesPerSecond ?? null, event.etaSeconds ?? null, event.errors ?? null,
       ));
       continue;
     }
@@ -99,16 +90,7 @@ export async function recordRuntimeEvents(
       INSERT INTO backup_job_runtime_logs (
         id, job_id, attempt, agent_id, at, tool, stream, message
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).bind(
-      randomUUID(),
-      jobId,
-      attempt,
-      agentId,
-      event.at,
-      event.tool,
-      event.stream,
-      event.message,
-    ));
+    `).bind(randomUUID(), jobId, attempt, agentId, event.at, event.tool, event.stream, event.message));
   }
 
   if (wroteLog) {
@@ -127,26 +109,13 @@ export async function recordRuntimeEvents(
 
   if (statements.length > 0) await db.batch(statements);
   for (const inventory of inventories) {
-    await persistRepositoryInventory(db, {
-      jobId,
-      attempt,
-      agentId,
-      expectedRepositoryId,
-      event: inventory,
-      at: now,
-    });
+    await persistRepositoryInventory(db, { jobId, attempt, agentId, expectedRepositoryId, event: inventory, at: now });
   }
   for (const browse of browses) {
-    await persistSnapshotBrowse(db, {
-      jobId,
-      attempt,
-      agentId,
-      expectedRepositoryId,
-      expectedSnapshotId,
-      expectedPath,
-      event: browse,
-      at: now,
-    });
+    await persistSnapshotBrowse(db, { jobId, attempt, agentId, expectedRepositoryId, expectedSnapshotId, expectedPath, event: browse, at: now });
+  }
+  for (const discovery of discoveries) {
+    await persistTransferDiscovery(db, { jobId, attempt, agentId, expectedRuleId, event: discovery, at: now });
   }
   return normalized.length;
 }
@@ -167,26 +136,17 @@ export async function getRuntimeTelemetry(db, jobId, attempt, { logLimit = 200 }
   `).bind(jobId, attempt, limit).all();
 
   const logs = (logResult.results ?? []).map((row) => ({
-    id: String(row.id),
-    at: String(row.at),
-    tool: String(row.tool),
-    stream: String(row.stream),
-    message: String(row.message),
+    id: String(row.id), at: String(row.at), tool: String(row.tool), stream: String(row.stream), message: String(row.message),
   })).reverse();
 
   if (!progressRow) return { attempt, progress: null, summary: null, logs };
-
   return {
     attempt,
     progress: {
-      tool: String(progressRow.tool),
-      updatedAt: String(progressRow.updated_at),
-      bytesDone: nullableNumber(progressRow.bytes_done),
-      bytesTotal: nullableNumber(progressRow.bytes_total),
-      filesDone: nullableNumber(progressRow.files_done),
-      filesTotal: nullableNumber(progressRow.files_total),
-      speedBytesPerSecond: nullableNumber(progressRow.speed_bytes_per_second),
-      etaSeconds: nullableNumber(progressRow.eta_seconds),
+      tool: String(progressRow.tool), updatedAt: String(progressRow.updated_at),
+      bytesDone: nullableNumber(progressRow.bytes_done), bytesTotal: nullableNumber(progressRow.bytes_total),
+      filesDone: nullableNumber(progressRow.files_done), filesTotal: nullableNumber(progressRow.files_total),
+      speedBytesPerSecond: nullableNumber(progressRow.speed_bytes_per_second), etaSeconds: nullableNumber(progressRow.eta_seconds),
       errors: nullableNumber(progressRow.errors),
     },
     summary: parseJsonObject(progressRow.summary_json),
@@ -199,16 +159,16 @@ export function normalizeRuntimeEvents(value, now = new Date(), {
   expectedRepositoryId,
   expectedSnapshotId,
   expectedPath,
+  expectedRuleId,
 } = {}) {
-  if (!Array.isArray(value) || value.length === 0) {
-    throw new RangeError("events must be a non-empty array");
-  }
+  if (!Array.isArray(value) || value.length === 0) throw new RangeError("events must be a non-empty array");
   if (value.length > MAX_BATCH) throw new RangeError(`events may contain at most ${MAX_BATCH} items`);
-  const effectiveKind = runtimeKind ?? inferRuntimeKind({ expectedRepositoryId, expectedSnapshotId, expectedPath });
+  const effectiveKind = runtimeKind ?? inferRuntimeKind({ expectedRepositoryId, expectedSnapshotId, expectedPath, expectedRuleId });
   if (!RUNTIME_KINDS.has(effectiveKind)) throw new RangeError("runtimeKind is invalid");
 
   let inventoryCount = 0;
   let browseCount = 0;
+  let discoveryCount = 0;
   return value.map((event) => {
     if (isRecord(event) && event.type === "inventory") {
       if (effectiveKind !== "inventory") throw new RangeError("inventory events are only accepted from restic-inventory jobs");
@@ -220,18 +180,20 @@ export function normalizeRuntimeEvents(value, now = new Date(), {
       if (effectiveKind !== "snapshot-browse") throw new RangeError("snapshot browse events are only accepted from restic-browse jobs");
       browseCount += 1;
       if (browseCount > 1) throw new RangeError("runtime batch may contain at most one snapshot browse event");
-      return normalizeSnapshotBrowseEvent(event, {
-        expectedRepositoryId,
-        expectedSnapshotId,
-        expectedPath,
-        now,
-      });
+      return normalizeSnapshotBrowseEvent(event, { expectedRepositoryId, expectedSnapshotId, expectedPath, now });
+    }
+    if (isRecord(event) && event.type === "transfer-discovery") {
+      if (effectiveKind !== "transfer-discovery") throw new RangeError("transfer discovery events are only accepted from rclone-discovery jobs");
+      discoveryCount += 1;
+      if (discoveryCount > 1) throw new RangeError("runtime batch may contain at most one transfer discovery event");
+      return normalizeTransferDiscoveryEvent(event, { expectedRuleId, now });
     }
     return normalizeRuntimeEvent(event, now);
   });
 }
 
-function inferRuntimeKind({ expectedRepositoryId, expectedSnapshotId, expectedPath }) {
+function inferRuntimeKind({ expectedRepositoryId, expectedSnapshotId, expectedPath, expectedRuleId }) {
+  if (expectedRuleId !== undefined) return "transfer-discovery";
   if (expectedSnapshotId !== undefined || expectedPath !== undefined) {
     return expectedRepositoryId !== undefined && expectedSnapshotId !== undefined && expectedPath !== undefined
       ? "snapshot-browse"
@@ -250,17 +212,13 @@ function normalizeRuntimeEvent(value, now) {
     const stream = requireEnum(value.stream, STREAMS, "stream");
     if (typeof value.message !== "string") throw new RangeError("log message must be a string");
     const message = value.message.trimEnd();
-    if (!message || message.length > MAX_MESSAGE) {
-      throw new RangeError(`log message must be 1-${MAX_MESSAGE} characters`);
-    }
+    if (!message || message.length > MAX_MESSAGE) throw new RangeError(`log message must be 1-${MAX_MESSAGE} characters`);
     return { type, tool, stream, message, at };
   }
 
   if (type === "progress") {
     return {
-      type,
-      tool,
-      at,
+      type, tool, at,
       bytesDone: optionalNonNegativeNumber(value.bytesDone, "bytesDone"),
       bytesTotal: optionalNonNegativeNumber(value.bytesTotal, "bytesTotal"),
       filesDone: optionalNonNegativeNumber(value.filesDone, "filesDone"),
@@ -278,49 +236,13 @@ function normalizeRuntimeEvent(value, now) {
     return { type, tool, data: value.data, at };
   }
 
-  throw new RangeError("runtime event type must be log, progress, summary, inventory, or snapshot-browse");
+  throw new RangeError("runtime event type must be log, progress, summary, inventory, snapshot-browse, or transfer-discovery");
 }
 
-function normalizeAt(value, fallback) {
-  if (typeof value !== "string" || !Number.isFinite(Date.parse(value))) return fallback.toISOString();
-  return new Date(value).toISOString();
-}
-
-function requireEnum(value, allowed, name) {
-  if (typeof value !== "string" || !allowed.has(value)) {
-    throw new RangeError(`${name} is invalid`);
-  }
-  return value;
-}
-
-function optionalNonNegativeNumber(value, name) {
-  if (value === undefined) return undefined;
-  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
-    throw new RangeError(`${name} must be a finite non-negative number`);
-  }
-  return value;
-}
-
-function nullableNumber(value) {
-  return value === null || value === undefined ? null : Number(value);
-}
-
-function parseJsonObject(value) {
-  if (typeof value !== "string" || !value) return null;
-  try {
-    const parsed = JSON.parse(value);
-    return isRecord(parsed) ? parsed : null;
-  } catch {
-    return null;
-  }
-}
-
-function clampInteger(value, min, max, fallback) {
-  const number = Number(value);
-  if (!Number.isInteger(number)) return fallback;
-  return Math.min(max, Math.max(min, number));
-}
-
-function isRecord(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
+function normalizeAt(value, fallback) { if (typeof value !== "string" || !Number.isFinite(Date.parse(value))) return fallback.toISOString(); return new Date(value).toISOString(); }
+function requireEnum(value, allowed, name) { if (typeof value !== "string" || !allowed.has(value)) throw new RangeError(`${name} is invalid`); return value; }
+function optionalNonNegativeNumber(value, name) { if (value === undefined) return undefined; if (typeof value !== "number" || !Number.isFinite(value) || value < 0) throw new RangeError(`${name} must be a finite non-negative number`); return value; }
+function nullableNumber(value) { return value === null || value === undefined ? null : Number(value); }
+function parseJsonObject(value) { if (typeof value !== "string" || !value) return null; try { const parsed = JSON.parse(value); return isRecord(parsed) ? parsed : null; } catch { return null; } }
+function clampInteger(value, min, max, fallback) { const number = Number(value); if (!Number.isInteger(number)) return fallback; return Math.min(max, Math.max(min, number)); }
+function isRecord(value) { return typeof value === "object" && value !== null && !Array.isArray(value); }

@@ -116,11 +116,13 @@ const STATIC_FILES = new Map([
   ["/plans.js", ["plans.js", "text/javascript; charset=utf-8"]],
   ["/maintenance.js", ["maintenance.js", "text/javascript; charset=utf-8"]],
   ["/repository-inventory.js", ["repository-inventory.js", "text/javascript; charset=utf-8"]],
+  ["/transfers.js", ["transfers.js", "text/javascript; charset=utf-8"]],
   ["/styles.css", ["styles.css", "text/css; charset=utf-8"]],
   ["/telemetry.css", ["telemetry.css", "text/css; charset=utf-8"]],
   ["/plans.css", ["plans.css", "text/css; charset=utf-8"]],
   ["/maintenance.css", ["maintenance.css", "text/css; charset=utf-8"]],
   ["/repository-inventory.css", ["repository-inventory.css", "text/css; charset=utf-8"]],
+  ["/transfers.css", ["transfers.css", "text/css; charset=utf-8"]],
   ["/favicon.svg", ["favicon.svg", "image/svg+xml"]],
 ]);
 
@@ -335,6 +337,14 @@ const server = createServer(async (request, response) => {
       const jobPayload = isRecord(job.payload) ? job.payload : {};
       const inventoryJob = job.type === "restic-inventory";
       const browseJob = job.type === "restic-browse";
+      const discoveryJob = job.type === "rclone-discovery";
+      const runtimeKind = inventoryJob
+        ? "inventory"
+        : browseJob
+          ? "snapshot-browse"
+          : discoveryJob
+            ? "transfer-discovery"
+            : "standard";
       const expectedRepositoryId = (inventoryJob || browseJob) && typeof jobPayload.repositoryId === "string"
         ? jobPayload.repositoryId
         : undefined;
@@ -344,14 +354,19 @@ const server = createServer(async (request, response) => {
       const expectedPath = browseJob && typeof jobPayload.path === "string"
         ? jobPayload.path
         : undefined;
+      const expectedRuleId = discoveryJob && typeof jobPayload.ruleId === "string"
+        ? jobPayload.ruleId
+        : undefined;
       const accepted = await recordRuntimeEvents(db, {
         jobId,
         attempt: job.attempt,
         agentId: agent.id,
         events: body.events,
+        runtimeKind,
         expectedRepositoryId,
         expectedSnapshotId,
         expectedPath,
+        expectedRuleId,
       });
       await agentStore.touch(agent.id, new Date());
       sendJson(response, 202, { accepted });

@@ -3,9 +3,11 @@ import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { loadSanitizedAgentConfig } from "../lib/dashboard-data.mjs";
 import { confirmationPhrase, createLocalAuth } from "../lib/local-auth.mjs";
 import { assertRecentRestorePreview, normalizeRestoreScope, queueRestoreExecution } from "../lib/restore-execution.mjs";
 import { openSqliteD1 } from "../lib/sqlite-d1.mjs";
+import { createTransferRuleService } from "../lib/transfer-rules.mjs";
 
 const publicHost = process.env.NEXUS_BACKUP_HOST?.trim() || "0.0.0.0";
 const publicPort = positiveInteger(process.env.NEXUS_BACKUP_PORT ?? "8787", "NEXUS_BACKUP_PORT");
@@ -16,14 +18,37 @@ const databasePath = process.env.NEXUS_BACKUP_DB?.trim() || join(configDir, "nex
 const migrationsDir = process.env.NEXUS_BACKUP_MIGRATIONS?.trim() || fileURLToPath(new URL("../../../migrations/", import.meta.url));
 const webDir = process.env.NEXUS_BACKUP_WEB_DIR?.trim() || fileURLToPath(new URL("../web/", import.meta.url));
 const agentConfigPath = process.env.NEXUS_BACKUP_AGENT_CONFIG?.trim() || "/agent-config/agent.json";
+const transferSchedulerIntervalMs = positiveInteger(process.env.NEXUS_BACKUP_TRANSFER_INTERVAL_MS ?? "15000", "NEXUS_BACKUP_TRANSFER_INTERVAL_MS");
 
-// The existing local server remains authoritative, but is reachable only over loopback.
 process.env.NEXUS_BACKUP_HOST = "127.0.0.1";
 process.env.NEXUS_BACKUP_PORT = String(internalPort);
 await import("./server.mjs");
 
 const db = await openSqliteD1({ filename: databasePath, migrationsDir });
 const auth = await createLocalAuth({ configDir, log });
+const transferService = createTransferRuleService({
+  db,
+  enqueueJob,
+  loadAgentConfig: () => loadSanitizedAgentConfig(agentConfigPath),
+});
+
+let transferSchedulerRunning = false;
+async function runTransferScheduler() {
+  if (transferSchedulerRunning) return;
+  transferSchedulerRunning = true;
+  try {
+    const result = await transferService.runDue();
+    if (result.scans > 0 || result.transfers > 0) log("info", "transfer scheduler queued work", { scans: result.scans, transfers: result.transfers });
+    for (const failure of result.failures) log("error", "transfer scheduler action failed", failure);
+  } catch (error) {
+    log("error", "transfer scheduler failed", { error: serializeError(error) });
+  } finally {
+    transferSchedulerRunning = false;
+  }
+}
+const transferTimer = setInterval(() => void runTransferScheduler(), transferSchedulerIntervalMs);
+transferTimer.unref();
+void runTransferScheduler();
 
 const PUBLIC_FILES = new Map([
   ["/auth.html", ["auth.html", "text/html; charset=utf-8"]],
@@ -76,8 +101,48 @@ const gateway = createServer(async (request, response) => {
       const upstream = await fetch(`${internalBase}/v1/local/info`, { headers: { accept: "application/json" } });
       const data = await upstream.json().catch(() => ({}));
       if (!upstream.ok) throw statusError(upstream.status, data.message || `Local info failed with ${upstream.status}`);
-      sendJson(response, 200, { ...data, localAuth: true, restoreExecution: true });
+      sendJson(response, 200, { ...data, localAuth: true, restoreExecution: true, transferRules: true, transferSchedulerIntervalMs });
       return;
+    }
+
+    if (path === "/v1/local/transfers" && request.method === "GET") {
+      const config = await loadSanitizedAgentConfig(agentConfigPath);
+      sendJson(response, 200, { rules: await transferService.list(), endpoints: config.endpoints ?? [], available: config.available });
+      return;
+    }
+    if (path === "/v1/local/transfers" && request.method === "POST") {
+      sendJson(response, 201, { rule: await transferService.create(await readJsonBody(request)) });
+      return;
+    }
+    const transferScanMatch = path.match(/^\/v1\/local\/transfers\/([^/]+)\/scan$/);
+    if (request.method === "POST" && transferScanMatch) {
+      sendJson(response, 202, await transferService.scanNow(decodePathPart(transferScanMatch[1])));
+      return;
+    }
+    const transferObjectsMatch = path.match(/^\/v1\/local\/transfers\/([^/]+)\/objects$/);
+    if (request.method === "GET" && transferObjectsMatch) {
+      const ruleId = decodePathPart(transferObjectsMatch[1]);
+      sendJson(response, 200, { objects: await transferService.objects(ruleId, { limit: url.searchParams.get("limit") ?? 100 }) });
+      return;
+    }
+    const transferMatch = path.match(/^\/v1\/local\/transfers\/([^/]+)$/);
+    if (transferMatch) {
+      const ruleId = decodePathPart(transferMatch[1]);
+      if (request.method === "GET") {
+        const rule = await transferService.get(ruleId);
+        if (!rule) throw statusError(404, `Transfer rule not found: ${ruleId}`);
+        sendJson(response, 200, { rule });
+        return;
+      }
+      if (request.method === "PUT") {
+        sendJson(response, 200, { rule: await transferService.update(ruleId, await readJsonBody(request)) });
+        return;
+      }
+      if (request.method === "PATCH") {
+        const body = await readJsonBody(request);
+        sendJson(response, 200, { rule: await transferService.setEnabled(ruleId, body.enabled) });
+        return;
+      }
     }
 
     if (path === "/v1/local/restore-authorizations" && request.method === "POST") {
@@ -151,6 +216,7 @@ let stopping = false;
 async function shutdown(signal) {
   if (stopping) return;
   stopping = true;
+  clearInterval(transferTimer);
   log("info", "gateway shutdown requested", { signal });
   await new Promise((resolve) => gateway.close(resolve));
   db.close();

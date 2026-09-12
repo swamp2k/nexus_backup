@@ -2,7 +2,9 @@ import { CompositeJobExecutor } from "./composite-executor.js";
 import type { ExecutionEventSink } from "./execution-events.js";
 import { noopExecutionEventSink } from "./execution-events.js";
 import type { JobExecutor } from "./executor.js";
+import { ManagedTransferExecutor } from "./managed-transfer-executor.js";
 import { NodeCommandRunner, type CommandRunner } from "./process-runner.js";
+import { RcloneDiscoveryExecutor } from "./rclone-discovery-executor.js";
 import { RcloneTransferExecutor } from "./rclone-executor.js";
 import { RcloneMountedResticExecutor } from "./rclone-mounted-restic-executor.js";
 import { ResticBackupExecutor } from "./restic-executor.js";
@@ -26,6 +28,8 @@ export function createDefaultJobExecutor(
   return new CompositeJobExecutor({
     "restic-backup": withRepositoryLock(new ResticBackupExecutor(config, runner, events)),
     "rclone-transfer": new RcloneTransferExecutor(config, runner, events),
+    "rclone-discovery": new RcloneDiscoveryExecutor(config, runner, events),
+    "managed-transfer": new ManagedTransferExecutor(config, runner, events),
     "rclone-restic-backup": withRepositoryLock(new RcloneMountedResticExecutor(config, runner, events)),
     "restic-maintenance": withRepositoryLock(new ResticMaintenanceExecutor(config, runner, events)),
     "restic-inventory": withRepositoryLock(new ResticInventoryExecutor(config, runner, events)),
