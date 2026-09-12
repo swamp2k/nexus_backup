@@ -36,7 +36,14 @@ jobs:
           for image in nexus-backup-local:ci nexus-backup-agent:ci; do
             test "$(docker image inspect "$image" --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')" = "$CI_VERSION"
             test "$(docker image inspect "$image" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = "$GITHUB_SHA"
+            docker image inspect "$image" --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -Fx "NEXUS_BACKUP_VERSION=$CI_VERSION"
+            docker image inspect "$image" --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -Fx "NEXUS_BACKUP_REVISION=$GITHUB_SHA"
           done
-          test "$(docker image inspect nexus-backup-agent:ci --format '{{ index .Config.Env 0 }}' | cut -d= -f1)" != ""
+          docker image inspect nexus-backup-agent:ci --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -Fx "NEXUS_BACKUP_AGENT_VERSION=$CI_VERSION"
       - name: Validate compose release tag wiring
-        run: NEXUS_BACKUP_IMAGE_TAG="$CI_VERSION" NEXUS_BACKUP_VERSION="$CI_VERSION" NEXUS_BACKUP_REVISION="$GITHUB_SHA" docker compose -f compose.yaml config
+        shell: bash
+        run: |
+          set -euo pipefail
+          NEXUS_BACKUP_IMAGE_TAG="$CI_VERSION" NEXUS_BACKUP_VERSION="$CI_VERSION" NEXUS_BACKUP_REVISION="$GITHUB_SHA" docker compose -f compose.yaml config > /tmp/compose.yml
+          grep -F "image: ghcr.io/swamp2k/nexus-backup-control:$CI_VERSION" /tmp/compose.yml
+          grep -F "image: ghcr.io/swamp2k/nexus-backup-agent:$CI_VERSION" /tmp/compose.yml
