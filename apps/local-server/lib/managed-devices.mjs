@@ -10,7 +10,6 @@ export function createManagedDeviceService({
   now = () => new Date(),
   id = () => `device-${randomUUID()}`,
   token = () => `nxbdev_${randomBytes(32).toString("base64url")}`,
-  installToken = () => `nxbinst_${randomBytes(32).toString("base64url")}`,
   bootstrapTtlMs = WORKSTATION_BOOTSTRAP_TTL_MS,
 } = {}) {
   if (!db) throw new TypeError("db is required");
@@ -30,14 +29,14 @@ export function createManagedDeviceService({
     const name = requireString(input?.name, "name", 1, 100);
     const kind = optionalKind(input?.kind ?? "pcwatch");
     const deviceId = requireId(id(), "generated device id");
-    const bootstrap = kind === "workstation";
-    const rawToken = bootstrap ? requireInstallToken(installToken()) : requireDeviceToken(token());
+    const rawToken = requireDeviceToken(token());
     const at = nowDate(now);
     await db.prepare(`
       INSERT INTO managed_devices(id,name,kind,token_hash,enabled,created_at,updated_at)
       VALUES(?,?,?,?,1,?,?)
     `).bind(deviceId, name, kind, hashToken(rawToken), at.toISOString(), at.toISOString()).run();
     const row = await byId(db, deviceId);
+    const bootstrap = kind === "workstation";
     return {
       device: present(row, nowDate(now)),
       token: rawToken,
@@ -72,16 +71,21 @@ export function createManagedDeviceService({
     const supplied = requireDeviceToken(rawToken);
     const row = await db.prepare("SELECT * FROM managed_devices WHERE token_hash=? LIMIT 1")
       .bind(hashToken(supplied)).first();
-    if (!row || Number(row.enabled) !== 1) throw statusError(401, "Invalid or disabled device token");
+    if (!row || Number(row.enabled) !== 1 || (String(row.kind) === "workstation" && !row.first_seen_at)) {
+      throw statusError(401, "Invalid, disabled, or unbootstrapped device token");
+    }
     return present(row, nowDate(now));
   }
 
   async function report(rawToken, input) {
-    if (typeof rawToken === "string" && rawToken.startsWith("nxbinst_")) {
-      return bootstrapWorkstation(rawToken, input);
+    const supplied = requireDeviceToken(rawToken);
+    const candidate = await db.prepare("SELECT * FROM managed_devices WHERE token_hash=? LIMIT 1")
+      .bind(hashToken(supplied)).first();
+    if (candidate && String(candidate.kind) === "workstation" && !candidate.first_seen_at) {
+      return bootstrapWorkstation(candidate, supplied, input);
     }
 
-    const device = await authenticate(rawToken);
+    const device = await authenticate(supplied);
     const report = normalizeReport(input);
     const at = nowDate(now).toISOString();
     await db.prepare(`
@@ -107,15 +111,10 @@ export function createManagedDeviceService({
     };
   }
 
-  async function bootstrapWorkstation(rawInstallToken, input) {
-    const supplied = requireInstallToken(rawInstallToken);
+  async function bootstrapWorkstation(row, supplied, input) {
+    if (Number(row.enabled) !== 1) throw statusError(401, "Invalid or disabled workstation install credential");
     const report = normalizeReport(input);
     const current = nowDate(now);
-    const row = await db.prepare("SELECT * FROM managed_devices WHERE token_hash=? LIMIT 1")
-      .bind(hashToken(supplied)).first();
-    if (!row || Number(row.enabled) !== 1 || String(row.kind) !== "workstation" || row.first_seen_at) {
-      throw statusError(401, "Invalid or already used workstation install credential");
-    }
     const createdAt = Date.parse(String(row.created_at));
     if (!Number.isFinite(createdAt) || current.getTime() - createdAt > bootstrapTtlMs) {
       throw statusError(401, "Workstation install credential has expired");
@@ -201,10 +200,6 @@ async function byId(db, id) {
 function hashToken(value) { return createHash("sha256").update(value).digest("hex"); }
 function requireDeviceToken(value) {
   if (typeof value !== "string" || !/^nxbdev_[A-Za-z0-9_-]{16,248}$/.test(value)) throw statusError(401, "Invalid device token");
-  return value;
-}
-function requireInstallToken(value) {
-  if (typeof value !== "string" || !/^nxbinst_[A-Za-z0-9_-]{16,248}$/.test(value)) throw statusError(401, "Invalid workstation install credential");
   return value;
 }
 function requireId(value, name) {
