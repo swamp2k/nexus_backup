@@ -41,7 +41,7 @@ export class ResticRestorePreviewExecutor implements JobExecutor {
       "--overwrite",
       overwrite,
     ];
-    if (payload.path && payload.path !== "/") args.push("--include", payload.path);
+    if (payload.path && payload.path !== "/") args.push("--include", escapeIncludePattern(payload.path));
 
     let restored = 0;
     let updated = 0;
@@ -53,7 +53,7 @@ export class ResticRestorePreviewExecutor implements JobExecutor {
       type: "log",
       tool: "restic",
       stream: "stdout",
-      message: `Restore preview started: snapshot ${payload.snapshotId.slice(0, 8)} → target ${payload.targetId}${payload.path ? ` · ${payload.path}` : ""}`,
+      message: `Restore preview started: snapshot ${payload.snapshotId.slice(0, 8)} → target ${payload.targetId}`,
     });
 
     const result = await this.#runner.run({
@@ -150,13 +150,18 @@ function requireSnapshotId(value: unknown): string {
 }
 
 function requireSnapshotPath(value: unknown): string {
-  const path = requireString(value, "path", 1, 4096);
+  if (typeof value !== "string" || value.length < 1 || value.length > 4096) throw new Error("path must be 1-4096 characters");
+  const path = value;
   if (!path.startsWith("/")) throw new Error("snapshot path must be absolute");
   if (path.includes("\0")) throw new Error("snapshot path contains an invalid character");
   if (path.split("/").some((segment) => segment === "." || segment === "..")) {
     throw new Error("snapshot path may not contain dot segments");
   }
   return path.length > 1 ? path.replace(/\/+$/, "") || "/" : "/";
+}
+
+function escapeIncludePattern(path: string): string {
+  return path.replace(/[\\*?[]/g, (character) => `\\${character}`);
 }
 
 function requireString(value: unknown, name: string, min: number, max: number): string {
