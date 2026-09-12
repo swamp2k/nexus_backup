@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createApi, D1AgentStore, D1JobRepository } from "../../control-plane/dist/index.js";
 import { createBackupPlanService } from "../lib/backup-plans.mjs";
+import { createPlanMaintenanceService, enrichPlanJob } from "../lib/plan-maintenance.mjs";
 import { listAgents, listJobs, loadSanitizedAgentConfig } from "../lib/dashboard-data.mjs";
 import { getRuntimeTelemetry, recordRuntimeEvents } from "../lib/runtime-telemetry.mjs";
 import { openSqliteD1 } from "../lib/sqlite-d1.mjs";
@@ -46,7 +47,8 @@ const env = {
   ...(process.env.DEFAULT_LEASE_TTL_MS ? { DEFAULT_LEASE_TTL_MS: process.env.DEFAULT_LEASE_TTL_MS } : {}),
 };
 
-async function enqueueJob({ operationKey, type, payload }) {
+async function enqueueJob(input) {
+  const { operationKey, type, payload } = enrichPlanJob(input);
   const webResponse = await api.fetch(new Request("http://nexus-backup.local/v1/jobs", {
     method: "POST",
     headers: {
@@ -71,6 +73,7 @@ const planService = createBackupPlanService({
   enqueueJob,
   loadAgentConfig: () => loadSanitizedAgentConfig(agentConfigPath),
 });
+const maintenanceService = createPlanMaintenanceService({ db, enqueueJob });
 
 const recoveryTimer = setInterval(() => {
   api.recover(env).catch((error) => log("error", "lease recovery failed", { error: serializeError(error) }));
@@ -86,6 +89,12 @@ async function runPlanScheduler() {
     if (result.enqueued > 0) log("info", "scheduled backup plans enqueued", { count: result.enqueued });
     for (const failure of result.failures) {
       log("error", "scheduled backup plan enqueue failed", failure);
+    }
+
+    const maintenance = await maintenanceService.runDue();
+    if (maintenance.enqueued > 0) log("info", "retention maintenance jobs enqueued", { count: maintenance.enqueued });
+    for (const failure of maintenance.failures) {
+      log("error", "retention maintenance enqueue failed", failure);
     }
   } catch (error) {
     log("error", "backup plan scheduler failed", { error: serializeError(error) });
@@ -103,9 +112,11 @@ const STATIC_FILES = new Map([
   ["/app.js", ["app.js", "text/javascript; charset=utf-8"]],
   ["/telemetry.js", ["telemetry.js", "text/javascript; charset=utf-8"]],
   ["/plans.js", ["plans.js", "text/javascript; charset=utf-8"]],
+  ["/maintenance.js", ["maintenance.js", "text/javascript; charset=utf-8"]],
   ["/styles.css", ["styles.css", "text/css; charset=utf-8"]],
   ["/telemetry.css", ["telemetry.css", "text/css; charset=utf-8"]],
   ["/plans.css", ["plans.css", "text/css; charset=utf-8"]],
+  ["/maintenance.css", ["maintenance.css", "text/css; charset=utf-8"]],
   ["/favicon.svg", ["favicon.svg", "image/svg+xml"]],
 ]);
 
@@ -128,6 +139,7 @@ const server = createServer(async (request, response) => {
         pollIntervalMs: 5000,
         telemetryPollIntervalMs: 1000,
         schedulerIntervalMs,
+        retentionEnforcement: true,
       });
       return;
     }
@@ -149,6 +161,18 @@ const server = createServer(async (request, response) => {
 
     if (path === "/v1/local/plans" && request.method === "POST") {
       sendJson(response, 201, { plan: await planService.create(await readJsonBody(request)) });
+      return;
+    }
+
+    if (path === "/v1/local/maintenance" && request.method === "GET") {
+      sendJson(response, 200, { maintenance: await maintenanceService.list() });
+      return;
+    }
+
+    const planMaintenanceMatch = path.match(/^\/v1\/local\/plans\/([^/]+)\/maintenance$/);
+    if (request.method === "POST" && planMaintenanceMatch) {
+      const planId = decodePathPart(planMaintenanceMatch[1]);
+      sendJson(response, 202, await maintenanceService.runNow(planId));
       return;
     }
 
