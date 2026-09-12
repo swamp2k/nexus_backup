@@ -17,6 +17,8 @@ export interface LocalRestoreTarget {
   path: string;
   label?: string;
   overwrite?: RestoreOverwriteMode;
+  /** Write restores are rejected unless the local target explicitly opts in. Preview remains available. */
+  allowWrite?: boolean;
 }
 
 export type RcloneVfsCacheMode = "off" | "minimal" | "writes" | "full";
@@ -153,6 +155,7 @@ function normalizeRestoreTarget(input: LocalRestoreTarget): LocalRestoreTarget {
     path: requireNonEmpty(input.path, "restore target path"),
     ...(input.label === undefined ? {} : { label: requireNonEmpty(input.label, "restore target label") }),
     overwrite,
+    allowWrite: input.allowWrite === true,
   });
 }
 
