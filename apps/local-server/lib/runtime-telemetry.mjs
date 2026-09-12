@@ -4,6 +4,7 @@ import { normalizeSnapshotBrowseEvent, persistSnapshotBrowse } from "./snapshot-
 
 const TOOLS = new Set(["restic", "rclone"]);
 const STREAMS = new Set(["stdout", "stderr"]);
+const RUNTIME_KINDS = new Set(["standard", "inventory", "snapshot-browse"]);
 const MAX_BATCH = 100;
 const MAX_MESSAGE = 16_000;
 const MAX_SUMMARY_JSON = 65_536;
@@ -15,6 +16,7 @@ export async function recordRuntimeEvents(
     attempt,
     agentId,
     events,
+    runtimeKind = "standard",
     expectedRepositoryId,
     expectedSnapshotId,
     expectedPath,
@@ -23,6 +25,7 @@ export async function recordRuntimeEvents(
   },
 ) {
   const normalized = normalizeRuntimeEvents(events, now, {
+    runtimeKind,
     expectedRepositoryId,
     expectedSnapshotId,
     expectedPath,
@@ -192,6 +195,7 @@ export async function getRuntimeTelemetry(db, jobId, attempt, { logLimit = 200 }
 }
 
 export function normalizeRuntimeEvents(value, now = new Date(), {
+  runtimeKind = "standard",
   expectedRepositoryId,
   expectedSnapshotId,
   expectedPath,
@@ -200,15 +204,19 @@ export function normalizeRuntimeEvents(value, now = new Date(), {
     throw new RangeError("events must be a non-empty array");
   }
   if (value.length > MAX_BATCH) throw new RangeError(`events may contain at most ${MAX_BATCH} items`);
+  if (!RUNTIME_KINDS.has(runtimeKind)) throw new RangeError("runtimeKind is invalid");
+
   let inventoryCount = 0;
   let browseCount = 0;
   return value.map((event) => {
     if (isRecord(event) && event.type === "inventory") {
+      if (runtimeKind !== "inventory") throw new RangeError("inventory events are only accepted from restic-inventory jobs");
       inventoryCount += 1;
       if (inventoryCount > 1) throw new RangeError("runtime batch may contain at most one inventory event");
       return normalizeInventoryEvent(event, expectedRepositoryId, now);
     }
     if (isRecord(event) && event.type === "snapshot-browse") {
+      if (runtimeKind !== "snapshot-browse") throw new RangeError("snapshot browse events are only accepted from restic-browse jobs");
       browseCount += 1;
       if (browseCount > 1) throw new RangeError("runtime batch may contain at most one snapshot browse event");
       return normalizeSnapshotBrowseEvent(event, {
