@@ -21,8 +21,29 @@ jobs:
   images:
     runs-on: ubuntu-latest
     needs: test
+    env:
+      CI_VERSION: 0.0.0-ci
     steps:
       - uses: actions/checkout@v4
-      - run: docker build -f Dockerfile.local -t nexus-backup-local:ci .
-      - run: docker build -f Dockerfile.agent -t nexus-backup-agent:ci .
-      - run: docker compose -f compose.yaml config
+      - name: Build control image
+        run: docker build -f Dockerfile.local --build-arg NEXUS_BACKUP_VERSION="$CI_VERSION" --build-arg NEXUS_BACKUP_REVISION="$GITHUB_SHA" -t nexus-backup-local:ci .
+      - name: Build agent image
+        run: docker build -f Dockerfile.agent --build-arg NEXUS_BACKUP_VERSION="$CI_VERSION" --build-arg NEXUS_BACKUP_REVISION="$GITHUB_SHA" -t nexus-backup-agent:ci .
+      - name: Verify image version metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          for image in nexus-backup-local:ci nexus-backup-agent:ci; do
+            test "$(docker image inspect "$image" --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')" = "$CI_VERSION"
+            test "$(docker image inspect "$image" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = "$GITHUB_SHA"
+            docker image inspect "$image" --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -Fx "NEXUS_BACKUP_VERSION=$CI_VERSION"
+            docker image inspect "$image" --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -Fx "NEXUS_BACKUP_REVISION=$GITHUB_SHA"
+          done
+          docker image inspect nexus-backup-agent:ci --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -Fx "NEXUS_BACKUP_AGENT_VERSION=$CI_VERSION"
+      - name: Validate compose release tag wiring
+        shell: bash
+        run: |
+          set -euo pipefail
+          NEXUS_BACKUP_IMAGE_TAG="$CI_VERSION" NEXUS_BACKUP_VERSION="$CI_VERSION" NEXUS_BACKUP_REVISION="$GITHUB_SHA" docker compose -f compose.yaml config > /tmp/compose.yml
+          grep -F "image: ghcr.io/swamp2k/nexus-backup-control:$CI_VERSION" /tmp/compose.yml
+          grep -F "image: ghcr.io/swamp2k/nexus-backup-agent:$CI_VERSION" /tmp/compose.yml

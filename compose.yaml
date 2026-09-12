@@ -2,9 +2,13 @@ name: nexus-backup
 
 services:
   control:
+    image: ghcr.io/swamp2k/nexus-backup-control:${NEXUS_BACKUP_IMAGE_TAG:-latest}
     build:
       context: .
       dockerfile: Dockerfile.local
+      args:
+        NEXUS_BACKUP_VERSION: ${NEXUS_BACKUP_VERSION:-dev}
+        NEXUS_BACKUP_REVISION: ${NEXUS_BACKUP_REVISION:-unknown}
     restart: unless-stopped
     ports:
       - "${NEXUS_BACKUP_PORT:-8787}:8787"
@@ -22,9 +26,13 @@ services:
       retries: 6
 
   agent:
+    image: ghcr.io/swamp2k/nexus-backup-agent:${NEXUS_BACKUP_IMAGE_TAG:-latest}
     build:
       context: .
       dockerfile: Dockerfile.agent
+      args:
+        NEXUS_BACKUP_VERSION: ${NEXUS_BACKUP_VERSION:-dev}
+        NEXUS_BACKUP_REVISION: ${NEXUS_BACKUP_REVISION:-unknown}
     restart: unless-stopped
     depends_on:
       control:

@@ -9,6 +9,15 @@ RUN npm ci --ignore-scripts
 RUN npm run build
 
 FROM node:22-alpine AS runtime
+ARG NEXUS_BACKUP_VERSION=dev
+ARG NEXUS_BACKUP_REVISION=unknown
+
+LABEL org.opencontainers.image.title="Nexus Backup Agent" \
+      org.opencontainers.image.description="Local storage and execution agent for Nexus Backup" \
+      org.opencontainers.image.source="https://github.com/swamp2k/nexus_backup" \
+      org.opencontainers.image.version="$NEXUS_BACKUP_VERSION" \
+      org.opencontainers.image.revision="$NEXUS_BACKUP_REVISION"
+
 RUN apk add --no-cache ca-certificates fuse3 rclone restic tini
 
 WORKDIR /app
@@ -22,5 +31,8 @@ COPY config/agent.example.json ./defaults/agent.json
 RUN mkdir -p /app/node_modules/@nexus-backup /config /state/mounts /state/rclone-vfs /state/restic-cache /data /backup /restore \
     && ln -s /app/packages/core /app/node_modules/@nexus-backup/core
 
-ENV NEXUS_BACKUP_CONFIG=/config/agent.json
+ENV NEXUS_BACKUP_VERSION=$NEXUS_BACKUP_VERSION \
+    NEXUS_BACKUP_REVISION=$NEXUS_BACKUP_REVISION \
+    NEXUS_BACKUP_AGENT_VERSION=$NEXUS_BACKUP_VERSION \
+    NEXUS_BACKUP_CONFIG=/config/agent.json
 ENTRYPOINT ["/sbin/tini", "--", "/app/apps/agent/bin/docker-entrypoint.sh"]
