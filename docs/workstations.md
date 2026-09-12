@@ -4,21 +4,34 @@ Nexus Backup workstation support is a separate Windows data-plane agent. PCWatch
 
 ## Enroll
 
-In **Workstations**, choose **Add workstation**. Nexus creates a managed-device credential and shows a one-line elevated PowerShell command:
+In **Workstations**, choose **Add workstation**. Nexus creates a short-lived bootstrap credential and shows a one-line elevated PowerShell command:
 
 ```powershell
 $env:NEXUS_BACKUP_URL='http://nexus-host:8787';$env:NEXUS_BACKUP_TOKEN='nxbdev_...';irm 'http://nexus-host:8787/install.ps1'|iex
 ```
 
-The command is safe to run again for repair/update. The device credential is embedded in the command and shown only once; Nexus stores only its SHA-256 hash.
+The command keeps the simple `nxbdev_` format, but the credential embedded in a fresh enrollment command is **not** the durable workstation credential. It is a one-shot bootstrap credential that:
+
+- is stored by Nexus only as a SHA-256 hash;
+- expires 15 minutes after the workstation entry is created;
+- cannot authenticate the normal workstation poll/status/job APIs before bootstrap;
+- is atomically consumed on the first installer report;
+- is immediately rotated to a new long-lived device token returned directly to the target PC;
+- cannot be reused after the rotation.
+
+This makes the generated command suitable for a launcher such as PCWatch: the launcher can carry a short-lived enrollment credential without ever receiving the durable Nexus workstation token.
+
+Repair/update is different from first enrollment. Once installed, the machine keeps its durable device token in the protected local configuration, so rerunning `install.ps1` uses that local token rather than requiring or consuming another bootstrap credential.
 
 The installer:
 
 - requires Administrator/System rights and Windows x64;
+- exchanges a fresh bootstrap credential directly with Nexus before storing the durable device token;
 - downloads the latest stable Nexus workstation executable and verifies its published SHA-256 checksum;
 - installs pinned Restic 0.19.1 and verifies its pinned checksum;
 - stores binaries below `%ProgramFiles%\Nexus Backup Workstation`;
 - stores local configuration/state below `%ProgramData%\NexusBackup`;
+- restricts the local data directory to SYSTEM and local Administrators;
 - registers an AtStartup scheduled task running as SYSTEM;
 - preserves the local repository/password configuration on repair/update.
 
