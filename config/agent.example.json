@@ -20,7 +20,8 @@
       "id": "restore-staging",
       "label": "Restore staging",
       "path": "/restore",
-      "overwrite": "never"
+      "overwrite": "never",
+      "allowWrite": true
     }
   ],
   "rcloneEndpoints": [
