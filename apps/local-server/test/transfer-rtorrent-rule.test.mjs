@@ -19,7 +19,13 @@ async function fixture(){
   const queued=[];let seq=0;
   const service=createTransferRuleService({
     db,
-    enqueueJob:async input=>{queued.push(input);return{id:`job-${++seq}`,state:"queued"};},
+    enqueueJob:async input=>{
+      const id=`job-${++seq}`,at="2026-09-12T10:00:00.000Z";
+      queued.push(input);
+      await db.prepare(`INSERT INTO backup_jobs(id,operation_key,type,state,attempt,revision,payload_json,created_at,updated_at,last_mutation_id) VALUES(?,?,?,'queued',0,0,?,?,?,?)`)
+        .bind(id,input.operationKey,input.type,JSON.stringify(input.payload),at,at,`mutation-${id}`).run();
+      return{id,state:"queued"};
+    },
     loadAgentConfig:async()=>config,
     now:()=>new Date("2026-09-12T10:00:00.000Z"),
     id:()=>"rule-1",
