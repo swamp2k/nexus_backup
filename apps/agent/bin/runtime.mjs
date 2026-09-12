@@ -269,6 +269,14 @@ function compactEventForLog(event) {
       truncated: event.truncated,
     };
   }
+  if (event?.type === "transfer-discovery") {
+    return {
+      type: "transfer-discovery",
+      tool: event.tool,
+      ruleId: event.ruleId,
+      entries: Array.isArray(event.entries) ? event.entries.length : 0,
+    };
+  }
   return event;
 }
 
