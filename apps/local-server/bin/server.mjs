@@ -10,6 +10,7 @@ import { createPlanMaintenanceService, enrichPlanJob } from "../lib/plan-mainten
 import { listAgents, listJobs, loadSanitizedAgentConfig } from "../lib/dashboard-data.mjs";
 import { listRepositoryInventories, queueRepositoryInventory } from "../lib/repository-inventory.mjs";
 import { getRuntimeTelemetry, recordRuntimeEvents } from "../lib/runtime-telemetry.mjs";
+import { getSnapshotBrowse, queueRestorePreview, queueSnapshotBrowse } from "../lib/snapshot-restore.mjs";
 import { openSqliteD1 } from "../lib/sqlite-d1.mjs";
 
 const configDir = process.env.NEXUS_BACKUP_CONFIG_DIR?.trim() || "/config";
@@ -144,6 +145,9 @@ const server = createServer(async (request, response) => {
         schedulerIntervalMs,
         retentionEnforcement: true,
         repositoryInventory: true,
+        snapshotBrowser: true,
+        restorePreview: true,
+        restoreExecution: false,
       });
       return;
     }
@@ -162,6 +166,7 @@ const server = createServer(async (request, response) => {
       const config = await loadSanitizedAgentConfig(agentConfigPath);
       sendJson(response, 200, {
         available: config.available,
+        restoreTargets: config.restoreTargets ?? [],
         repositories: await listRepositoryInventories(db, config.repositories ?? []),
       });
       return;
@@ -175,6 +180,52 @@ const server = createServer(async (request, response) => {
       sendJson(response, 202, await queueRepositoryInventory(db, {
         repositoryId,
         repositories: config.repositories ?? [],
+        enqueueJob,
+      }));
+      return;
+    }
+
+    const snapshotBrowseMatch = path.match(/^\/v1\/local\/repositories\/([^/]+)\/snapshots\/([^/]+)\/browse$/);
+    if (snapshotBrowseMatch) {
+      const repositoryId = decodePathPart(snapshotBrowseMatch[1]);
+      const snapshotId = decodePathPart(snapshotBrowseMatch[2]);
+      if (request.method === "GET") {
+        sendJson(response, 200, await getSnapshotBrowse(db, {
+          repositoryId,
+          snapshotId,
+          path: requestUrl.searchParams.get("path") ?? "/",
+        }));
+        return;
+      }
+      if (request.method === "POST") {
+        const config = await loadSanitizedAgentConfig(agentConfigPath);
+        if (!config.available) throw statusError(409, "Agent config is unavailable");
+        const body = await readJsonBody(request);
+        sendJson(response, 202, await queueSnapshotBrowse(db, {
+          repositoryId,
+          snapshotId,
+          path: typeof body.path === "string" ? body.path : "/",
+          repositories: config.repositories ?? [],
+          enqueueJob,
+        }));
+        return;
+      }
+    }
+
+    const restorePreviewMatch = path.match(/^\/v1\/local\/repositories\/([^/]+)\/snapshots\/([^/]+)\/preview$/);
+    if (request.method === "POST" && restorePreviewMatch) {
+      const repositoryId = decodePathPart(restorePreviewMatch[1]);
+      const snapshotId = decodePathPart(restorePreviewMatch[2]);
+      const config = await loadSanitizedAgentConfig(agentConfigPath);
+      if (!config.available) throw statusError(409, "Agent config is unavailable");
+      const body = await readJsonBody(request);
+      sendJson(response, 202, await queueRestorePreview(db, {
+        repositoryId,
+        snapshotId,
+        targetId: body.targetId,
+        path: body.path,
+        repositories: config.repositories ?? [],
+        restoreTargets: config.restoreTargets ?? [],
         enqueueJob,
       }));
       return;
@@ -281,9 +332,17 @@ const server = createServer(async (request, response) => {
         return;
       }
 
-      const expectedRepositoryId = job.type === "restic-inventory" && isRecord(job.payload)
-        && typeof job.payload.repositoryId === "string"
-        ? job.payload.repositoryId
+      const jobPayload = isRecord(job.payload) ? job.payload : {};
+      const inventoryJob = job.type === "restic-inventory";
+      const browseJob = job.type === "restic-browse";
+      const expectedRepositoryId = (inventoryJob || browseJob) && typeof jobPayload.repositoryId === "string"
+        ? jobPayload.repositoryId
+        : undefined;
+      const expectedSnapshotId = browseJob && typeof jobPayload.snapshotId === "string"
+        ? jobPayload.snapshotId
+        : undefined;
+      const expectedPath = browseJob && typeof jobPayload.path === "string"
+        ? jobPayload.path
         : undefined;
       const accepted = await recordRuntimeEvents(db, {
         jobId,
@@ -291,6 +350,8 @@ const server = createServer(async (request, response) => {
         agentId: agent.id,
         events: body.events,
         expectedRepositoryId,
+        expectedSnapshotId,
+        expectedPath,
       });
       await agentStore.touch(agent.id, new Date());
       sendJson(response, 202, { accepted });
