@@ -60,7 +60,7 @@ export async function loadSanitizedAgentConfig(path) {
     raw = await readFile(path, "utf8");
   } catch (error) {
     if (error?.code === "ENOENT") {
-      return { available: false, sources: [], repositories: [], endpoints: [] };
+      return { available: false, sources: [], repositories: [], restoreTargets: [], endpoints: [] };
     }
     throw error;
   }
@@ -74,6 +74,7 @@ export async function loadSanitizedAgentConfig(path) {
       invalid: true,
       sources: [],
       repositories: [],
+      restoreTargets: [],
       endpoints: [],
     };
   }
@@ -84,6 +85,7 @@ export async function loadSanitizedAgentConfig(path) {
       invalid: true,
       sources: [],
       repositories: [],
+      restoreTargets: [],
       endpoints: [],
     };
   }
@@ -92,6 +94,7 @@ export async function loadSanitizedAgentConfig(path) {
     available: true,
     sources: sanitizeSources(value.sources),
     repositories: sanitizeRepositories(value.resticRepositories),
+    restoreTargets: sanitizeRestoreTargets(value.restoreTargets),
     endpoints: sanitizeEndpoints(value.rcloneEndpoints),
   };
 }
@@ -122,6 +125,21 @@ function sanitizeRepositories(value) {
         && repository.environment.RESTIC_CACHE_DIR.trim().length > 0,
     }))
     .filter((repository) => repository.id);
+}
+
+function sanitizeRestoreTargets(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter(isRecord)
+    .map((target) => {
+      const id = stringOrEmpty(target.id);
+      const label = stringOrEmpty(target.label) || id;
+      const overwrite = ["always", "if-changed", "if-newer", "never"].includes(target.overwrite)
+        ? target.overwrite
+        : "never";
+      return { id, label, overwrite };
+    })
+    .filter((target) => target.id);
 }
 
 function sanitizeEndpoints(value) {
