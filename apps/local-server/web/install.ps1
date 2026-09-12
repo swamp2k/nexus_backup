@@ -10,9 +10,8 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 if (-not [Environment]::Is64BitOperatingSystem) { Fail 'Workstation agent v1 supports Windows x64 only.' }
 
 $serverUrl = [string]$env:NEXUS_BACKUP_URL
-$deviceToken = [string]$env:NEXUS_BACKUP_TOKEN
+$bootstrapToken = [string]$env:NEXUS_BACKUP_TOKEN
 if ([string]::IsNullOrWhiteSpace($serverUrl)) { Fail 'NEXUS_BACKUP_URL is required.' }
-if ([string]::IsNullOrWhiteSpace($deviceToken) -or -not $deviceToken.StartsWith('nxbdev_')) { Fail 'NEXUS_BACKUP_TOKEN is required.' }
 $serverUrl = $serverUrl.TrimEnd('/')
 
 $installDir = Join-Path $env:ProgramFiles 'Nexus Backup Workstation'
@@ -29,6 +28,42 @@ New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
 # ordinary Users read access; retain only SYSTEM and local Administrators.
 & icacls.exe $dataDir '/inheritance:r' '/grant:r' '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '/T' '/C' | Out-Null
 if ($LASTEXITCODE -ne 0) { Fail 'Could not secure the local NexusBackup data directory ACL.' }
+
+$old = $null
+$deviceToken = ''
+if (Test-Path $configPath) {
+  try {
+    $old = Get-Content -Raw -Path $configPath | ConvertFrom-Json
+    if ($null -ne $old.deviceToken -and ([string]$old.deviceToken).StartsWith('nxbdev_')) {
+      $deviceToken = [string]$old.deviceToken
+    }
+  } catch { Write-Warning 'Existing workstation.json was invalid; replacing it with safe defaults.' }
+}
+
+# A fresh workstation enrollment token is valid for only a short window and can be
+# used once. Exchange it directly with Nexus; PCWatch never receives the resulting
+# long-lived device token.
+if ([string]::IsNullOrWhiteSpace($deviceToken)) {
+  if ([string]::IsNullOrWhiteSpace($bootstrapToken) -or -not $bootstrapToken.StartsWith('nxbdev_')) {
+    Fail 'A fresh NEXUS_BACKUP_TOKEN enrollment credential is required for first install.'
+  }
+  $bootstrapBody = @{
+    version = 'installer'
+    hostname = [Environment]::MachineName
+    platform = 'windows/amd64'
+    capabilities = @('workstation.bootstrap.v1')
+  } | ConvertTo-Json -Depth 4
+  try {
+    $bootstrap = Invoke-RestMethod -UseBasicParsing -Method Post -Uri "$serverUrl/v1/device/report" `
+      -Headers @{ Authorization = "Bearer $bootstrapToken" } -ContentType 'application/json' -Body $bootstrapBody
+  } catch {
+    Fail "Could not enroll workstation. The install credential may be expired or already used. $($_.Exception.Message)"
+  }
+  $deviceToken = [string]$bootstrap.deviceToken
+  if ([string]::IsNullOrWhiteSpace($deviceToken) -or -not $deviceToken.StartsWith('nxbdev_')) {
+    Fail 'Nexus did not return a workstation device token.'
+  }
+}
 
 try { Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue } catch {}
 Start-Sleep -Milliseconds 300
@@ -81,13 +116,10 @@ $config = [ordered]@{
   reportSeconds = 60
   autoInit = $true
 }
-if (Test-Path $configPath) {
-  try {
-    $old = Get-Content -Raw -Path $configPath | ConvertFrom-Json
-    foreach ($name in @('repository','passwordFile','resticPath','pollSeconds','reportSeconds','autoInit')) {
-      if ($null -ne $old.$name) { $config[$name] = $old.$name }
-    }
-  } catch { Write-Warning 'Existing workstation.json was invalid; replacing it with safe defaults.' }
+if ($null -ne $old) {
+  foreach ($name in @('repository','passwordFile','resticPath','pollSeconds','reportSeconds','autoInit')) {
+    if ($null -ne $old.$name) { $config[$name] = $old.$name }
+  }
 }
 if (-not [string]::IsNullOrWhiteSpace([string]$env:NEXUS_BACKUP_REPOSITORY)) {
   $config['repository'] = [string]$env:NEXUS_BACKUP_REPOSITORY

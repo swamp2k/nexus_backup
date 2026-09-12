@@ -14,11 +14,12 @@ async function fixture(){
   const db=await openSqliteD1({filename:join(dir,"backup.sqlite"),migrationsDir});
   let now=new Date("2026-09-12T19:00:00.000Z");
   let runNumber=0;
+  let tokenNumber=0;
   const devices=createManagedDeviceService({
     db,
     now:()=>new Date(now),
     id:()=>"device-workstation-1",
-    token:()=>"nxbdev_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG",
+    token:()=>`nxbdev_${String(++tokenNumber).padStart(48,"x")}`,
   });
   const service=createWorkstationService({
     db,
@@ -29,7 +30,8 @@ async function fixture(){
     leaseMs:60_000,
   });
   const created=await devices.create({name:"Balder PC",kind:"workstation"});
-  return{dir,db,devices,service,token:created.token,device:created.device,setNow:value=>{now=new Date(value)},async close(){db.close();await rm(dir,{recursive:true,force:true});}};
+  const bootstrap=await devices.report(created.token,{version:"installer",hostname:"balder-pc",platform:"windows/amd64",capabilities:["workstation.bootstrap.v1"]});
+  return{dir,db,devices,service,token:bootstrap.deviceToken,device:bootstrap.device,setNow:value=>{now=new Date(value)},async close(){db.close();await rm(dir,{recursive:true,force:true});}};
 }
 
 const policy={

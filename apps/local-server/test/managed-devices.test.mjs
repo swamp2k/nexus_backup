@@ -27,12 +27,48 @@ test("device tokens are returned once and stored only as hashes",async()=>{
   try{
     const created=await f.service.create({name:"Balder PC",kind:"pcwatch"});
     assert.match(created.token,/^nxbdev_/);
+    assert.equal(created.tokenKind,"device");
     assert.equal(created.device.online,false);
     const row=await f.db.prepare("SELECT token_hash FROM managed_devices WHERE id=?").bind(created.device.id).first();
     assert.equal(typeof row.token_hash,"string");
     assert.equal(row.token_hash.length,64);
     assert.notEqual(row.token_hash,created.token);
     assert.doesNotMatch(JSON.stringify(await f.service.list()),/nxbdev_/);
+  }finally{await f.close();}
+});
+
+test("workstation enrollment credential is one-shot and rotates before normal auth",async()=>{
+  const f=await fixture();
+  try{
+    const created=await f.service.create({name:"Balder PC",kind:"workstation"});
+    assert.equal(created.tokenKind,"install");
+    assert.ok(created.expiresAt);
+    await assert.rejects(()=>f.service.authenticate(created.token),/unbootstrapped/i);
+
+    f.setNow("2026-09-12T19:05:00Z");
+    const bootstrap=await f.service.report(created.token,{
+      version:"installer",
+      hostname:"balder-pc",
+      platform:"windows/amd64",
+      capabilities:["workstation.bootstrap.v1"],
+    });
+    assert.match(bootstrap.deviceToken,/^nxbdev_/);
+    assert.notEqual(bootstrap.deviceToken,created.token);
+    assert.equal(bootstrap.device.hostname,"balder-pc");
+    await assert.rejects(()=>f.service.report(created.token,{version:"installer"}),/Invalid.*device token/);
+
+    const normal=await f.service.report(bootstrap.deviceToken,{version:"1.0.0",hostname:"balder-pc",platform:"windows/amd64"});
+    assert.equal(normal.device.version,"1.0.0");
+    assert.equal(normal.deviceToken,undefined);
+  }finally{await f.close();}
+});
+
+test("workstation enrollment credential expires after fifteen minutes",async()=>{
+  const f=await fixture();
+  try{
+    const created=await f.service.create({name:"Old installer",kind:"workstation"});
+    f.setNow("2026-09-12T19:15:01Z");
+    await assert.rejects(()=>f.service.report(created.token,{version:"installer"}),/expired/i);
   }finally{await f.close();}
 });
 
@@ -66,12 +102,12 @@ test("disable and token rotation invalidate previous device credentials",async()
   try{
     const created=await f.service.create({name:"Martin PC"});
     await f.service.update(created.device.id,{enabled:false});
-    await assert.rejects(()=>f.service.report(created.token,{version:"1.0.0"}),/Invalid or disabled device token/);
+    await assert.rejects(()=>f.service.report(created.token,{version:"1.0.0"}),/Invalid.*device token/);
 
     await f.service.update(created.device.id,{enabled:true});
     const rotated=await f.service.rotateToken(created.device.id);
     assert.notEqual(rotated.token,created.token);
-    await assert.rejects(()=>f.service.report(created.token,{version:"1.0.0"}),/Invalid or disabled device token/);
+    await assert.rejects(()=>f.service.report(created.token,{version:"1.0.0"}),/Invalid.*device token/);
     const report=await f.service.report(rotated.token,{version:"1.0.1",hostname:"martin-pc",platform:"windows"});
     assert.equal(report.device.hostname,"martin-pc");
     assert.equal(report.device.platform,"windows");
