@@ -190,7 +190,7 @@ export function normalizeTransferGroupsEvent(value, { expectedRuleId, now = new 
     seenKeys.add(key);
     seenRoots.add(root);
     return { kind: "torrent", key, name, root };
-  });
+  }).sort((left, right) => left.root.length - right.root.length || left.root.localeCompare(right.root));
   if (JSON.stringify(groups).length > MAX_GROUP_JSON) throw new RangeError("transfer groups payload is too large");
   return { type: "transfer-groups", tool: "rclone", ruleId, at: normalizeAt(value.at, now), groups };
 }
