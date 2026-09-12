@@ -45,7 +45,6 @@ export interface TransferGroupEvent {
   key: string;
   name: string;
   root: string;
-  paths: readonly string[];
 }
 
 export type ExecutionEvent =
