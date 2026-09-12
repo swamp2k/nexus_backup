@@ -6,6 +6,7 @@ import { NodeCommandRunner, type CommandRunner } from "./process-runner.js";
 import { RcloneTransferExecutor } from "./rclone-executor.js";
 import { RcloneMountedResticExecutor } from "./rclone-mounted-restic-executor.js";
 import { ResticBackupExecutor } from "./restic-executor.js";
+import { ResticInventoryExecutor } from "./restic-inventory-executor.js";
 import { ResticMaintenanceExecutor } from "./restic-maintenance-executor.js";
 import { ResticRepositoryGate, ResticRepositoryLockedExecutor } from "./restic-repository-lock.js";
 import type { AgentRuntimeConfig } from "./runtime-config.js";
@@ -24,5 +25,6 @@ export function createDefaultJobExecutor(
     "rclone-transfer": new RcloneTransferExecutor(config, runner, events),
     "rclone-restic-backup": withRepositoryLock(new RcloneMountedResticExecutor(config, runner, events)),
     "restic-maintenance": withRepositoryLock(new ResticMaintenanceExecutor(config, runner, events)),
+    "restic-inventory": withRepositoryLock(new ResticInventoryExecutor(config, runner, events)),
   });
 }
