@@ -1,6 +1,6 @@
 # Transfer rules
 
-Nexus Backup's M5 transfer engine ports the proven behavior of Copyarr into the existing Nexus job engine. Discovery and transfer work are normal leased Nexus jobs, while rule/object state is stored in the local SQLite database.
+Nexus Backup's M5 transfer engine ports the proven behavior of Copyarr into the existing Nexus job engine. Discovery, transfer and cleanup work are normal leased Nexus jobs, while rule/object state is stored in the local SQLite database.
 
 ## Rule model
 
@@ -17,7 +17,7 @@ A transfer rule describes:
 - exact-size verification
 - Copyarr-style multi-thread streams/cutoff
 - optional per-rule rclone tuning arguments
-- cleanup-days policy for a later maintenance slice
+- destination cleanup window
 
 Endpoints are referenced only by configured IDs. rclone credentials remain in the agent's rclone config. rTorrent password bytes are read from an agent-only `passwordFile`; the browser receives only the rTorrent endpoint ID.
 
@@ -107,6 +107,20 @@ Source deletion is impossible until final verification has succeeded. Move mode 
 
 Stale staging is purged before a transfer retry. Empty staging cleanup after success is best-effort and cannot turn a verified transfer into a failure.
 
+## Destination cleanup
+
+When `cleanupDays > 0`, a completed transfer records `cleanup_after` for that object generation. A separate `managed-cleanup` job is queued only after that time.
+
+Cleanup is deliberately provenance-safe:
+
+1. the cleanup payload contains the original object key, relative path and committed byte size;
+2. the agent stats the exact destination file before deletion;
+3. if the current size no longer matches the committed generation, deletion is refused permanently with `cleanup refused modified destination`;
+4. otherwise only that exact file is deleted;
+5. transient cleanup failures use the transfer rule's bounded retry policy.
+
+An active cleanup job also locks the corresponding transfer-object row against deletion. Structural rule edits cannot erase that provenance while a cleanup job is still capable of deleting the destination.
+
 ## Multi-thread behavior
 
 Defaults mirror the Copyarr recipe:
@@ -118,13 +132,15 @@ Defaults mirror the Copyarr recipe:
 
 If rclone reports that multi-thread transfer is unsupported, Nexus retries that file once without multi-thread flags. Other rclone failures are surfaced normally.
 
-Per-rule rclone arguments are applied only to the copy-to-staging phase. The agent reserves safety-critical flags so rule configuration cannot replace Nexus's config path, turn on dry-run, override telemetry/multi-thread controls, redirect overwrite backups, start rclone RC/dumps, or introduce command-backed password handling. Final commit, verification, source deletion and staging cleanup use Nexus-owned arguments only.
+Per-rule rclone arguments are applied only to the copy-to-staging phase. The agent reserves safety-critical flags so rule configuration cannot replace Nexus's config path, turn on dry-run, override telemetry/multi-thread controls, redirect overwrite backups, start rclone RC/dumps, or introduce command-backed password handling. Final commit, verification, source deletion, staging cleanup and managed destination cleanup use Nexus-owned arguments only.
 
 ## Restart and retry behavior
 
 Rule state, object generations, readiness and job IDs live in SQLite. A restart does not forget what was discovered or committed.
 
 Each transfer attempt has a deterministic operation key derived from rule ID, object key and attempt number. Failed/partial/interrupted jobs enter `retry_wait` until the configured retry time, up to the bounded attempt budget. Cancelled objects are not retried automatically.
+
+Cleanup jobs have their own deterministic attempt keys and retry counters so a cleanup retry never looks like a transfer retry.
 
 ## Dashboard
 
@@ -134,18 +150,15 @@ The Transfers page exposes:
 - source -> destination route
 - stability or rTorrent readiness policy
 - scan/bootstrap/retry settings
-- discovered, queued, completed and failed counts/bytes
+- discovered, queued, completed, failed and cleaned lifecycle state
 - manual Scan now
 - recent object generations with readiness reason
 - live transfer progress from normal Nexus runtime telemetry
 
 The dashboard receives only rTorrent endpoint IDs, never RPC URLs, usernames, password-file contents or absolute rTorrent source paths.
 
-## Deferred boundaries
+## Deferred boundary
 
-Two destructive/atomicity-sensitive behaviors remain intentionally deferred:
+**Grouped torrent jobs** remain intentionally deferred. rTorrent readiness gating is active, but Nexus still schedules one file per transfer job. Grouped copy can come first; grouped move must wait for explicit partial-source-delete recovery semantics.
 
-- **destination cleanup:** `cleanup_days` is persisted as policy, but Nexus does not delete old committed destination files yet. Cleanup must first carry the same provenance/identity guarantees as Copyarr.
-- **grouped torrent jobs:** readiness gating is active, but Nexus still schedules one file per transfer job. Grouped copy can come first; grouped move must wait for explicit partial-source-delete recovery semantics.
-
-These boundaries are deliberate: cleanup or grouped source deletion must not appear as hidden side effects of an otherwise successful copy job.
+That boundary is deliberate: grouped source deletion must not appear as a hidden side effect of an otherwise successful copy job.
