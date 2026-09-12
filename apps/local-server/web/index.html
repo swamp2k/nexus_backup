@@ -8,70 +8,38 @@
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/styles.css">
   <link rel="stylesheet" href="/telemetry.css">
+  <link rel="stylesheet" href="/plans.css">
 </head>
 <body>
   <div class="app-shell">
     <aside class="sidebar" id="sidebar">
       <div class="brand">
-        <div class="brand-mark" aria-hidden="true">
-          <svg viewBox="0 0 24 24"><path d="M6.5 7.25A4.75 4.75 0 0 1 11.25 2.5h1.5a4.75 4.75 0 0 1 4.75 4.75v.6a4.5 4.5 0 0 1 2.5 4.03v1.37A4.75 4.75 0 0 1 15.25 18H15v1.25A2.75 2.75 0 0 1 12.25 22h-.5A2.75 2.75 0 0 1 9 19.25V18h-.25A4.75 4.75 0 0 1 4 13.25v-1.37a4.5 4.5 0 0 1 2.5-4.03v-.6Zm2 0v1.92l-.78.33A2.5 2.5 0 0 0 6 11.88v1.37A2.75 2.75 0 0 0 8.75 16h6.5A2.75 2.75 0 0 0 18 13.25v-1.37a2.5 2.5 0 0 0-1.72-2.38l-.78-.33V7.25a2.75 2.75 0 0 0-2.75-2.75h-1.5A2.75 2.75 0 0 0 8.5 7.25Zm2.5 10.75v1.25c0 .41.34.75.75.75h.5c.41 0 .75-.34.75-.75V18h-2Z"/></svg>
-        </div>
-        <div>
-          <strong>Nexus Backup</strong>
-          <span>Local-first</span>
-        </div>
+        <div class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M6.5 7.25A4.75 4.75 0 0 1 11.25 2.5h1.5a4.75 4.75 0 0 1 4.75 4.75v.6a4.5 4.5 0 0 1 2.5 4.03v1.37A4.75 4.75 0 0 1 15.25 18H15v1.25A2.75 2.75 0 0 1 12.25 22h-.5A2.75 2.75 0 0 1 9 19.25V18h-.25A4.75 4.75 0 0 1 4 13.25v-1.37a4.5 4.5 0 0 1 2.5-4.03v-.6Zm2 0v1.92l-.78.33A2.5 2.5 0 0 0 6 11.88v1.37A2.75 2.75 0 0 0 8.75 16h6.5A2.75 2.75 0 0 0 18 13.25v-1.37a2.5 2.5 0 0 0-1.72-2.38l-.78-.33V7.25a2.75 2.75 0 0 0-2.75-2.75h-1.5A2.75 2.75 0 0 0 8.5 7.25Zm2.5 10.75v1.25c0 .41.34.75.75.75h.5c.41 0 .75-.34.75-.75V18h-2Z"/></svg></div>
+        <div><strong>Nexus Backup</strong><span>Local-first</span></div>
       </div>
-
       <nav class="nav" aria-label="Primary">
         <button class="nav-item active" data-view="overview"><span class="nav-icon">⌂</span><span>Overview</span></button>
         <button class="nav-item" data-view="jobs"><span class="nav-icon">↻</span><span>Jobs</span></button>
+        <button class="nav-item" id="plans-nav"><span class="nav-icon">◷</span><span>Plans</span></button>
         <button class="nav-item" data-view="sources"><span class="nav-icon">⇤</span><span>Sources</span></button>
         <button class="nav-item" data-view="destinations"><span class="nav-icon">⇥</span><span>Destinations</span></button>
         <button class="nav-item" data-view="repositories"><span class="nav-icon">▣</span><span>Repositories</span></button>
         <button class="nav-item" data-view="agent"><span class="nav-icon">◉</span><span>Agent</span></button>
         <button class="nav-item" data-view="settings"><span class="nav-icon">⚙</span><span>Settings</span></button>
       </nav>
-
-      <div class="sidebar-footer">
-        <div class="connection-pill" id="connection-pill"><span class="status-dot"></span><span>Connecting…</span></div>
-        <span class="sidebar-note">No cloud dependency</span>
-      </div>
+      <div class="sidebar-footer"><div class="connection-pill" id="connection-pill"><span class="status-dot"></span><span>Connecting…</span></div><span class="sidebar-note">No cloud dependency</span></div>
     </aside>
-
     <main class="main">
-      <header class="topbar">
-        <button class="icon-button mobile-only" id="menu-button" aria-label="Toggle menu">☰</button>
-        <div><p class="eyebrow" id="page-eyebrow">Nexus Backup</p><h1 id="page-title">Overview</h1></div>
-        <div class="topbar-actions">
-          <button class="icon-button" id="theme-button" aria-label="Toggle theme">◐</button>
-          <button class="button ghost" id="refresh-button">Refresh</button>
-          <button class="button primary" id="new-job-button">New job</button>
-        </div>
-      </header>
+      <header class="topbar"><button class="icon-button mobile-only" id="menu-button" aria-label="Toggle menu">☰</button><div><p class="eyebrow" id="page-eyebrow">Nexus Backup</p><h1 id="page-title">Overview</h1></div><div class="topbar-actions"><button class="icon-button" id="theme-button" aria-label="Toggle theme">◐</button><button class="button ghost" id="refresh-button">Refresh</button><button class="button primary" id="new-job-button">New job</button></div></header>
       <section class="content" id="content" aria-live="polite"><div class="loading-card">Loading Nexus Backup…</div></section>
     </main>
   </div>
-
   <div class="scrim" id="scrim"></div>
-  <div class="modal-backdrop hidden" id="job-modal">
-    <section class="modal" role="dialog" aria-modal="true" aria-labelledby="job-modal-title">
-      <div class="modal-header"><div><p class="eyebrow">Queue work</p><h2 id="job-modal-title">New job</h2></div><button class="icon-button" data-close-modal aria-label="Close">×</button></div>
-      <form id="job-form">
-        <label><span>Job type</span><select id="job-type" name="type"><option value="restic-backup">Local → Restic</option><option value="rclone-restic-backup">Remote mount → Restic</option><option value="rclone-transfer">Rclone copy</option></select></label>
-        <div id="job-fields"></div>
-        <label><span>Tags <small>optional, comma separated</small></span><input id="job-tags" autocomplete="off" placeholder="daily, appdata"></label>
-        <div class="modal-actions"><button type="button" class="button ghost" data-close-modal>Cancel</button><button type="submit" class="button primary">Queue job</button></div>
-      </form>
-    </section>
-  </div>
-
-  <aside class="drawer" id="job-drawer" aria-hidden="true">
-    <div class="drawer-header"><div><p class="eyebrow">Job detail</p><h2 id="drawer-title">Job</h2></div><button class="icon-button" id="drawer-close" aria-label="Close job details">×</button></div>
-    <div id="drawer-content" class="drawer-content"></div>
-  </aside>
-
+  <div class="modal-backdrop hidden" id="job-modal"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="job-modal-title"><div class="modal-header"><div><p class="eyebrow">Queue work</p><h2 id="job-modal-title">New job</h2></div><button class="icon-button" data-close-modal aria-label="Close">×</button></div><form id="job-form"><label><span>Job type</span><select id="job-type" name="type"><option value="restic-backup">Local → Restic</option><option value="rclone-restic-backup">Remote mount → Restic</option><option value="rclone-transfer">Rclone copy</option></select></label><div id="job-fields"></div><label><span>Tags <small>optional, comma separated</small></span><input id="job-tags" autocomplete="off" placeholder="daily, appdata"></label><div class="modal-actions"><button type="button" class="button ghost" data-close-modal>Cancel</button><button type="submit" class="button primary">Queue job</button></div></form></section></div>
+  <aside class="drawer" id="job-drawer" aria-hidden="true"><div class="drawer-header"><div><p class="eyebrow">Job detail</p><h2 id="drawer-title">Job</h2></div><button class="icon-button" id="drawer-close" aria-label="Close job details">×</button></div><div id="drawer-content" class="drawer-content"></div></aside>
   <div class="toast-stack" id="toast-stack" aria-live="polite"></div>
   <script type="module" src="/app.js"></script>
   <script type="module" src="/telemetry.js"></script>
+  <script type="module" src="/plans.js"></script>
 </body>
 </html>
