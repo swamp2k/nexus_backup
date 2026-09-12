@@ -16,7 +16,7 @@ export async function recordRuntimeEvents(
     attempt,
     agentId,
     events,
-    runtimeKind = "standard",
+    runtimeKind,
     expectedRepositoryId,
     expectedSnapshotId,
     expectedPath,
@@ -195,7 +195,7 @@ export async function getRuntimeTelemetry(db, jobId, attempt, { logLimit = 200 }
 }
 
 export function normalizeRuntimeEvents(value, now = new Date(), {
-  runtimeKind = "standard",
+  runtimeKind,
   expectedRepositoryId,
   expectedSnapshotId,
   expectedPath,
@@ -204,19 +204,20 @@ export function normalizeRuntimeEvents(value, now = new Date(), {
     throw new RangeError("events must be a non-empty array");
   }
   if (value.length > MAX_BATCH) throw new RangeError(`events may contain at most ${MAX_BATCH} items`);
-  if (!RUNTIME_KINDS.has(runtimeKind)) throw new RangeError("runtimeKind is invalid");
+  const effectiveKind = runtimeKind ?? inferRuntimeKind({ expectedRepositoryId, expectedSnapshotId, expectedPath });
+  if (!RUNTIME_KINDS.has(effectiveKind)) throw new RangeError("runtimeKind is invalid");
 
   let inventoryCount = 0;
   let browseCount = 0;
   return value.map((event) => {
     if (isRecord(event) && event.type === "inventory") {
-      if (runtimeKind !== "inventory") throw new RangeError("inventory events are only accepted from restic-inventory jobs");
+      if (effectiveKind !== "inventory") throw new RangeError("inventory events are only accepted from restic-inventory jobs");
       inventoryCount += 1;
       if (inventoryCount > 1) throw new RangeError("runtime batch may contain at most one inventory event");
       return normalizeInventoryEvent(event, expectedRepositoryId, now);
     }
     if (isRecord(event) && event.type === "snapshot-browse") {
-      if (runtimeKind !== "snapshot-browse") throw new RangeError("snapshot browse events are only accepted from restic-browse jobs");
+      if (effectiveKind !== "snapshot-browse") throw new RangeError("snapshot browse events are only accepted from restic-browse jobs");
       browseCount += 1;
       if (browseCount > 1) throw new RangeError("runtime batch may contain at most one snapshot browse event");
       return normalizeSnapshotBrowseEvent(event, {
@@ -228,6 +229,15 @@ export function normalizeRuntimeEvents(value, now = new Date(), {
     }
     return normalizeRuntimeEvent(event, now);
   });
+}
+
+function inferRuntimeKind({ expectedRepositoryId, expectedSnapshotId, expectedPath }) {
+  if (expectedSnapshotId !== undefined || expectedPath !== undefined) {
+    return expectedRepositoryId !== undefined && expectedSnapshotId !== undefined && expectedPath !== undefined
+      ? "snapshot-browse"
+      : "standard";
+  }
+  return expectedRepositoryId !== undefined ? "inventory" : "standard";
 }
 
 function normalizeRuntimeEvent(value, now) {
