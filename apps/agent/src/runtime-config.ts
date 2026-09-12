@@ -10,6 +10,15 @@ export interface LocalResticRepository {
   environment?: Readonly<Record<string, string>>;
 }
 
+export type RestoreOverwriteMode = "always" | "if-changed" | "if-newer" | "never";
+
+export interface LocalRestoreTarget {
+  id: string;
+  path: string;
+  label?: string;
+  overwrite?: RestoreOverwriteMode;
+}
+
 export type RcloneVfsCacheMode = "off" | "minimal" | "writes" | "full";
 
 export interface LocalRcloneMountConfig {
@@ -46,6 +55,7 @@ export interface AgentToolConfig {
 export interface AgentRuntimeConfig {
   source(id: string): LocalBackupSource;
   resticRepository(id: string): LocalResticRepository;
+  restoreTarget(id: string): LocalRestoreTarget;
   rcloneEndpoint(id: string): LocalRcloneEndpoint;
   tools: AgentToolConfig;
 }
@@ -53,6 +63,7 @@ export interface AgentRuntimeConfig {
 export interface StaticAgentRuntimeConfigInput {
   sources?: readonly LocalBackupSource[];
   resticRepositories?: readonly LocalResticRepository[];
+  restoreTargets?: readonly LocalRestoreTarget[];
   rcloneEndpoints?: readonly LocalRcloneEndpoint[];
   tools?: AgentToolConfig;
 }
@@ -60,6 +71,7 @@ export interface StaticAgentRuntimeConfigInput {
 export class StaticAgentRuntimeConfig implements AgentRuntimeConfig {
   readonly #sources: Map<string, LocalBackupSource>;
   readonly #repositories: Map<string, LocalResticRepository>;
+  readonly #restoreTargets: Map<string, LocalRestoreTarget>;
   readonly #rcloneEndpoints: Map<string, LocalRcloneEndpoint>;
   readonly tools: AgentToolConfig;
 
@@ -82,6 +94,11 @@ export class StaticAgentRuntimeConfig implements AgentRuntimeConfig {
         ...(item.environment === undefined ? {} : { environment: Object.freeze({ ...item.environment }) }),
       }),
     );
+    this.#restoreTargets = indexById(
+      input.restoreTargets ?? [],
+      "restore target",
+      (item) => normalizeRestoreTarget(item),
+    );
     this.#rcloneEndpoints = indexById(
       input.rcloneEndpoints ?? [],
       "rclone endpoint",
@@ -103,6 +120,10 @@ export class StaticAgentRuntimeConfig implements AgentRuntimeConfig {
     return requireEntry(this.#repositories, id, "restic repository");
   }
 
+  restoreTarget(id: string): LocalRestoreTarget {
+    return requireEntry(this.#restoreTargets, id, "restore target");
+  }
+
   rcloneEndpoint(id: string): LocalRcloneEndpoint {
     return requireEntry(this.#rcloneEndpoints, id, "rclone endpoint");
   }
@@ -120,6 +141,19 @@ function indexById<T extends { id: string }>(
     map.set(item.id, item);
   }
   return map;
+}
+
+function normalizeRestoreTarget(input: LocalRestoreTarget): LocalRestoreTarget {
+  const overwrite = input.overwrite ?? "never";
+  if (!["always", "if-changed", "if-newer", "never"].includes(overwrite)) {
+    throw new Error(`Unsupported restore overwrite mode: ${overwrite}`);
+  }
+  return Object.freeze({
+    id: requireNonEmpty(input.id, "restore target id"),
+    path: requireNonEmpty(input.path, "restore target path"),
+    ...(input.label === undefined ? {} : { label: requireNonEmpty(input.label, "restore target label") }),
+    overwrite,
+  });
 }
 
 function normalizeMount(input: LocalRcloneMountConfig): LocalRcloneMountConfig {
