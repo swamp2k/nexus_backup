@@ -79,6 +79,7 @@ export async function runAgentLoop(
         log("info", "job finished", { jobId: job.id, state: job.state });
         continue;
       }
+      if (signal.aborted) break;
       await sleep(pollIntervalMs, signal);
     } catch (error) {
       if (signal.aborted) break;
