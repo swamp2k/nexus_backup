@@ -25,6 +25,15 @@ export interface RepositoryInventorySnapshotEvent {
   dataAddedPacked: number | null;
 }
 
+export interface RepositorySnapshotBrowseEntryEvent {
+  path: string;
+  name: string;
+  nodeType: string;
+  size: number | null;
+  mtime: string | null;
+  permissions: string | null;
+}
+
 export type ExecutionEvent =
   | {
       type: "log";
@@ -55,6 +64,16 @@ export type ExecutionEvent =
       stats: RepositoryInventoryStatsEvent;
       snapshots: readonly RepositoryInventorySnapshotEvent[];
       snapshotLimit: number;
+      truncated: boolean;
+    }
+  | {
+      type: "snapshot-browse";
+      tool: "restic";
+      repositoryId: string;
+      snapshotId: string;
+      path: string;
+      entries: readonly RepositorySnapshotBrowseEntryEvent[];
+      entryLimit: number;
       truncated: boolean;
     };
 
