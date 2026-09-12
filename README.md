@@ -33,14 +33,16 @@ M5 brings the proven Copyarr model into the Nexus job engine rather than running
 - discovery identity based on path + size + modification time
 - `ignore_existing` or `process_existing` bootstrap behavior
 - stability windows and bounded retries
+- optional rTorrent completion readiness with stability fallback
 - Copyarr-style include/exclude filtering
 - staged copy -> exact-size verification -> commit -> final verification
 - verified move only after local `allowMove: true` opt-in
 - Copyarr defaults for multi-thread transfer tuning with single-thread fallback
 - per-rule rclone tuning with safety-critical flags reserved by Nexus
-- live object state and transfer progress in the Transfers dashboard
+- provenance-safe destination cleanup after the configured retention window
+- live object state, readiness reason and transfer progress in the Transfers dashboard
 
-Destination cleanup policy is stored but is not executed yet. rTorrent completion gating is the next transfer slice.
+rTorrent readiness currently schedules one file per managed transfer job. Grouped torrent copy/move is deliberately deferred until grouped move has explicit partial-source-delete recovery semantics.
 
 See `docs/transfers.md` for transfer invariants and safety boundaries.
 
