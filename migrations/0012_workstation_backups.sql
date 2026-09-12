@@ -45,7 +45,12 @@ CREATE INDEX idx_workstation_policies_due ON workstation_policies(enabled,next_r
 CREATE TABLE workstation_status (
   device_id TEXT PRIMARY KEY REFERENCES managed_devices(id) ON DELETE CASCADE,
   repository_configured INTEGER NOT NULL DEFAULT 0 CHECK (repository_configured IN (0,1)),
-  repository_kind TEXT,
+  repository_kind TEXT CHECK (
+    repository_kind IS NULL OR (
+      length(repository_kind) BETWEEN 1 AND 32
+      AND repository_kind NOT GLOB '*[^A-Za-z0-9._-]*'
+    )
+  ),
   agent_state TEXT,
   current_run_id TEXT,
   last_backup_at TEXT,
