@@ -28,7 +28,7 @@ export class RtorrentClient {
       + `</params></methodCall>`;
     const headers = new Headers({ "content-type": "text/xml" });
     if (this.#gate.username) {
-      headers.set("authorization", `Basic ${Buffer.from(`${this.#gate.username}:${this.#gate.password ?? ""}`).toString("base64")}`);
+      headers.set("authorization", `Basic ${base64Utf8(`${this.#gate.username}:${this.#gate.password ?? ""}`)}`);
     }
     const timeout = AbortSignal.timeout(15_000);
     const combined = AbortSignal.any([signal, timeout]);
@@ -81,6 +81,24 @@ function parseScalarValues(xml: string): Array<string | number> {
   return values;
 }
 
+function base64Utf8(value: string): string {
+  const bytes = new TextEncoder().encode(value);
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  let output = "";
+  for (let index = 0; index < bytes.length; index += 3) {
+    const a = bytes[index] ?? 0;
+    const hasB = index + 1 < bytes.length;
+    const hasC = index + 2 < bytes.length;
+    const b = bytes[index + 1] ?? 0;
+    const c = bytes[index + 2] ?? 0;
+    const block = (a << 16) | (b << 8) | c;
+    output += alphabet[(block >> 18) & 63];
+    output += alphabet[(block >> 12) & 63];
+    output += hasB ? alphabet[(block >> 6) & 63] : "=";
+    output += hasC ? alphabet[block & 63] : "=";
+  }
+  return output;
+}
 function stringValue(value: string | number | undefined): string {
   return value === undefined ? "" : String(value);
 }
