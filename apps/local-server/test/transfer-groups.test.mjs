@@ -84,6 +84,7 @@ test("empty group event clears the hold so optional rtorrent fallback returns to
     f.setNow("2026-09-12T10:02:00Z");
     const second=await f.rules.scanNow("rule-1");
     const at="2026-09-12T10:02:01Z";
+    const canonicalAt=new Date(at).toISOString();
     await persistTransferDiscovery(f.db,{jobId:second.job.id,expectedRuleId:"rule-1",event:discovery([
       {relPath:"Show.Complete/episode-1.mkv",size:40,modTime:"2026-09-12T09:00:00Z"},
       {relPath:"Show.Complete/episode-2.mkv",size:60,modTime:"2026-09-12T09:00:00Z"},
@@ -93,7 +94,7 @@ test("empty group event clears the hold so optional rtorrent fallback returns to
     await finish(f.db,second.job.id,"completed","2026-09-12T10:02:02Z");
     const groupedRows=(await f.db.prepare("SELECT group_key,stable_since FROM transfer_objects WHERE rel_path LIKE 'Show.Complete/%'").all()).results;
     assert.ok(groupedRows.every(row=>row.group_key===null));
-    assert.ok(groupedRows.every(row=>row.stable_since===at));
+    assert.ok(groupedRows.every(row=>row.stable_since===canonicalAt));
     f.setNow("2026-09-12T10:03:02Z");
     const due=await f.rules.runDue();
     assert.equal(due.transfers,3);
