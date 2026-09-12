@@ -30,11 +30,22 @@ Start-Sleep -Milliseconds 300
 
 Write-Host 'Nexus Backup: finding latest workstation agent release...'
 $release = Invoke-RestMethod -UseBasicParsing -Headers @{ 'User-Agent' = 'NexusBackupInstaller' } -Uri 'https://api.github.com/repos/swamp2k/nexus_backup/releases/latest'
-$asset = @($release.assets | Where-Object { $_.name -eq 'nexus-backup-workstation-windows-amd64.exe' }) | Select-Object -First 1
-if (-not $asset) { Fail 'latest Nexus Backup release does not contain the workstation agent yet' }
+$assetName = 'nexus-backup-workstation-windows-amd64.exe'
+$asset = @($release.assets | Where-Object { $_.name -eq $assetName }) | Select-Object -First 1
+$checksumAsset = @($release.assets | Where-Object { $_.name -eq "$assetName.sha256" }) | Select-Object -First 1
+if (-not $asset -or -not $checksumAsset) { Fail 'latest Nexus Backup release does not contain the workstation agent and checksum yet' }
 $tmpAgent = Join-Path $env:TEMP ("nexus-backup-workstation-{0}.exe" -f [guid]::NewGuid().ToString('N'))
+$tmpChecksum = "$tmpAgent.sha256"
 Invoke-WebRequest -UseBasicParsing -Uri $asset.browser_download_url -OutFile $tmpAgent
+Invoke-WebRequest -UseBasicParsing -Uri $checksumAsset.browser_download_url -OutFile $tmpChecksum
+$expectedAgentHash = ((Get-Content -Raw -Path $tmpChecksum).Trim() -split '\s+')[0].ToLowerInvariant()
+$actualAgentHash = (Get-FileHash -Algorithm SHA256 -Path $tmpAgent).Hash.ToLowerInvariant()
+if ($expectedAgentHash -notmatch '^[0-9a-f]{64}$' -or $actualAgentHash -ne $expectedAgentHash) {
+  Remove-Item $tmpAgent,$tmpChecksum -Force -ErrorAction SilentlyContinue
+  Fail 'Workstation agent checksum did not match the published release.'
+}
 Move-Item -Force $tmpAgent $agentPath
+Remove-Item $tmpChecksum -Force -ErrorAction SilentlyContinue
 
 if (-not (Test-Path $resticPath)) {
   $resticVersion = '0.19.1'
@@ -79,7 +90,8 @@ if (-not [string]::IsNullOrWhiteSpace([string]$env:NEXUS_BACKUP_REPOSITORY)) {
 if (-not [string]::IsNullOrWhiteSpace([string]$env:NEXUS_BACKUP_RESTIC_PASSWORD)) {
   [IO.File]::WriteAllText($passwordPath, [string]$env:NEXUS_BACKUP_RESTIC_PASSWORD, (New-Object Text.UTF8Encoding($false)))
 }
-$config | ConvertTo-Json -Depth 4 | Set-Content -Encoding UTF8 -Path $configPath
+$configJson = $config | ConvertTo-Json -Depth 4
+[IO.File]::WriteAllText($configPath, $configJson, (New-Object Text.UTF8Encoding($false)))
 
 $action = New-ScheduledTaskAction -Execute $agentPath -Argument '--run' -WorkingDirectory $installDir
 $trigger = New-ScheduledTaskTrigger -AtStartup
@@ -89,6 +101,6 @@ Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Pr
 Start-ScheduledTask -TaskName $taskName
 
 Write-Host 'Nexus Backup workstation agent installed and started.'
-if ([string]::IsNullOrWhiteSpace([string]$config.repository) -or -not (Test-Path $passwordPath)) {
+if ([string]::IsNullOrWhiteSpace([string]$config['repository']) -or -not (Test-Path $passwordPath)) {
   Write-Host 'Storage is not configured yet; Nexus will show this workstation as Needs storage setup.'
 }
