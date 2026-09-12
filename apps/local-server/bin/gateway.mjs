@@ -72,6 +72,14 @@ const gateway = createServer(async (request, response) => {
     const session = auth.requireSession(request);
     if (isMutation(request.method) && path.startsWith("/v1/local/")) auth.requireCsrf(request, session);
 
+    if (path === "/v1/local/info" && request.method === "GET") {
+      const upstream = await fetch(`${internalBase}/v1/local/info`, { headers: { accept: "application/json" } });
+      const data = await upstream.json().catch(() => ({}));
+      if (!upstream.ok) throw statusError(upstream.status, data.message || `Local info failed with ${upstream.status}`);
+      sendJson(response, 200, { ...data, localAuth: true, restoreExecution: true });
+      return;
+    }
+
     if (path === "/v1/local/restore-authorizations" && request.method === "POST") {
       const body = await readJsonBody(request);
       const scope = normalizeRestoreScope(body);
