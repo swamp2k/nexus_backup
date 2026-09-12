@@ -59,13 +59,16 @@ export function createManagedDeviceService({
     return present(await byId(db, normalizedId), nowDate(now));
   }
 
-  async function report(rawToken, input) {
+  async function authenticate(rawToken) {
     const supplied = requireToken(rawToken);
-    const row = await db.prepare(`
-      SELECT * FROM managed_devices WHERE token_hash=? LIMIT 1
-    `).bind(hashToken(supplied)).first();
+    const row = await db.prepare("SELECT * FROM managed_devices WHERE token_hash=? LIMIT 1")
+      .bind(hashToken(supplied)).first();
     if (!row || Number(row.enabled) !== 1) throw statusError(401, "Invalid or disabled device token");
+    return present(row, nowDate(now));
+  }
 
+  async function report(rawToken, input) {
+    const device = await authenticate(rawToken);
     const report = normalizeReport(input);
     const at = nowDate(now).toISOString();
     await db.prepare(`
@@ -82,16 +85,16 @@ export function createManagedDeviceService({
       at,
       at,
       at,
-      row.id,
+      device.id,
     ).run();
     return {
       ok: true,
-      device: present(await byId(db, String(row.id)), nowDate(now)),
+      device: present(await byId(db, device.id), nowDate(now)),
       nextReportSeconds: 60,
     };
   }
 
-  return { list, create, rotateToken, update, report };
+  return { list, create, rotateToken, update, authenticate, report };
 }
 
 export function normalizeDeviceReport(input) {
