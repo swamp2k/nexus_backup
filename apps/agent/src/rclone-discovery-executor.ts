@@ -17,12 +17,7 @@ interface DiscoveryPayload {
   includes: string[];
   excludes: string[];
 }
-
-interface DiscoveryEntry {
-  relPath: string;
-  size: number;
-  modTime: string;
-}
+interface DiscoveryEntry { relPath: string; size: number; modTime: string; }
 
 export class RcloneDiscoveryExecutor implements JobExecutor {
   readonly #config: AgentRuntimeConfig;
@@ -41,27 +36,21 @@ export class RcloneDiscoveryExecutor implements JobExecutor {
     const source = joinTarget(endpoint.fs, payload.sourcePath);
     const chunks: string[] = [];
     let rawSize = 0;
+    let overflow = false;
 
-    const args = [
-      "lsjson", source,
-      "--recursive",
-      "--files-only",
-      ...(this.#config.tools.rcloneArgs ?? []),
-    ];
+    const args = ["lsjson", source, "--recursive", "--files-only", ...(this.#config.tools.rcloneArgs ?? [])];
     if (this.#config.tools.rcloneConfigPath) args.push("--config", this.#config.tools.rcloneConfigPath);
 
-    const result = await this.#runner.run({
-      executable: this.#config.tools.rcloneBinary ?? "rclone",
-      args,
-    }, signal, {
+    const result = await this.#runner.run({ executable: this.#config.tools.rcloneBinary ?? "rclone", args }, signal, {
       stdout: (line) => {
         rawSize += line.length + 1;
-        if (rawSize > MAX_RAW_JSON) throw new Error("transfer discovery result is too large; narrow the rule with include/exclude filters");
+        if (rawSize > MAX_RAW_JSON) { overflow = true; return; }
         chunks.push(line);
       },
       stderr: (line) => this.#events.emit({ type: "log", tool: "rclone", stream: "stderr", message: compactRcloneLog(line) }),
     });
     if (result.exitCode !== 0) throw new ToolExitError("rclone", result);
+    if (overflow) throw new Error("transfer discovery result is too large; narrow the rule with include/exclude filters");
 
     let raw: unknown;
     try { raw = JSON.parse(chunks.join("\n")); }
@@ -80,11 +69,7 @@ export class RcloneDiscoveryExecutor implements JobExecutor {
     }
 
     this.#events.emit({ type: "transfer-discovery", tool: "rclone", ruleId: payload.ruleId, entries });
-    this.#events.emit({
-      type: "summary",
-      tool: "rclone",
-      data: { operation: "transfer-discovery", ruleId: payload.ruleId, files: entries.length },
-    });
+    this.#events.emit({ type: "summary", tool: "rclone", data: { operation: "transfer-discovery", ruleId: payload.ruleId, files: entries.length } });
     return { status: "completed" };
   }
 }
@@ -99,69 +84,21 @@ function parsePayload(value: unknown): DiscoveryPayload {
     excludes: stringArray(value.excludes, "excludes"),
   };
 }
-
 function parseLsjsonItem(value: unknown): DiscoveryEntry {
   if (!isRecord(value) || value.IsDir === true) throw new Error("rclone discovery returned an invalid file entry");
   const relPath = normalizeObjectPath(value.Path);
   const size = Number(value.Size);
   if (!Number.isSafeInteger(size) || size < 0) throw new Error(`invalid rclone file size for ${relPath}`);
-  if (typeof value.ModTime !== "string" || !Number.isFinite(Date.parse(value.ModTime))) {
-    throw new Error(`invalid rclone modification time for ${relPath}`);
-  }
+  if (typeof value.ModTime !== "string" || !Number.isFinite(Date.parse(value.ModTime))) throw new Error(`invalid rclone modification time for ${relPath}`);
   return { relPath, size, modTime: new Date(value.ModTime).toISOString() };
 }
-
-function pathAllowed(rel: string, includes: readonly string[], excludes: readonly string[]): boolean {
-  for (const pattern of includes) if (filterMatch(pattern, rel)) return true;
-  for (const pattern of excludes) if (filterMatch(pattern, rel)) return false;
-  return true;
-}
-
-function filterMatch(input: string, rel: string): boolean {
-  let pattern = input.trim().replace(/^\/+/, "");
-  if (!pattern) return false;
-  if (pattern.endsWith("/")) pattern += "**";
-  const regex = new RegExp(globRegex(pattern));
-  if (regex.test(rel)) return true;
-  if (!pattern.includes("/")) return regex.test(rel.split("/").at(-1) ?? rel);
-  return false;
-}
-
-function globRegex(pattern: string): string {
-  let output = "^";
-  for (let index = 0; index < pattern.length; index += 1) {
-    const char = pattern[index]!;
-    if (char === "*") {
-      if (pattern[index + 1] === "*") { output += ".*"; index += 1; }
-      else output += "[^/]*";
-    } else if (char === "?") output += "[^/]";
-    else output += /[.+()|[\]{}^$\\]/.test(char) ? `\\${char}` : char;
-  }
-  return `${output}$`;
-}
-
-function joinTarget(base: string, relative: string): string {
-  if (!relative) return base;
-  if (base.endsWith(":") || base.endsWith("/")) return `${base}${relative}`;
-  return `${base}/${relative}`;
-}
-
-function normalizeBase(value: unknown): string {
-  if (value === undefined || value === null || value === "") return "";
-  if (typeof value !== "string") throw new Error("sourcePath must be a string");
-  const normalized = value.trim().replaceAll("\\", "/").replace(/^\/+|\/+$/g, "");
-  if (!normalized) return "";
-  if (normalized.split("/").some((part) => !part || part === "." || part === "..")) throw new Error("sourcePath may not contain dot segments");
-  return normalized;
-}
-
-function normalizeObjectPath(value: unknown): string {
-  if (typeof value !== "string") throw new Error("rclone file path must be a string");
-  const normalized = value.replaceAll("\\", "/").replace(/^\/+|\/+$/g, "");
-  if (!normalized || normalized.split("/").some((part) => !part || part === "." || part === "..")) throw new Error("rclone returned an unsafe relative path");
-  return normalized;
-}
-function stringArray(value: unknown, name: string): string[] { if (value === undefined) return []; if (!Array.isArray(value)) throw new Error(`${name} must be an array`); return value.map((item) => { if (typeof item !== "string" || !item.trim()) throw new Error(`${name} contains an invalid pattern`); return item.trim(); }); }
-function requireId(value: unknown, name: string): string { if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(value.trim())) throw new Error(`${name} is invalid`); return value.trim(); }
-function compactRcloneLog(line: string): string { try { const parsed = JSON.parse(line) as Record<string, unknown>; return typeof parsed.msg === "string" ? parsed.msg : "rclone discovery message"; } catch { return line.length > 2000 ? `${line.slice(0, 2000)}…` : line; } }
-function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
+function pathAllowed(rel: string, includes: readonly string[], excludes: readonly string[]): boolean { for (const pattern of includes) if (filterMatch(pattern, rel)) return true; for (const pattern of excludes) if (filterMatch(pattern, rel)) return false; return true; }
+function filterMatch(input: string, rel: string): boolean { let pattern=input.trim().replace(/^\/+/,""); if(!pattern)return false; if(pattern.endsWith("/"))pattern+="**"; const regex=new RegExp(globRegex(pattern)); if(regex.test(rel))return true; if(!pattern.includes("/"))return regex.test(rel.split("/").at(-1)??rel); return false; }
+function globRegex(pattern: string): string { let output="^"; for(let index=0;index<pattern.length;index+=1){const char=pattern[index]!;if(char==="*"){if(pattern[index+1]==="*"){output+=".*";index+=1}else output+="[^/]*"}else if(char==="?")output+="[^/]";else output+=/[.+()|[\]{}^$\\]/.test(char)?`\\${char}`:char}return`${output}$`; }
+function joinTarget(base: string, relative: string): string { if(!relative)return base; if(base.endsWith(":")||base.endsWith("/"))return`${base}${relative}`; return`${base}/${relative}`; }
+function normalizeBase(value: unknown): string { if(value===undefined||value===null||value==="")return""; if(typeof value!=="string")throw new Error("sourcePath must be a string"); const normalized=value.trim().replaceAll("\\","/").replace(/^\/+|\/+$/g,""); if(!normalized)return""; if(normalized.split("/").some(part=>!part||part==="."||part===".."))throw new Error("sourcePath may not contain dot segments"); return normalized; }
+function normalizeObjectPath(value: unknown): string { if(typeof value!=="string")throw new Error("rclone file path must be a string"); const normalized=value.replaceAll("\\","/").replace(/^\/+|\/+$/g,""); if(!normalized||normalized.split("/").some(part=>!part||part==="."||part===".."))throw new Error("rclone returned an unsafe relative path"); return normalized; }
+function stringArray(value: unknown,name:string):string[]{if(value===undefined)return[];if(!Array.isArray(value))throw new Error(`${name} must be an array`);return value.map(item=>{if(typeof item!=="string"||!item.trim())throw new Error(`${name} contains an invalid pattern`);return item.trim()})}
+function requireId(value: unknown,name:string):string{if(typeof value!=="string"||!/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(value.trim()))throw new Error(`${name} is invalid`);return value.trim()}
+function compactRcloneLog(line:string):string{try{const parsed=JSON.parse(line) as Record<string,unknown>;return typeof parsed.msg==="string"?parsed.msg:"rclone discovery message"}catch{return line.length>2000?`${line.slice(0,2000)}…`:line}}
+function isRecord(value:unknown):value is Record<string,unknown>{return typeof value==="object"&&value!==null&&!Array.isArray(value)}
