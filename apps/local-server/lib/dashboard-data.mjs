@@ -8,16 +8,30 @@ const JOB_STATES = new Set([
 export async function listJobs(db, { limit = 100, state } = {}) {
   const normalizedLimit = clampInteger(limit, 1, 500, 100);
   const normalizedState = normalizeState(state);
+  const select = `
+    SELECT
+      j.*,
+      p.tool AS runtime_tool,
+      p.updated_at AS runtime_updated_at,
+      p.bytes_done AS runtime_bytes_done,
+      p.bytes_total AS runtime_bytes_total,
+      p.files_done AS runtime_files_done,
+      p.files_total AS runtime_files_total,
+      p.speed_bytes_per_second AS runtime_speed_bytes_per_second,
+      p.eta_seconds AS runtime_eta_seconds,
+      p.errors AS runtime_errors
+    FROM backup_jobs AS j
+    LEFT JOIN backup_job_runtime_progress AS p
+      ON p.job_id = j.id AND p.attempt = j.attempt
+  `;
   const statement = normalizedState
-    ? db.prepare(`
-        SELECT * FROM backup_jobs
-        WHERE state = ?
-        ORDER BY created_at DESC, id DESC
+    ? db.prepare(`${select}
+        WHERE j.state = ?
+        ORDER BY j.created_at DESC, j.id DESC
         LIMIT ?
       `).bind(normalizedState, normalizedLimit)
-    : db.prepare(`
-        SELECT * FROM backup_jobs
-        ORDER BY created_at DESC, id DESC
+    : db.prepare(`${select}
+        ORDER BY j.created_at DESC, j.id DESC
         LIMIT ?
       `).bind(normalizedLimit);
   const result = await statement.all();
@@ -146,6 +160,20 @@ function rowToJob(row) {
     payload = JSON.parse(String(row.payload_json));
   } catch {}
 
+  const runtime = row.runtime_tool === null || row.runtime_tool === undefined
+    ? null
+    : {
+        tool: String(row.runtime_tool),
+        updatedAt: String(row.runtime_updated_at),
+        bytesDone: nullableNumber(row.runtime_bytes_done),
+        bytesTotal: nullableNumber(row.runtime_bytes_total),
+        filesDone: nullableNumber(row.runtime_files_done),
+        filesTotal: nullableNumber(row.runtime_files_total),
+        speedBytesPerSecond: nullableNumber(row.runtime_speed_bytes_per_second),
+        etaSeconds: nullableNumber(row.runtime_eta_seconds),
+        errors: nullableNumber(row.runtime_errors),
+      };
+
   return {
     id: String(row.id),
     operationKey: String(row.operation_key),
@@ -160,6 +188,7 @@ function rowToJob(row) {
       expiresAt: String(row.lease_expires_at),
       heartbeatAt: String(row.lease_heartbeat_at),
     } : null,
+    runtime,
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
     startedAt: row.started_at === null ? null : String(row.started_at),
@@ -177,6 +206,10 @@ function clampInteger(value, min, max, fallback) {
   const number = Number(value);
   if (!Number.isInteger(number)) return fallback;
   return Math.min(max, Math.max(min, number));
+}
+
+function nullableNumber(value) {
+  return value === null || value === undefined ? null : Number(value);
 }
 
 function stringOrEmpty(value) {
