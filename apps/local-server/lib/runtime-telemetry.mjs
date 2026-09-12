@@ -1,24 +1,47 @@
 import { randomUUID } from "node:crypto";
 import { normalizeInventoryEvent, persistRepositoryInventory } from "./repository-inventory.mjs";
+import { normalizeSnapshotBrowseEvent, persistSnapshotBrowse } from "./snapshot-restore.mjs";
 
 const TOOLS = new Set(["restic", "rclone"]);
 const STREAMS = new Set(["stdout", "stderr"]);
+const RUNTIME_KINDS = new Set(["standard", "inventory", "snapshot-browse"]);
 const MAX_BATCH = 100;
 const MAX_MESSAGE = 16_000;
 const MAX_SUMMARY_JSON = 65_536;
 
 export async function recordRuntimeEvents(
   db,
-  { jobId, attempt, agentId, events, expectedRepositoryId, now = new Date(), logLimit = 500 },
+  {
+    jobId,
+    attempt,
+    agentId,
+    events,
+    runtimeKind,
+    expectedRepositoryId,
+    expectedSnapshotId,
+    expectedPath,
+    now = new Date(),
+    logLimit = 500,
+  },
 ) {
-  const normalized = normalizeRuntimeEvents(events, now, { expectedRepositoryId });
+  const normalized = normalizeRuntimeEvents(events, now, {
+    runtimeKind,
+    expectedRepositoryId,
+    expectedSnapshotId,
+    expectedPath,
+  });
   const statements = [];
   const inventories = [];
+  const browses = [];
   let wroteLog = false;
 
   for (const event of normalized) {
     if (event.type === "inventory") {
       inventories.push(event);
+      continue;
+    }
+    if (event.type === "snapshot-browse") {
+      browses.push(event);
       continue;
     }
 
@@ -113,6 +136,18 @@ export async function recordRuntimeEvents(
       at: now,
     });
   }
+  for (const browse of browses) {
+    await persistSnapshotBrowse(db, {
+      jobId,
+      attempt,
+      agentId,
+      expectedRepositoryId,
+      expectedSnapshotId,
+      expectedPath,
+      event: browse,
+      at: now,
+    });
+  }
   return normalized.length;
 }
 
@@ -159,20 +194,50 @@ export async function getRuntimeTelemetry(db, jobId, attempt, { logLimit = 200 }
   };
 }
 
-export function normalizeRuntimeEvents(value, now = new Date(), { expectedRepositoryId } = {}) {
+export function normalizeRuntimeEvents(value, now = new Date(), {
+  runtimeKind,
+  expectedRepositoryId,
+  expectedSnapshotId,
+  expectedPath,
+} = {}) {
   if (!Array.isArray(value) || value.length === 0) {
     throw new RangeError("events must be a non-empty array");
   }
   if (value.length > MAX_BATCH) throw new RangeError(`events may contain at most ${MAX_BATCH} items`);
+  const effectiveKind = runtimeKind ?? inferRuntimeKind({ expectedRepositoryId, expectedSnapshotId, expectedPath });
+  if (!RUNTIME_KINDS.has(effectiveKind)) throw new RangeError("runtimeKind is invalid");
+
   let inventoryCount = 0;
+  let browseCount = 0;
   return value.map((event) => {
     if (isRecord(event) && event.type === "inventory") {
+      if (effectiveKind !== "inventory") throw new RangeError("inventory events are only accepted from restic-inventory jobs");
       inventoryCount += 1;
       if (inventoryCount > 1) throw new RangeError("runtime batch may contain at most one inventory event");
       return normalizeInventoryEvent(event, expectedRepositoryId, now);
     }
+    if (isRecord(event) && event.type === "snapshot-browse") {
+      if (effectiveKind !== "snapshot-browse") throw new RangeError("snapshot browse events are only accepted from restic-browse jobs");
+      browseCount += 1;
+      if (browseCount > 1) throw new RangeError("runtime batch may contain at most one snapshot browse event");
+      return normalizeSnapshotBrowseEvent(event, {
+        expectedRepositoryId,
+        expectedSnapshotId,
+        expectedPath,
+        now,
+      });
+    }
     return normalizeRuntimeEvent(event, now);
   });
+}
+
+function inferRuntimeKind({ expectedRepositoryId, expectedSnapshotId, expectedPath }) {
+  if (expectedSnapshotId !== undefined || expectedPath !== undefined) {
+    return expectedRepositoryId !== undefined && expectedSnapshotId !== undefined && expectedPath !== undefined
+      ? "snapshot-browse"
+      : "standard";
+  }
+  return expectedRepositoryId !== undefined ? "inventory" : "standard";
 }
 
 function normalizeRuntimeEvent(value, now) {
@@ -213,7 +278,7 @@ function normalizeRuntimeEvent(value, now) {
     return { type, tool, data: value.data, at };
   }
 
-  throw new RangeError("runtime event type must be log, progress, summary, or inventory");
+  throw new RangeError("runtime event type must be log, progress, summary, inventory, or snapshot-browse");
 }
 
 function normalizeAt(value, fallback) {

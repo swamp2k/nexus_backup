@@ -248,15 +248,28 @@ export function abortableSleep(ms, signal) {
 }
 
 function compactEventForLog(event) {
-  if (event?.type !== "inventory") return event;
-  return {
-    type: "inventory",
-    tool: event.tool,
-    repositoryId: event.repositoryId,
-    snapshots: Array.isArray(event.snapshots) ? event.snapshots.length : 0,
-    snapshotLimit: event.snapshotLimit,
-    truncated: event.truncated,
-  };
+  if (event?.type === "inventory") {
+    return {
+      type: "inventory",
+      tool: event.tool,
+      repositoryId: event.repositoryId,
+      snapshots: Array.isArray(event.snapshots) ? event.snapshots.length : 0,
+      snapshotLimit: event.snapshotLimit,
+      truncated: event.truncated,
+    };
+  }
+  if (event?.type === "snapshot-browse") {
+    return {
+      type: "snapshot-browse",
+      tool: event.tool,
+      repositoryId: event.repositoryId,
+      snapshotId: typeof event.snapshotId === "string" ? event.snapshotId.slice(0, 12) : null,
+      entries: Array.isArray(event.entries) ? event.entries.length : 0,
+      entryLimit: event.entryLimit,
+      truncated: event.truncated,
+    };
+  }
+  return event;
 }
 
 function serializeError(error) {

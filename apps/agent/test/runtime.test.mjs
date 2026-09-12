@@ -18,6 +18,7 @@ test("runtime config loader constructs the local-only registry from JSON", async
     await writeFile(path, JSON.stringify({
       sources: [{ id: "data", paths: ["/data"] }],
       resticRepositories: [{ id: "repo", repository: "/backup/repo" }],
+      restoreTargets: [{ id: "staging", label: "Safe staging", path: "/restore", overwrite: "never" }],
       rcloneEndpoints: [{
         id: "cloud",
         fs: "remote:",
@@ -27,6 +28,7 @@ test("runtime config loader constructs the local-only registry from JSON", async
     const config = await loadRuntimeConfig(path);
     assert.deepEqual(config.source("data").paths, ["/data"]);
     assert.equal(config.resticRepository("repo").repository, "/backup/repo");
+    assert.deepEqual(config.restoreTarget("staging"), { id: "staging", label: "Safe staging", path: "/restore", overwrite: "never" });
     assert.equal(config.rcloneEndpoint("cloud").mount.mountPoint, "/state/mounts/cloud");
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -130,6 +132,42 @@ test("inventory telemetry reaches control plane intact but Docker logs stay comp
   assert.equal(executionLog.data.event.snapshots, 1);
   assert.equal(JSON.stringify(executionLog).includes("/private/path"), false);
   assert.equal(JSON.stringify(executionLog).includes("aaaaaaaaaaaaaaaa"), false);
+});
+
+test("snapshot browse telemetry keeps entries out of Docker logs", async () => {
+  const calls = [];
+  const logs = [];
+  const sink = createBufferedTelemetrySink({
+    async runtimeEvents(jobId, agentId, leaseToken, events) {
+      calls.push({ jobId, agentId, leaseToken, events });
+    },
+  }, "local-agent", {
+    log: (level, message, data) => logs.push({ level, message, data }),
+    flushIntervalMs: 60_000,
+    now: () => new Date("2026-09-12T10:00:00.000Z"),
+  });
+  const browse = {
+    type: "snapshot-browse",
+    tool: "restic",
+    repositoryId: "repo-main",
+    snapshotId: "aaaaaaaaaaaaaaaa",
+    path: "/private/folder",
+    entries: [{ path: "/private/folder/secret.txt", name: "secret.txt", nodeType: "file", size: 42, mtime: null, permissions: null }],
+    entryLimit: 1000,
+    truncated: false,
+  };
+
+  sink.begin({ id: "job-browse", lease: { token: "lease-browse" } });
+  sink.emit(browse);
+  await sink.end();
+
+  assert.equal(calls[0].events[0].entries[0].path, "/private/folder/secret.txt");
+  const executionLog = logs.find((entry) => entry.message === "execution event");
+  assert.ok(executionLog);
+  const encoded = JSON.stringify(executionLog);
+  assert.equal(executionLog.data.event.entries, 1);
+  assert.equal(encoded.includes("secret.txt"), false);
+  assert.equal(encoded.includes("/private/folder"), false);
 });
 
 test("telemetry delivery failures are logged but never fail the backup path", async () => {

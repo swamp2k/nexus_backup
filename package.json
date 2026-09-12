@@ -13,7 +13,7 @@
   "scripts": {
     "clean": "tsc -b --clean",
     "build": "tsc -b --pretty false",
-    "check:js": "node --check apps/local-server/bin/server.mjs && node --check apps/local-server/lib/dashboard-data.mjs && node --check apps/local-server/lib/runtime-telemetry.mjs && node --check apps/local-server/lib/backup-plans.mjs && node --check apps/local-server/lib/plan-maintenance.mjs && node --check apps/local-server/lib/repository-inventory.mjs && node --check apps/local-server/web/app.js && node --check apps/local-server/web/telemetry.js && node --check apps/local-server/web/plans.js && node --check apps/local-server/web/maintenance.js && node --check apps/local-server/web/repository-inventory.js",
+    "check:js": "node --check apps/local-server/bin/server.mjs && node --check apps/local-server/lib/dashboard-data.mjs && node --check apps/local-server/lib/runtime-telemetry.mjs && node --check apps/local-server/lib/backup-plans.mjs && node --check apps/local-server/lib/plan-maintenance.mjs && node --check apps/local-server/lib/repository-inventory.mjs && node --check apps/local-server/lib/snapshot-restore.mjs && node --check apps/local-server/web/app.js && node --check apps/local-server/web/telemetry.js && node --check apps/local-server/web/plans.js && node --check apps/local-server/web/maintenance.js && node --check apps/local-server/web/repository-inventory.js",
     "test": "npm run clean && npm run build && npm run check:js && node --test packages/core/test/*.test.mjs apps/agent/test/*.test.mjs apps/control-plane/test/*.test.mjs apps/local-server/test/*.test.mjs",
     "typecheck": "tsc -b --pretty false",
     "start:agent": "node apps/agent/bin/agent.mjs",

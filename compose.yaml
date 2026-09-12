@@ -43,6 +43,7 @@ services:
       - agent-state:/state
       - ${NEXUS_BACKUP_DATA_PATH:-./.local/data}:/data:ro
       - ${NEXUS_BACKUP_BACKUP_PATH:-./.local/backup}:/backup
+      - ${NEXUS_BACKUP_RESTORE_PATH:-./.local/restore}:/restore
 
 volumes:
   control-config:
