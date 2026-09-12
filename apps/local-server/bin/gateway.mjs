@@ -11,6 +11,7 @@ import { openSqliteD1 } from "../lib/sqlite-d1.mjs";
 import { createTransferCleanupService } from "../lib/transfer-cleanup.mjs";
 import { createTransferGroupService } from "../lib/transfer-groups.mjs";
 import { createTransferRuleService } from "../lib/transfer-rules.mjs";
+import { createWorkstationService, workstationInstallCommand } from "../lib/workstations.mjs";
 
 const publicHost = process.env.NEXUS_BACKUP_HOST?.trim() || "0.0.0.0";
 const publicPort = positiveInteger(process.env.NEXUS_BACKUP_PORT ?? "8787", "NEXUS_BACKUP_PORT");
@@ -22,6 +23,7 @@ const migrationsDir = process.env.NEXUS_BACKUP_MIGRATIONS?.trim() || fileURLToPa
 const webDir = process.env.NEXUS_BACKUP_WEB_DIR?.trim() || fileURLToPath(new URL("../web/", import.meta.url));
 const agentConfigPath = process.env.NEXUS_BACKUP_AGENT_CONFIG?.trim() || "/agent-config/agent.json";
 const transferSchedulerIntervalMs = positiveInteger(process.env.NEXUS_BACKUP_TRANSFER_INTERVAL_MS ?? "15000", "NEXUS_BACKUP_TRANSFER_INTERVAL_MS");
+const workstationSchedulerIntervalMs = positiveInteger(process.env.NEXUS_BACKUP_WORKSTATION_INTERVAL_MS ?? "15000", "NEXUS_BACKUP_WORKSTATION_INTERVAL_MS");
 
 process.env.NEXUS_BACKUP_HOST = "127.0.0.1";
 process.env.NEXUS_BACKUP_PORT = String(internalPort);
@@ -30,6 +32,7 @@ await import("./server.mjs");
 const db = await openSqliteD1({ filename: databasePath, migrationsDir });
 const auth = await createLocalAuth({ configDir, log });
 const deviceService = createManagedDeviceService({ db });
+const workstationService = createWorkstationService({ db, deviceService });
 const transferService = createTransferRuleService({
   db,
   enqueueJob,
@@ -64,11 +67,32 @@ const transferTimer = setInterval(() => void runTransferScheduler(), transferSch
 transferTimer.unref();
 void runTransferScheduler();
 
+let workstationSchedulerRunning = false;
+async function runWorkstationScheduler() {
+  if (workstationSchedulerRunning) return;
+  workstationSchedulerRunning = true;
+  try {
+    const recovered = await workstationService.recoverExpired();
+    if (recovered > 0) log("warn", "expired workstation runs requeued", { count: recovered });
+    const result = await workstationService.runDue();
+    if (result.queued > 0) log("info", "workstation backup runs queued", { count: result.queued });
+    for (const failure of result.failures) log("error", "workstation scheduler action failed", failure);
+  } catch (error) {
+    log("error", "workstation scheduler failed", { error: serializeError(error) });
+  } finally {
+    workstationSchedulerRunning = false;
+  }
+}
+const workstationTimer = setInterval(() => void runWorkstationScheduler(), workstationSchedulerIntervalMs);
+workstationTimer.unref();
+void runWorkstationScheduler();
+
 const PUBLIC_FILES = new Map([
   ["/auth.html", ["auth.html", "text/html; charset=utf-8"]],
   ["/auth.js", ["auth.js", "text/javascript; charset=utf-8"]],
   ["/auth.css", ["auth.css", "text/css; charset=utf-8"]],
   ["/favicon.svg", ["favicon.svg", "image/svg+xml"]],
+  ["/install.ps1", ["install.ps1", "text/plain; charset=utf-8"]],
 ]);
 
 const gateway = createServer(async (request, response) => {
@@ -108,6 +132,25 @@ const gateway = createServer(async (request, response) => {
       sendJson(response, 200, await deviceService.report(requireBearerToken(request), body));
       return;
     }
+    if (path === "/v1/device/workstation/status" && request.method === "POST") {
+      sendJson(response, 200, await workstationService.reportStatus(requireBearerToken(request), await readJsonBody(request)));
+      return;
+    }
+    if (path === "/v1/device/workstation/poll" && request.method === "POST") {
+      await readJsonBody(request);
+      sendJson(response, 200, await workstationService.poll(requireBearerToken(request)));
+      return;
+    }
+    const workstationProgressMatch = path.match(/^\/v1\/device\/workstation\/runs\/([^/]+)\/progress$/);
+    if (workstationProgressMatch && request.method === "PATCH") {
+      sendJson(response, 200, { run: await workstationService.progress(requireBearerToken(request), decodePathPart(workstationProgressMatch[1]), await readJsonBody(request)) });
+      return;
+    }
+    const workstationResultMatch = path.match(/^\/v1\/device\/workstation\/runs\/([^/]+)\/result$/);
+    if (workstationResultMatch && request.method === "POST") {
+      sendJson(response, 200, { run: await workstationService.finish(requireBearerToken(request), decodePathPart(workstationResultMatch[1]), await readJsonBody(request)) });
+      return;
+    }
 
     if (path === "/healthz" || path.startsWith("/v1/agent/")) {
       await proxy(request, response, url);
@@ -121,7 +164,7 @@ const gateway = createServer(async (request, response) => {
       const upstream = await fetch(`${internalBase}/v1/local/info`, { headers: { accept: "application/json" } });
       const data = await upstream.json().catch(() => ({}));
       if (!upstream.ok) throw statusError(upstream.status, data.message || `Local info failed with ${upstream.status}`);
-      sendJson(response, 200, { ...data, localAuth: true, restoreExecution: true, transferRules: true, transferCleanup: true, transferTorrentGroups: true, deviceIntegration: true, transferSchedulerIntervalMs });
+      sendJson(response, 200, { ...data, localAuth: true, restoreExecution: true, transferRules: true, transferCleanup: true, transferTorrentGroups: true, deviceIntegration: true, workstationBackups: true, transferSchedulerIntervalMs, workstationSchedulerIntervalMs });
       return;
     }
 
@@ -141,6 +184,28 @@ const gateway = createServer(async (request, response) => {
     const deviceMatch = path.match(/^\/v1\/local\/devices\/([^/]+)$/);
     if (deviceMatch && request.method === "PATCH") {
       sendJson(response, 200, { device: await deviceService.update(decodePathPart(deviceMatch[1]), await readJsonBody(request)) });
+      return;
+    }
+
+    if (path === "/v1/local/workstations" && request.method === "GET") {
+      sendJson(response, 200, { workstations: await workstationService.list() });
+      return;
+    }
+    if (path === "/v1/local/workstations/enroll" && request.method === "POST") {
+      const body = await readJsonBody(request);
+      const created = await deviceService.create({ name: body.name, kind: "workstation" });
+      const origin = requestOrigin(request, url);
+      sendJson(response, 201, { ...created, installCommand: workstationInstallCommand(origin, created.token) });
+      return;
+    }
+    const workstationPolicyMatch = path.match(/^\/v1\/local\/workstations\/([^/]+)\/policy$/);
+    if (workstationPolicyMatch && request.method === "PUT") {
+      sendJson(response, 200, { policy: await workstationService.putPolicy(decodePathPart(workstationPolicyMatch[1]), await readJsonBody(request)) });
+      return;
+    }
+    const workstationRunMatch = path.match(/^\/v1\/local\/workstations\/([^/]+)\/run$/);
+    if (workstationRunMatch && request.method === "POST") {
+      sendJson(response, 202, { run: await workstationService.runNow(decodePathPart(workstationRunMatch[1])) });
       return;
     }
 
@@ -256,6 +321,7 @@ async function shutdown(signal) {
   if (stopping) return;
   stopping = true;
   clearInterval(transferTimer);
+  clearInterval(workstationTimer);
   log("info", "gateway shutdown requested", { signal });
   await new Promise((resolve) => gateway.close(resolve));
   db.close();
@@ -298,7 +364,7 @@ async function servePublic(path, response) {
   const content = await readFile(join(webDir, file));
   response.statusCode = 200;
   response.setHeader("content-type", contentType);
-  response.setHeader("cache-control", path === "/auth.html" ? "no-store" : "public, max-age=300");
+  response.setHeader("cache-control", path === "/auth.html" || path === "/install.ps1" ? "no-store" : "public, max-age=300");
   response.setHeader("x-content-type-options", "nosniff");
   response.setHeader("content-security-policy", "default-src 'self'; img-src 'self'; style-src 'self'; script-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'");
   response.end(content);
@@ -337,6 +403,7 @@ function acceptsHtml(request) { const accept = singleHeader(request.headers.acce
 function isMutation(method) { return !["GET", "HEAD", "OPTIONS"].includes(method || "GET"); }
 function singleHeader(value) { return Array.isArray(value) ? value[0] : typeof value === "string" ? value : null; }
 function requireBearerToken(request) { const value = singleHeader(request.headers.authorization); const match = typeof value === "string" ? value.match(/^Bearer\s+(.+)$/i) : null; if (!match?.[1]) throw statusError(401, "Device bearer token is required"); return match[1]; }
+function requestOrigin(request, url) { const proto = singleHeader(request.headers["x-forwarded-proto"])?.split(",")[0]?.trim() || url.protocol.replace(":", ""); const host = singleHeader(request.headers["x-forwarded-host"])?.split(",")[0]?.trim() || singleHeader(request.headers.host) || url.host; return `${proto}://${host}`; }
 function decodePathPart(value) { try { return decodeURIComponent(value); } catch { return value; } }
 function positiveInteger(value, name) { const parsed = Number(value); if (!Number.isInteger(parsed) || parsed <= 0) throw new Error(`${name} must be a positive integer`); return parsed; }
 function stringId(value) { return typeof value === "string" ? value.trim() : ""; }
