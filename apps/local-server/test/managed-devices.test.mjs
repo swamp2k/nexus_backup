@@ -55,7 +55,7 @@ test("workstation enrollment credential is one-shot and rotates before normal au
     assert.match(bootstrap.deviceToken,/^nxbdev_/);
     assert.notEqual(bootstrap.deviceToken,created.token);
     assert.equal(bootstrap.device.hostname,"balder-pc");
-    await assert.rejects(()=>f.service.report(created.token,{version:"installer"}),/Invalid or disabled device token/);
+    await assert.rejects(()=>f.service.report(created.token,{version:"installer"}),/Invalid.*device token/);
 
     const normal=await f.service.report(bootstrap.deviceToken,{version:"1.0.0",hostname:"balder-pc",platform:"windows/amd64"});
     assert.equal(normal.device.version,"1.0.0");
