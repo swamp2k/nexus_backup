@@ -20,6 +20,15 @@ export type ExecutionEvent =
       type: "summary";
       tool: "restic" | "rclone";
       data: Readonly<Record<string, unknown>>;
+    }
+  | {
+      type: "inventory";
+      tool: "restic";
+      repositoryId: string;
+      stats: Readonly<Record<string, number | null>>;
+      snapshots: readonly Readonly<Record<string, unknown>>[];
+      snapshotLimit: number;
+      truncated: boolean;
     };
 
 export type ExecutionProgressEvent = Extract<ExecutionEvent, { type: "progress" }>;
