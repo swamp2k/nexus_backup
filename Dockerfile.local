@@ -25,7 +25,8 @@ RUN mkdir -p /app/node_modules/@nexus-backup /config /run/nexus-backup \
 ENV NEXUS_BACKUP_CONFIG_DIR=/config \
     NEXUS_BACKUP_RUNTIME_DIR=/run/nexus-backup \
     NEXUS_BACKUP_HOST=0.0.0.0 \
-    NEXUS_BACKUP_PORT=8787
+    NEXUS_BACKUP_PORT=8787 \
+    NEXUS_BACKUP_INTERNAL_PORT=8788
 EXPOSE 8787
 ENTRYPOINT ["/sbin/tini", "--"]
-CMD ["node", "apps/local-server/bin/server.mjs"]
+CMD ["node", "apps/local-server/bin/gateway.mjs"]
