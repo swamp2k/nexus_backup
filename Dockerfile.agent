@@ -1,0 +1,25 @@
+FROM node:22-alpine AS build
+WORKDIR /src
+
+COPY package.json package-lock.json tsconfig.json tsconfig.base.json ./
+COPY packages ./packages
+COPY apps ./apps
+RUN npm ci --ignore-scripts
+RUN npm run build
+
+FROM node:22-alpine AS runtime
+RUN apk add --no-cache ca-certificates fuse3 rclone restic tini
+
+WORKDIR /app
+COPY --from=build /src/packages/core/package.json ./packages/core/package.json
+COPY --from=build /src/packages/core/dist ./packages/core/dist
+COPY --from=build /src/apps/agent/package.json ./apps/agent/package.json
+COPY --from=build /src/apps/agent/dist ./apps/agent/dist
+COPY --from=build /src/apps/agent/bin ./apps/agent/bin
+
+RUN mkdir -p /app/node_modules/@nexus-backup /config /state/mounts /state/rclone-vfs /state/restic-cache /data /backup \
+    && ln -s /app/packages/core /app/node_modules/@nexus-backup/core
+
+ENV NEXUS_BACKUP_CONFIG=/config/agent.json
+ENTRYPOINT ["/sbin/tini", "--"]
+CMD ["node", "apps/agent/bin/agent.mjs"]
