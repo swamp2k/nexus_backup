@@ -4,7 +4,7 @@ Nexus Backup is the backup and transfer engine for Nexus. Nexus is the control p
 
 ## Status
 
-M1 and M2 are implemented.
+M1 and M2 are implemented. M3 execution foundation is implemented; host-specific rclone mount orchestration is intentionally deferred until the Unraid agent runtime is selected.
 
 ### M1 - job engine and agent lifecycle
 
@@ -28,6 +28,19 @@ M1 and M2 are implemented.
 - scheduled stale-lease recovery
 - HTTP control-plane client for the agent
 - SQLite-backed contract and end-to-end tests
+
+### M3 - execution foundation
+
+- cancellable child-process runner with TERM -> KILL escalation
+- local-only source, repository and rclone endpoint registry
+- restic backup executor with JSON progress parsing
+- restic exit code 3 mapped to `partial`
+- rclone copy/move executor with JSON stats parsing
+- destructive rclone `move` requires local source opt-in
+- composite executor dispatch by job type
+- raw source/repository paths cannot be supplied by control-plane jobs
+
+The remaining host-specific M3 work is rclone mount lifecycle and cache/unmount policy for remote-as-source backups such as Google Drive -> restic.
 
 Backup payloads must never pass through the Nexus control plane.
 
@@ -67,7 +80,7 @@ The actual D1 database name/id and deployment target must be selected before a W
 
 1. M1 - Core engine and agent lifecycle ✅
 2. M2 - Control-plane API, D1 persistence and agent authentication ✅
-3. M3 - rclone + restic pipeline
+3. M3 - rclone + restic pipeline (execution foundation ✅; mount integration pending)
 4. M4 - Nexus UI
 5. M5 - transfer engine / Copyarr capabilities
 6. M6 - device / PCWatch integration
