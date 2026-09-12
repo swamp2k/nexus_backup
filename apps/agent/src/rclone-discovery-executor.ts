@@ -1,5 +1,5 @@
 import type { BackupJob } from "@nexus-backup/core";
-import type { ExecutionEventSink } from "./execution-events.js";
+import type { ExecutionEventSink, TransferGroupEvent } from "./execution-events.js";
 import { noopExecutionEventSink } from "./execution-events.js";
 import type { JobExecutionResult, JobExecutor } from "./executor.js";
 import type { CommandRunner } from "./process-runner.js";
@@ -122,9 +122,26 @@ export class RcloneDiscoveryExecutor implements JobExecutor {
     if (encodedSize > MAX_EVENT_JSON) throw new Error("filtered transfer discovery result is too large; narrow the rule with include/exclude filters");
 
     this.#events.emit({ type: "transfer-discovery", tool: "rclone", ruleId: payload.ruleId, entries });
-    this.#events.emit({ type: "summary", tool: "rclone", data: { operation: "transfer-discovery", ruleId: payload.ruleId, files: entries.length, rtorrent: rtorrentSummary } });
+    const groups = buildTransferGroups(entries);
+    if (groups.length > 0) this.#events.emit({ type: "transfer-groups", tool: "rclone", ruleId: payload.ruleId, groups });
+    this.#events.emit({ type: "summary", tool: "rclone", data: { operation: "transfer-discovery", ruleId: payload.ruleId, files: entries.length, groups: groups.length, rtorrent: rtorrentSummary } });
     return { status: "completed" };
   }
+}
+
+function buildTransferGroups(entries: readonly DiscoveryEntry[]): TransferGroupEvent[] {
+  const groups = new Map<string, TransferGroupEvent>();
+  for (const entry of entries) {
+    if (entry.groupKind !== "torrent" || !entry.groupKey || !entry.groupName || !entry.groupRoot) continue;
+    let group = groups.get(entry.groupKey);
+    if (!group) {
+      group = { kind: "torrent", key: entry.groupKey, name: entry.groupName, root: entry.groupRoot, entries: [] };
+      groups.set(entry.groupKey, group);
+    }
+    if (group.root !== entry.groupRoot) throw new Error(`rtorrent group ${entry.groupKey} resolved to multiple roots`);
+    (group.entries as DiscoveryEntry[]).push({ relPath: entry.relPath, size: entry.size, modTime: entry.modTime });
+  }
+  return [...groups.values()].sort((left, right) => left.root.localeCompare(right.root));
 }
 
 function parsePayload(value: unknown): DiscoveryPayload {
