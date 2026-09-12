@@ -19,7 +19,7 @@ The command keeps the simple `nxbdev_` format, but the credential embedded in a 
 - is immediately rotated to a new long-lived device token returned directly to the target PC;
 - cannot be reused after the rotation.
 
-This makes the generated command suitable for a launcher such as PCWatch: the launcher can carry a short-lived enrollment credential without ever receiving the durable Nexus workstation token.
+This makes the generated command suitable for a launcher such as PCWatch: the launcher can carry a short-lived enrollment credential without ever receiving the durable Nexus workstation token. A fresh enrollment command should therefore be executed promptly; if its 15-minute bootstrap credential expires, create a new workstation enrollment rather than reusing the stale command.
 
 Repair/update is different from first enrollment. Once installed, the machine keeps its durable device token in the protected local configuration, so rerunning `install.ps1` uses that local token rather than requiring or consuming another bootstrap credential.
 
