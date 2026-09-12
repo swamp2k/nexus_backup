@@ -49,5 +49,69 @@
   <script type="module" src="/maintenance.js"></script>
   <script type="module" src="/repository-inventory.js"></script>
   <script type="module" src="/transfers.js"></script>
+  <script type="module">
+    let gates=[];
+    let rules=[];
+    let editingId=null;
+    const nativeFetch=window.fetch.bind(window);
+
+    window.fetch=async(input,init={})=>{
+      const url=typeof input==="string"?input:input?.url||"";
+      const method=String(init.method||(typeof input!=="string"&&input?.method)||"GET").toUpperCase();
+      const mutation=(method==="POST"&&/\/v1\/local\/transfers$/.test(url))||(method==="PUT"&&/\/v1\/local\/transfers\/[^/]+$/.test(url));
+      if(mutation&&typeof init.body==="string"){
+        try{
+          const payload=JSON.parse(init.body);
+          const select=document.querySelector('#transfer-form select[name="rtorrentGateId"]');
+          if(select)payload.rtorrentGateId=select.value||null;
+          init={...init,body:JSON.stringify(payload)};
+        }catch{}
+      }
+      return nativeFetch(input,init);
+    };
+
+    async function refreshRtorrentConfig(){
+      try{
+        const [configResponse,rulesResponse]=await Promise.all([nativeFetch("/v1/local/config",{headers:{accept:"application/json"}}),nativeFetch("/v1/local/transfers",{headers:{accept:"application/json"}})]);
+        if(configResponse.ok){const config=await configResponse.json();gates=config.rtorrentGates??[];}
+        if(rulesResponse.ok){const data=await rulesResponse.json();rules=data.rules??[];}
+      }catch{}
+      enhance();
+    }
+
+    function enhance(){
+      const form=document.querySelector("#transfer-form");
+      if(form&&!form.querySelector('[name="rtorrentGateId"]')){
+        const enabled=form.querySelector(".enabled-row");
+        const label=document.createElement("label");
+        label.className="full";
+        label.innerHTML=`<span>rTorrent readiness <small>optional</small></span><select name="rtorrentGateId"><option value="">Stability window only</option>${gates.map(g=>`<option value="${escapeHtml(g.id)}">${escapeHtml(g.id)} · ${g.required?"required":"fallback allowed"}</option>`).join("")}</select><small>Only the gate ID is stored in the rule. RPC address and credentials stay local in agent config.</small>`;
+        if(enabled)enabled.before(label);else form.querySelector(".transfer-form-grid")?.append(label);
+      }
+      const select=form?.querySelector('[name="rtorrentGateId"]');
+      if(select){const rule=rules.find(item=>item.id===editingId);select.value=rule?.rtorrentGateId||"";}
+
+      document.querySelectorAll('.transfer-card[data-rule]').forEach(card=>{
+        const rule=rules.find(item=>item.id===card.dataset.rule);if(!rule)return;
+        const filters=card.querySelector(".transfer-meta.filters");
+        if(filters&&!filters.querySelector("[data-rtorrent-meta]")){
+          const span=document.createElement("span");span.dataset.rtorrentMeta="1";span.textContent=rule.rtorrentGateId?`rTorrent: ${rule.rtorrentGateId}`:"rTorrent: off";filters.prepend(span);
+        }
+      });
+      const note=document.querySelector("#transfers-view .transfer-note");
+      if(note)note.innerHTML="<strong>Copyarr safety:</strong> staged transfer + exact-size verification are active. Move deletes source only after final verification. Cleanup re-checks destination provenance before delete. Optional rTorrent readiness gates hold back known incomplete torrents; credentials never leave local agent config.";
+    }
+
+    document.addEventListener("click",event=>{
+      const edit=event.target.closest?.('[data-action="edit"][data-id]');
+      if(edit){editingId=edit.dataset.id;queueMicrotask(enhance);setTimeout(enhance,0);}
+      if(event.target.closest?.("#new-job-button")){editingId=null;queueMicrotask(enhance);setTimeout(enhance,0);}
+    },true);
+    new MutationObserver(enhance).observe(document.body,{childList:true,subtree:true});
+    window.addEventListener("hashchange",()=>{if(location.hash==="#transfers")void refreshRtorrentConfig();});
+    setInterval(()=>{if(location.hash==="#transfers")void refreshRtorrentConfig();},5000);
+    if(location.hash==="#transfers")void refreshRtorrentConfig();
+    function escapeHtml(value){return String(value??"").replace(/[&<>"']/g,char=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[char]));}
+  </script>
 </body>
 </html>
