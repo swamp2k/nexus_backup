@@ -44,6 +44,16 @@ export interface LocalRcloneEndpoint {
   mount?: LocalRcloneMountConfig;
 }
 
+export interface LocalRtorrentGate {
+  id: string;
+  url: string;
+  username?: string;
+  password?: string;
+  view?: string;
+  sourceBasePath: string;
+  required?: boolean;
+}
+
 export interface AgentToolConfig {
   resticBinary?: string;
   rcloneBinary?: string;
@@ -59,6 +69,7 @@ export interface AgentRuntimeConfig {
   resticRepository(id: string): LocalResticRepository;
   restoreTarget(id: string): LocalRestoreTarget;
   rcloneEndpoint(id: string): LocalRcloneEndpoint;
+  rtorrentGate(id: string): LocalRtorrentGate;
   tools: AgentToolConfig;
 }
 
@@ -67,6 +78,7 @@ export interface StaticAgentRuntimeConfigInput {
   resticRepositories?: readonly LocalResticRepository[];
   restoreTargets?: readonly LocalRestoreTarget[];
   rcloneEndpoints?: readonly LocalRcloneEndpoint[];
+  rtorrentGates?: readonly LocalRtorrentGate[];
   tools?: AgentToolConfig;
 }
 
@@ -75,6 +87,7 @@ export class StaticAgentRuntimeConfig implements AgentRuntimeConfig {
   readonly #repositories: Map<string, LocalResticRepository>;
   readonly #restoreTargets: Map<string, LocalRestoreTarget>;
   readonly #rcloneEndpoints: Map<string, LocalRcloneEndpoint>;
+  readonly #rtorrentGates: Map<string, LocalRtorrentGate>;
   readonly tools: AgentToolConfig;
 
   constructor(input: StaticAgentRuntimeConfigInput = {}) {
@@ -111,6 +124,11 @@ export class StaticAgentRuntimeConfig implements AgentRuntimeConfig {
         ...(item.mount === undefined ? {} : { mount: normalizeMount(item.mount) }),
       }),
     );
+    this.#rtorrentGates = indexById(
+      input.rtorrentGates ?? [],
+      "rtorrent gate",
+      (item) => normalizeRtorrentGate(item),
+    );
     this.tools = normalizeTools(input.tools ?? {});
   }
 
@@ -128,6 +146,10 @@ export class StaticAgentRuntimeConfig implements AgentRuntimeConfig {
 
   rcloneEndpoint(id: string): LocalRcloneEndpoint {
     return requireEntry(this.#rcloneEndpoints, id, "rclone endpoint");
+  }
+
+  rtorrentGate(id: string): LocalRtorrentGate {
+    return requireEntry(this.#rtorrentGates, id, "rtorrent gate");
   }
 }
 
@@ -176,6 +198,22 @@ function normalizeMount(input: LocalRcloneMountConfig): LocalRcloneMountConfig {
     ...(input.args === undefined ? {} : {
       args: Object.freeze(input.args.map((arg, index) => requireNonEmpty(arg, `rclone mount argument ${index + 1}`))),
     }),
+  });
+}
+
+function normalizeRtorrentGate(input: LocalRtorrentGate): LocalRtorrentGate {
+  const url = requireNonEmpty(input.url, "rtorrent gate url");
+  let parsed: URL;
+  try { parsed = new URL(url); } catch { throw new Error(`Invalid rtorrent gate URL: ${url}`); }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error("rtorrent gate URL must use http or https");
+  return Object.freeze({
+    id: requireNonEmpty(input.id, "rtorrent gate id"),
+    url: parsed.toString(),
+    sourceBasePath: requireNonEmpty(input.sourceBasePath, "rtorrent source base path"),
+    ...(input.username === undefined ? {} : { username: requireNonEmpty(input.username, "rtorrent username") }),
+    ...(input.password === undefined ? {} : { password: requireNonEmpty(input.password, "rtorrent password") }),
+    ...(input.view === undefined ? {} : { view: requireNonEmpty(input.view, "rtorrent view") }),
+    required: input.required === true,
   });
 }
 

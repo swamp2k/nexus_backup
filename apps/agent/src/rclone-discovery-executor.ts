@@ -4,6 +4,7 @@ import { noopExecutionEventSink } from "./execution-events.js";
 import type { JobExecutionResult, JobExecutor } from "./executor.js";
 import type { CommandRunner } from "./process-runner.js";
 import { ToolExitError } from "./process-runner.js";
+import { RtorrentClient, type RtorrentTorrent } from "./rtorrent-client.js";
 import type { AgentRuntimeConfig } from "./runtime-config.js";
 
 const MAX_FILES = 5000;
@@ -16,6 +17,7 @@ interface DiscoveryPayload {
   sourcePath: string;
   includes: string[];
   excludes: string[];
+  rtorrentGateId?: string;
 }
 interface DiscoveryEntry { relPath: string; size: number; modTime: string; }
 
@@ -57,7 +59,7 @@ export class RcloneDiscoveryExecutor implements JobExecutor {
     catch { throw new Error("rclone discovery returned invalid JSON"); }
     if (!Array.isArray(raw)) throw new Error("rclone discovery did not return a JSON file list");
 
-    const entries: DiscoveryEntry[] = [];
+    let entries: DiscoveryEntry[] = [];
     let encodedSize = 2;
     for (const item of raw) {
       const entry = parseLsjsonItem(item);
@@ -68,8 +70,38 @@ export class RcloneDiscoveryExecutor implements JobExecutor {
       entries.push(entry);
     }
 
+    let rtorrentSummary: Record<string, unknown> = { enabled: false };
+    if (payload.rtorrentGateId) {
+      const gate = this.#config.rtorrentGate(payload.rtorrentGateId);
+      try {
+        const torrents = await new RtorrentClient(gate).torrents(signal);
+        const complete = torrents.filter((torrent) => torrent.complete).length;
+        let blocked = 0;
+        entries = entries.filter((entry) => {
+          const torrent = torrentForPath(entry.relPath, torrents, gate.sourceBasePath);
+          if (!torrent || torrent.complete) return true;
+          blocked += 1;
+          return false;
+        });
+        rtorrentSummary = {
+          enabled: true,
+          gateId: payload.rtorrentGateId,
+          available: true,
+          parsed: torrents.length,
+          complete,
+          blockedIncompleteFiles: blocked,
+        };
+        this.#events.emit({ type: "log", tool: "rclone", stream: "stdout", message: `rTorrent gate ${payload.rtorrentGateId}: ${torrents.length} torrents, ${complete} complete, ${blocked} incomplete file${blocked === 1 ? "" : "s"} held back` });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (gate.required) throw new Error(`rtorrent required: ${message}`);
+        rtorrentSummary = { enabled: true, gateId: payload.rtorrentGateId, available: false, fallback: "stability", error: message };
+        this.#events.emit({ type: "log", tool: "rclone", stream: "stderr", message: `rTorrent gate unavailable; using stability fallback (${message})` });
+      }
+    }
+
     this.#events.emit({ type: "transfer-discovery", tool: "rclone", ruleId: payload.ruleId, entries });
-    this.#events.emit({ type: "summary", tool: "rclone", data: { operation: "transfer-discovery", ruleId: payload.ruleId, files: entries.length } });
+    this.#events.emit({ type: "summary", tool: "rclone", data: { operation: "transfer-discovery", ruleId: payload.ruleId, files: entries.length, rtorrent: rtorrentSummary } });
     return { status: "completed" };
   }
 }
@@ -82,6 +114,7 @@ function parsePayload(value: unknown): DiscoveryPayload {
     sourcePath: normalizeBase(value.sourcePath),
     includes: stringArray(value.includes, "includes"),
     excludes: stringArray(value.excludes, "excludes"),
+    ...(value.rtorrentGateId === undefined || value.rtorrentGateId === null || value.rtorrentGateId === "" ? {} : { rtorrentGateId: requireId(value.rtorrentGateId, "rtorrentGateId") }),
   };
 }
 function parseLsjsonItem(value: unknown): DiscoveryEntry {
@@ -91,6 +124,30 @@ function parseLsjsonItem(value: unknown): DiscoveryEntry {
   if (!Number.isSafeInteger(size) || size < 0) throw new Error(`invalid rclone file size for ${relPath}`);
   if (typeof value.ModTime !== "string" || !Number.isFinite(Date.parse(value.ModTime))) throw new Error(`invalid rclone modification time for ${relPath}`);
   return { relPath, size, modTime: new Date(value.ModTime).toISOString() };
+}
+function torrentForPath(relPath: string, torrents: readonly RtorrentTorrent[], sourceBasePath: string): RtorrentTorrent | null {
+  let best: { torrent: RtorrentTorrent; root: string } | null = null;
+  for (const torrent of torrents) {
+    const root = torrentRelativeRoot(torrent.basePath, sourceBasePath);
+    if (!root || !pathWithinRoot(relPath, root)) continue;
+    if (!best || root.length > best.root.length) best = { torrent, root };
+  }
+  return best?.torrent ?? null;
+}
+function torrentRelativeRoot(basePath: string, sourceBasePath: string): string {
+  let value = basePath.trim().replaceAll("\\", "/").replace(/\/+$/g, "");
+  const base = sourceBasePath.trim().replaceAll("\\", "/").replace(/\/+$/g, "");
+  if (!value || !base) return "";
+  if (value === base) return value.split("/").filter(Boolean).at(-1) ?? "";
+  const prefix = `${base}/`;
+  if (!value.startsWith(prefix)) return "";
+  value = value.slice(prefix.length);
+  return value.replace(/^\/+|\/+$/g, "");
+}
+function pathWithinRoot(relPath: string, root: string): boolean {
+  const rel = relPath.replace(/^\/+|\/+$/g, "");
+  const normalizedRoot = root.replace(/^\/+|\/+$/g, "");
+  return rel === normalizedRoot || rel.startsWith(`${normalizedRoot}/`);
 }
 function pathAllowed(rel: string, includes: readonly string[], excludes: readonly string[]): boolean { for (const pattern of includes) if (filterMatch(pattern, rel)) return true; for (const pattern of excludes) if (filterMatch(pattern, rel)) return false; return true; }
 function filterMatch(input: string, rel: string): boolean { let pattern=input.trim().replace(/^\/+/,""); if(!pattern)return false; if(pattern.endsWith("/"))pattern+="**"; const regex=new RegExp(globRegex(pattern)); if(regex.test(rel))return true; if(!pattern.includes("/"))return regex.test(rel.split("/").at(-1)??rel); return false; }

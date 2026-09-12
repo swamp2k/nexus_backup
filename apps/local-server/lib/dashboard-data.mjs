@@ -60,7 +60,7 @@ export async function loadSanitizedAgentConfig(path) {
     raw = await readFile(path, "utf8");
   } catch (error) {
     if (error?.code === "ENOENT") {
-      return { available: false, sources: [], repositories: [], restoreTargets: [], endpoints: [] };
+      return { available: false, sources: [], repositories: [], restoreTargets: [], endpoints: [], rtorrentGates: [] };
     }
     throw error;
   }
@@ -76,6 +76,7 @@ export async function loadSanitizedAgentConfig(path) {
       repositories: [],
       restoreTargets: [],
       endpoints: [],
+      rtorrentGates: [],
     };
   }
 
@@ -87,6 +88,7 @@ export async function loadSanitizedAgentConfig(path) {
       repositories: [],
       restoreTargets: [],
       endpoints: [],
+      rtorrentGates: [],
     };
   }
 
@@ -96,6 +98,7 @@ export async function loadSanitizedAgentConfig(path) {
     repositories: sanitizeRepositories(value.resticRepositories),
     restoreTargets: sanitizeRestoreTargets(value.restoreTargets),
     endpoints: sanitizeEndpoints(value.rcloneEndpoints),
+    rtorrentGates: sanitizeRtorrentGates(value.rtorrentGates),
   };
 }
 
@@ -164,6 +167,17 @@ function sanitizeEndpoints(value) {
       };
     })
     .filter((endpoint) => endpoint.id);
+}
+
+function sanitizeRtorrentGates(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter(isRecord)
+    .map((gate) => ({
+      id: stringOrEmpty(gate.id),
+      required: gate.required === true,
+    }))
+    .filter((gate) => gate.id);
 }
 
 function rowToJob(row) {
