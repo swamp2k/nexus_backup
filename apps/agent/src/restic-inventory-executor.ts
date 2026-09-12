@@ -1,5 +1,9 @@
 import type { BackupJob } from "@nexus-backup/core";
-import type { ExecutionEventSink } from "./execution-events.js";
+import type {
+  ExecutionEventSink,
+  RepositoryInventorySnapshotEvent,
+  RepositoryInventoryStatsEvent,
+} from "./execution-events.js";
 import { noopExecutionEventSink } from "./execution-events.js";
 import type { JobExecutionResult, JobExecutor } from "./executor.js";
 import type { CommandRunner } from "./process-runner.js";
@@ -8,6 +12,11 @@ import type { AgentRuntimeConfig, LocalResticRepository } from "./runtime-config
 
 const MAX_SNAPSHOTS = 250;
 const MAX_OUTPUT_CHARS = 2 * 1024 * 1024;
+const MAX_EVENT_CHARS = 650_000;
+const MAX_PATHS = 16;
+const MAX_PATH_CHARS = 2_048;
+const MAX_TAGS = 32;
+const MAX_TAG_CHARS = 128;
 
 export interface ResticInventoryPayload {
   repositoryId: string;
@@ -43,15 +52,18 @@ export class ResticInventoryExecutor implements JobExecutor {
     );
     const snapshotsValue = parseJson(snapshotsOutput, "restic snapshots");
     if (!Array.isArray(snapshotsValue)) throw new Error("restic snapshots JSON must be an array");
-    const snapshots = snapshotsValue
+    const parsedSnapshots = snapshotsValue
       .map(normalizeSnapshot)
-      .filter((snapshot): snapshot is RepositorySnapshot => snapshot !== null)
+      .filter((snapshot): snapshot is RepositoryInventorySnapshotEvent => snapshot !== null)
       .sort((left, right) => Date.parse(right.time) - Date.parse(left.time));
 
     const statsOutput = await this.#runJson(["stats", "--json", "--mode", "raw-data"], env, signal);
     const statsValue = parseJson(statsOutput, "restic stats");
     if (!isRecord(statsValue)) throw new Error("restic stats JSON must be an object");
     const stats = normalizeStats(statsValue);
+    const snapshots = fitSnapshotsToEvent(parsedSnapshots, stats, payload.repositoryId);
+    const truncated = snapshots.length < parsedSnapshots.length
+      || (stats.snapshotsCount !== null && stats.snapshotsCount > snapshots.length);
 
     this.#events.emit({
       type: "inventory",
@@ -60,13 +72,13 @@ export class ResticInventoryExecutor implements JobExecutor {
       stats,
       snapshots,
       snapshotLimit: MAX_SNAPSHOTS,
-      truncated: stats.snapshotsCount !== null && stats.snapshotsCount > snapshots.length,
+      truncated,
     });
     this.#events.emit({
       type: "log",
       tool: "restic",
       stream: "stdout",
-      message: `Repository inventory complete: ${snapshots.length} snapshot${snapshots.length === 1 ? "" : "s"} loaded`,
+      message: `Repository inventory complete: ${snapshots.length} snapshot${snapshots.length === 1 ? "" : "s"} loaded${truncated ? " (catalog truncated)" : ""}`,
     });
     return { status: "completed" };
   }
@@ -98,23 +110,7 @@ export class ResticInventoryExecutor implements JobExecutor {
   }
 }
 
-interface RepositorySnapshot {
-  id: string;
-  shortId: string | null;
-  time: string;
-  parent: string | null;
-  hostname: string | null;
-  username: string | null;
-  paths: string[];
-  tags: string[];
-  programVersion: string | null;
-  totalFilesProcessed: number | null;
-  totalBytesProcessed: number | null;
-  dataAdded: number | null;
-  dataAddedPacked: number | null;
-}
-
-function normalizeSnapshot(value: unknown): RepositorySnapshot | null {
+function normalizeSnapshot(value: unknown): RepositoryInventorySnapshotEvent | null {
   if (!isRecord(value) || typeof value.id !== "string" || typeof value.time !== "string") return null;
   if (!Number.isFinite(Date.parse(value.time))) return null;
   const summary = isRecord(value.summary) ? value.summary : {};
@@ -125,8 +121,8 @@ function normalizeSnapshot(value: unknown): RepositorySnapshot | null {
     parent: optionalString(value.parent),
     hostname: optionalString(value.hostname),
     username: optionalString(value.username),
-    paths: stringArray(value.paths, 64, 4_096),
-    tags: stringArray(value.tags, 64, 256),
+    paths: stringArray(value.paths, MAX_PATHS, MAX_PATH_CHARS),
+    tags: stringArray(value.tags, MAX_TAGS, MAX_TAG_CHARS),
     programVersion: optionalString(value.program_version),
     totalFilesProcessed: optionalNonNegativeInteger(summary.total_files_processed),
     totalBytesProcessed: optionalNonNegativeNumber(summary.total_bytes_processed),
@@ -135,7 +131,7 @@ function normalizeSnapshot(value: unknown): RepositorySnapshot | null {
   };
 }
 
-function normalizeStats(value: Record<string, unknown>) {
+function normalizeStats(value: Record<string, unknown>): RepositoryInventoryStatsEvent {
   return {
     totalSize: optionalNonNegativeNumber(value.total_size),
     totalFileCount: optionalNonNegativeInteger(value.total_file_count),
@@ -146,6 +142,29 @@ function normalizeStats(value: Record<string, unknown>) {
     compressionProgress: optionalNonNegativeNumber(value.compression_progress),
     compressionSpaceSaving: optionalNumber(value.compression_space_saving),
   };
+}
+
+function fitSnapshotsToEvent(
+  snapshots: readonly RepositoryInventorySnapshotEvent[],
+  stats: RepositoryInventoryStatsEvent,
+  repositoryId: string,
+): RepositoryInventorySnapshotEvent[] {
+  const kept: RepositoryInventorySnapshotEvent[] = [];
+  for (const snapshot of snapshots) {
+    const candidate = [...kept, snapshot];
+    const encoded = JSON.stringify({
+      type: "inventory",
+      tool: "restic",
+      repositoryId,
+      stats,
+      snapshots: candidate,
+      snapshotLimit: MAX_SNAPSHOTS,
+      truncated: true,
+    });
+    if (encoded.length > MAX_EVENT_CHARS) break;
+    kept.push(snapshot);
+  }
+  return kept;
 }
 
 function resticEnvironment(repository: LocalResticRepository): Record<string, string> {
@@ -168,7 +187,10 @@ function parseJson(value: string, source: string): unknown {
 
 function stringArray(value: unknown, maxItems: number, maxLength: number): string[] {
   if (!Array.isArray(value)) return [];
-  return value.slice(0, maxItems).filter((item): item is string => typeof item === "string").map((item) => item.slice(0, maxLength));
+  return value
+    .slice(0, maxItems)
+    .filter((item): item is string => typeof item === "string")
+    .map((item) => item.slice(0, maxLength));
 }
 
 function optionalString(value: unknown): string | null {
