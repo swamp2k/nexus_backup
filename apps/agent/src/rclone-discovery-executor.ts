@@ -10,7 +10,7 @@ import type { AgentRuntimeConfig } from "./runtime-config.js";
 const MAX_FILES = 5000;
 const MAX_RAW_JSON = 800_000;
 const MAX_EVENT_JSON = 600_000;
-const MAX_GROUP_EVENT_JSON = 350_000;
+const MAX_GROUP_EVENT_JSON = 180_000;
 
 interface DiscoveryPayload {
   ruleId: string;
@@ -89,18 +89,12 @@ export class RcloneDiscoveryExecutor implements JobExecutor {
           grouped += 1;
           const key = requireTorrentKey(match.torrent.hash);
           const name = compactGroupName(match.torrent.name, match.root);
-          let group = groupMap.get(key);
-          if (!group) {
-            group = { kind: "torrent", key, name, root: match.root, paths: [] };
-            groupMap.set(key, group);
-          }
-          if (group.root !== match.root) throw new Error(`rtorrent group ${key} resolved to multiple roots`);
-          (group.paths as string[]).push(entry.relPath);
+          const existing = groupMap.get(key);
+          if (existing && existing.root !== match.root) throw new Error(`rtorrent group ${key} resolved to multiple roots`);
+          if (!existing) groupMap.set(key, { kind: "torrent", key, name, root: match.root });
           return [entry];
         });
-        groups = [...groupMap.values()]
-          .map((group) => ({ ...group, paths: [...group.paths].sort((a, b) => a.localeCompare(b)) }))
-          .sort((left, right) => left.root.localeCompare(right.root));
+        groups = [...groupMap.values()].sort((left, right) => left.root.localeCompare(right.root));
         if (JSON.stringify(groups).length > MAX_GROUP_EVENT_JSON) {
           throw new Error("rtorrent group manifest is too large; narrow the rule with include/exclude filters");
         }
@@ -127,9 +121,7 @@ export class RcloneDiscoveryExecutor implements JobExecutor {
     if (JSON.stringify(entries).length > MAX_EVENT_JSON) throw new Error("filtered transfer discovery result is too large; narrow the rule with include/exclude filters");
 
     this.#events.emit({ type: "transfer-discovery", tool: "rclone", ruleId: payload.ruleId, entries });
-    if (payload.rtorrentGateId) {
-      this.#events.emit({ type: "transfer-groups", tool: "rclone", ruleId: payload.ruleId, groups });
-    }
+    if (payload.rtorrentGateId) this.#events.emit({ type: "transfer-groups", tool: "rclone", ruleId: payload.ruleId, groups });
     this.#events.emit({ type: "summary", tool: "rclone", data: { operation: "transfer-discovery", ruleId: payload.ruleId, files: entries.length, groups: groups.length, rtorrent: rtorrentSummary } });
     return { status: "completed" };
   }
