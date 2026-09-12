@@ -10,6 +10,7 @@ import type { AgentRuntimeConfig } from "./runtime-config.js";
 const MAX_FILES = 5000;
 const MAX_RAW_JSON = 800_000;
 const MAX_EVENT_JSON = 600_000;
+const MAX_GROUP_EVENT_JSON = 350_000;
 
 interface DiscoveryPayload {
   ruleId: string;
@@ -19,15 +20,7 @@ interface DiscoveryPayload {
   excludes: string[];
   rtorrentGateId?: string;
 }
-interface DiscoveryEntry {
-  relPath: string;
-  size: number;
-  modTime: string;
-  groupKind?: "torrent";
-  groupKey?: string;
-  groupName?: string;
-  groupRoot?: string;
-}
+interface DiscoveryEntry { relPath: string; size: number; modTime: string; }
 interface TorrentMatch { torrent: RtorrentTorrent; root: string; }
 
 export class RcloneDiscoveryExecutor implements JobExecutor {
@@ -76,6 +69,7 @@ export class RcloneDiscoveryExecutor implements JobExecutor {
       entries.push(entry);
     }
 
+    let groups: TransferGroupEvent[] = [];
     let rtorrentSummary: Record<string, unknown> = { enabled: false };
     if (payload.rtorrentGateId) {
       const gate = this.#config.rtorrentGate(payload.rtorrentGateId);
@@ -84,6 +78,7 @@ export class RcloneDiscoveryExecutor implements JobExecutor {
         const complete = torrents.filter((torrent) => torrent.complete).length;
         let blocked = 0;
         let grouped = 0;
+        const groupMap = new Map<string, TransferGroupEvent>();
         entries = entries.flatMap((entry) => {
           const match = torrentForPath(entry.relPath, torrents, gate.sourceBasePath);
           if (!match) return [entry];
@@ -92,56 +87,52 @@ export class RcloneDiscoveryExecutor implements JobExecutor {
             return [];
           }
           grouped += 1;
-          return [{
-            ...entry,
-            groupKind: "torrent" as const,
-            groupKey: requireTorrentKey(match.torrent.hash),
-            groupName: compactGroupName(match.torrent.name, match.root),
-            groupRoot: match.root,
-          }];
+          const key = requireTorrentKey(match.torrent.hash);
+          const name = compactGroupName(match.torrent.name, match.root);
+          let group = groupMap.get(key);
+          if (!group) {
+            group = { kind: "torrent", key, name, root: match.root, paths: [] };
+            groupMap.set(key, group);
+          }
+          if (group.root !== match.root) throw new Error(`rtorrent group ${key} resolved to multiple roots`);
+          (group.paths as string[]).push(entry.relPath);
+          return [entry];
         });
+        groups = [...groupMap.values()]
+          .map((group) => ({ ...group, paths: [...group.paths].sort((a, b) => a.localeCompare(b)) }))
+          .sort((left, right) => left.root.localeCompare(right.root));
+        if (JSON.stringify(groups).length > MAX_GROUP_EVENT_JSON) {
+          throw new Error("rtorrent group manifest is too large; narrow the rule with include/exclude filters");
+        }
         rtorrentSummary = {
           enabled: true,
           gateId: payload.rtorrentGateId,
           available: true,
           parsed: torrents.length,
           complete,
+          groups: groups.length,
           groupedCompleteFiles: grouped,
           blockedIncompleteFiles: blocked,
         };
-        this.#events.emit({ type: "log", tool: "rclone", stream: "stdout", message: `rTorrent gate ${payload.rtorrentGateId}: ${torrents.length} torrents, ${complete} complete, ${grouped} grouped file${grouped === 1 ? "" : "s"}, ${blocked} incomplete file${blocked === 1 ? "" : "s"} held back` });
+        this.#events.emit({ type: "log", tool: "rclone", stream: "stdout", message: `rTorrent gate ${payload.rtorrentGateId}: ${torrents.length} torrents, ${complete} complete, ${groups.length} group${groups.length === 1 ? "" : "s"}, ${blocked} incomplete file${blocked === 1 ? "" : "s"} held back` });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         if (gate.required) throw new Error(`rtorrent required: ${message}`);
+        groups = [];
         rtorrentSummary = { enabled: true, gateId: payload.rtorrentGateId, available: false, fallback: "stability", error: message };
         this.#events.emit({ type: "log", tool: "rclone", stream: "stderr", message: `rTorrent gate unavailable; using stability fallback (${message})` });
       }
     }
 
-    const encodedSize = JSON.stringify(entries).length;
-    if (encodedSize > MAX_EVENT_JSON) throw new Error("filtered transfer discovery result is too large; narrow the rule with include/exclude filters");
+    if (JSON.stringify(entries).length > MAX_EVENT_JSON) throw new Error("filtered transfer discovery result is too large; narrow the rule with include/exclude filters");
 
     this.#events.emit({ type: "transfer-discovery", tool: "rclone", ruleId: payload.ruleId, entries });
-    const groups = buildTransferGroups(entries);
-    if (groups.length > 0) this.#events.emit({ type: "transfer-groups", tool: "rclone", ruleId: payload.ruleId, groups });
+    if (payload.rtorrentGateId) {
+      this.#events.emit({ type: "transfer-groups", tool: "rclone", ruleId: payload.ruleId, groups });
+    }
     this.#events.emit({ type: "summary", tool: "rclone", data: { operation: "transfer-discovery", ruleId: payload.ruleId, files: entries.length, groups: groups.length, rtorrent: rtorrentSummary } });
     return { status: "completed" };
   }
-}
-
-function buildTransferGroups(entries: readonly DiscoveryEntry[]): TransferGroupEvent[] {
-  const groups = new Map<string, TransferGroupEvent>();
-  for (const entry of entries) {
-    if (entry.groupKind !== "torrent" || !entry.groupKey || !entry.groupName || !entry.groupRoot) continue;
-    let group = groups.get(entry.groupKey);
-    if (!group) {
-      group = { kind: "torrent", key: entry.groupKey, name: entry.groupName, root: entry.groupRoot, entries: [] };
-      groups.set(entry.groupKey, group);
-    }
-    if (group.root !== entry.groupRoot) throw new Error(`rtorrent group ${entry.groupKey} resolved to multiple roots`);
-    (group.entries as DiscoveryEntry[]).push({ relPath: entry.relPath, size: entry.size, modTime: entry.modTime });
-  }
-  return [...groups.values()].sort((left, right) => left.root.localeCompare(right.root));
 }
 
 function parsePayload(value: unknown): DiscoveryPayload {
@@ -193,8 +184,8 @@ function compactGroupName(name: string, root: string): string {
 }
 function requireTorrentKey(value: string): string {
   const key = value.trim();
-  if (!key || key.length > 256) throw new Error("rtorrent returned an invalid torrent hash");
-  return key;
+  if (!/^(?:[A-Fa-f0-9]{40}|[A-Fa-f0-9]{64})$/.test(key)) throw new Error("rtorrent returned an invalid torrent info hash");
+  return key.toLowerCase();
 }
 function pathAllowed(rel: string, includes: readonly string[], excludes: readonly string[]): boolean { for (const pattern of includes) if (filterMatch(pattern, rel)) return true; for (const pattern of excludes) if (filterMatch(pattern, rel)) return false; return true; }
 function filterMatch(input: string, rel: string): boolean { let pattern=input.trim().replace(/^\/+/,""); if(!pattern)return false; if(pattern.endsWith("/"))pattern+="**"; const regex=new RegExp(globRegex(pattern)); if(regex.test(rel))return true; if(!pattern.includes("/"))return regex.test(rel.split("/").at(-1)??rel); return false; }
