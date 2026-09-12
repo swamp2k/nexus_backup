@@ -1,0 +1,61 @@
+package main
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+)
+
+func TestAPIClientUsesBearerAndDeviceReportShape(t *testing.T) {
+	var seen bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/device/report" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer nxbdev_test-token-1234567890" {
+			t.Fatalf("authorization = %q", got)
+		}
+		var report deviceReport
+		if err := json.NewDecoder(r.Body).Decode(&report); err != nil {
+			t.Fatal(err)
+		}
+		if report.Version != "1.2.3" || report.Hostname != "test-pc" || report.Platform != "windows/amd64" {
+			t.Fatalf("unexpected report: %#v", report)
+		}
+		seen = true
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"device":{"id":"device-1"},"nextReportSeconds":60}`))
+	}))
+	defer server.Close()
+
+	client := newAPIClient(server.URL, "nxbdev_test-token-1234567890")
+	response, err := client.reportDevice(deviceReport{Version: "1.2.3", Hostname: "test-pc", Platform: "windows/amd64", Capabilities: []string{"workstation.backup.v1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !seen || response.Device.ID != "device-1" {
+		t.Fatalf("response = %#v", response)
+	}
+}
+
+func TestFinishRunCarriesLeaseToken(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/device/workstation/runs/run-1/result" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body["leaseToken"] != "nxbws_abcdefghijklmnopqrstuvwxyz" || body["status"] != "success" {
+			t.Fatalf("body = %#v", body)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	client := newAPIClient(server.URL, "nxbdev_test-token-1234567890")
+	if err := client.finishRun("run-1", "nxbws_abcdefghijklmnopqrstuvwxyz", "success", map[string]any{"snapshotId": "abc"}, ""); err != nil {
+		t.Fatal(err)
+	}
+}
