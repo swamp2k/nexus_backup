@@ -37,6 +37,9 @@ CREATE TABLE workstation_runs (
 
 CREATE INDEX idx_workstation_runs_device_state ON workstation_runs(device_id,state,queued_at);
 CREATE INDEX idx_workstation_runs_lease ON workstation_runs(state,lease_expires_at);
+CREATE UNIQUE INDEX idx_workstation_runs_one_active_per_device
+  ON workstation_runs(device_id)
+  WHERE state IN ('queued','leased','running');
 CREATE INDEX idx_workstation_policies_due ON workstation_policies(enabled,next_run_at);
 
 CREATE TABLE workstation_status (
