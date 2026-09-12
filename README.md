@@ -1,6 +1,6 @@
 # Nexus Backup
 
-Nexus Backup is a self-contained backup and transfer platform for Nexus. The primary deployment is local-first: a Docker control-plane/UI container owns the local API and SQLite database, while a separate local agent holds credentials and moves data directly between sources and destinations.
+Nexus Backup is a self-contained backup and transfer platform for Nexus. The primary deployment is local-first: a Docker control-plane/UI container owns the local API and SQLite database, while separate data-plane agents hold credentials and move backup data directly.
 
 Cloudflare is optional remote control, never a requirement for normal operation and never part of the backup data path.
 
@@ -12,7 +12,7 @@ Cloudflare is optional remote control, never a requirement for normal operation 
 - idempotent operation keys
 - leases, heartbeats and stale-lease recovery
 - compare-and-swap revisions and atomic job/event mutations
-- authenticated local UI plus token-authenticated agents
+- authenticated local UI plus token-authenticated agents/devices
 - local SQLite is authoritative in self-contained mode
 
 ### Backup and restore
@@ -24,6 +24,25 @@ Cloudflare is optional remote control, never a requirement for normal operation 
 - repository inventory and snapshot browsing
 - restore preview plus guarded write restore to locally configured targets
 - live progress and bounded logs in the dashboard
+
+### Workstation backups
+
+M6 adds Nexus-owned Windows workstation backup without routing backup bytes or repository credentials through the control plane:
+
+- Windows x64 workstation agent with a direct one-line PowerShell `irm` installer
+- idempotent install/repair/update flow using the latest stable Nexus GitHub Release
+- release checksum verification for the workstation executable and pinned Restic binary
+- workstation policy in Nexus: source paths, excludes, schedule, timezone and retention
+- Restic executes on the workstation and uses VSS filesystem snapshots on Windows
+- repository location and Restic password remain only in `C:\ProgramData\NexusBackup`
+- endpoint jobs use device authentication plus expiring per-run lease tokens
+- expired leases are safely requeued; completed leases cannot be replayed
+- Restic exit code 3 is reported as a partial backup rather than success
+- repository initialization is automatic only for missing local filesystem repositories; remote repository errors are never treated as permission to initialize
+- live workstation progress, last successful backup, snapshot ID, next run and storage readiness appear in the Workstations dashboard
+- workstation repository URLs and passwords are never persisted in Nexus or PCWatch
+
+See `docs/workstations.md` for installation, storage setup and trust boundaries.
 
 ### Transfer engine
 
@@ -48,26 +67,28 @@ See `docs/transfers.md` for transfer invariants and safety boundaries.
 
 ### Managed devices
 
-M6 begins with a durable device trust layer for PCWatch and future clients:
+M6 includes a durable device trust layer for workstation agents and future integrations:
 
 - authenticated local admins can enroll, disable and rotate device credentials
 - device bearer secrets are shown once; only SHA-256 hashes are stored
-- devices report bounded version, hostname, platform, capability and remote-name metadata
-- the initial report shape intentionally matches the useful metadata already emitted by the PCWatch backup agent
-- online/offline state and capabilities are visible in the Devices dashboard
-- device reports do not accept backup payloads, storage credentials, arbitrary filesystem paths or shell commands
+- devices report bounded version, hostname, platform and capability metadata
+- online/offline state and capabilities are visible in the dashboard
+- device reports do not accept storage credentials or arbitrary shell commands
 
-See `docs/devices.md` for the current M6 boundary and PCWatch migration path.
+PCWatch is deliberately outside the Nexus backup data/status path. It may be used to execute the generated workstation `irm` installer command, but Nexus Backup remains the source of truth for workstation backup policy, progress and history.
+
+See `docs/devices.md` for the device trust boundary.
 
 ### Self-contained Docker runtime
 
 - `Dockerfile.local` runs the authenticated local API/UI and SQLite database
-- `Dockerfile.agent` runs rclone/restic/FUSE execution
+- `Dockerfile.agent` runs server-side rclone/restic/FUSE execution
 - `compose.yaml` joins them into one application
 - control and agent tokens are generated automatically and persisted locally
 - the agent token is shared through a private runtime volume
 - migrations are applied automatically at startup
-- coordinated control/agent release images use immutable SemVer tags plus a stable `latest` update channel
+- coordinated releases use immutable SemVer tags plus a stable `latest` Docker update channel
+- the same SemVer release publishes the Windows workstation executable as a GitHub Release asset
 - beta Unraid templates preserve the control/agent security boundary and track the coordinated `latest` images
 - storage paths remain parameterized; real deployment paths remain editable
 
@@ -88,9 +109,10 @@ For real storage, set the path variables used by `compose.yaml` or map the equiv
 ```text
 packages/core          Domain model, state machine, leases and repository contracts
 apps/control-plane     Portable API plus Cloudflare/D1 adapter
-apps/local-server      Authenticated local host, scheduler, UI and SQLite adapter
-apps/agent             Agent runtime and execution adapters
-config                 Local agent configuration example
+apps/local-server      Authenticated local host, scheduler and dashboard
+apps/agent             Server-side rclone/restic/FUSE execution agent
+apps/workstation-agent Windows workstation Restic backup agent
+config                 Local server-agent configuration example
 migrations             Shared SQLite/D1 schema migrations
 docs                   Architecture and runtime notes
 unraid                  Beta Unraid templates and install notes
@@ -98,15 +120,16 @@ unraid                  Beta Unraid templates and install notes
 
 ## Development
 
-Requires Node.js 22+ and TypeScript 5.8+.
+Requires Node.js 22+, TypeScript 5.8+ and Go 1.24+ for the workstation agent.
 
 ```bash
 npm ci
 npm test
 npm run typecheck
+cd apps/workstation-agent && go test ./...
 ```
 
-CI builds and validates both Docker images after the test gate. It also checks release metadata and the beta Unraid template contracts.
+CI validates Node tests/typecheck, the Windows workstation cross-build, the PowerShell installer, both Docker images, release metadata and the beta Unraid template contracts.
 
 ## Remote control
 
@@ -120,9 +143,9 @@ Remote control is an optional capability layered on top of the local installatio
 4. Local-first Docker runtime ✅
 5. M4 - dashboard, plans, telemetry, repository browsing and guarded restore ✅
 6. M5 - persistent Transfer/Copyarr engine ✅
-7. M6 - device / PCWatch integration 🚧
-8. M7 - richer restore workflows
+7. M6 - managed devices + workstation backup 🚧
+8. M7 - richer restore workflows, including workstation restore
 9. M8 - recovery torture testing
 10. M9 - architecture/security review
 
-See `docs/local-first.md`, `docs/architecture.md`, `docs/control-plane.md`, `docs/dashboard.md`, `docs/transfers.md`, `docs/devices.md`, `docs/releases.md`, `unraid/README.md` and `docs/unraid-agent.md` for the invariants later milestones must preserve.
+See `docs/local-first.md`, `docs/architecture.md`, `docs/control-plane.md`, `docs/dashboard.md`, `docs/transfers.md`, `docs/devices.md`, `docs/workstations.md`, `docs/releases.md`, `unraid/README.md` and `docs/unraid-agent.md` for the invariants later milestones must preserve.
