@@ -49,17 +49,17 @@ func executeResticBackup(cfg config, run workstationRun, report func(backupProgr
 		return backupResult{Duration: time.Since(started), Err: err}
 	}
 	if err := validateRepositoryConfig(cfg); err != nil {
-		return backupResult{Duration: time.Since(started), Err: err}
+		return backupResult{Duration: time.Since(started), Err: redactBackupError(cfg, err)}
 	}
 	env := append(os.Environ(),
 		"RESTIC_REPOSITORY="+cfg.Repository,
 		"RESTIC_PASSWORD_FILE="+cfg.PasswordFile,
 	)
 	if err := ensureRepository(cfg.ResticPath, env, cfg.Repository, cfg.AutoInit); err != nil {
-		return backupResult{Duration: time.Since(started), Err: err}
+		return backupResult{Duration: time.Since(started), Err: redactBackupError(cfg, err)}
 	}
 
-	hostname, _ := os.HostName()
+	hostname, _ := os.Hostname()
 	tag := "nexus-workstation:" + run.DeviceID
 	args := []string{"backup", "--json", "--host", hostname, "--tag", tag}
 	if runtime.GOOS == "windows" {
@@ -73,10 +73,11 @@ func executeResticBackup(cfg config, run workstationRun, report func(backupProgr
 	result := runBackupCommand(cfg.ResticPath, env, args, report)
 	result.Duration = time.Since(started)
 	if result.Err != nil {
+		result.Err = redactBackupError(cfg, result.Err)
 		return result
 	}
 	if err := applyRetention(cfg.ResticPath, env, tag, run.Retention); err != nil {
-		result.Err = fmt.Errorf("retention: %w", err)
+		result.Err = redactBackupError(cfg, fmt.Errorf("retention: %w", err))
 	}
 	return result
 }
@@ -184,8 +185,8 @@ func runBackupCommand(resticPath string, env, args []string, report func(backupP
 }
 
 func ensureRepository(resticPath string, env []string, repository string, autoInit bool) error {
-	if localRepositoryPath(repository) != "" {
-		configPath := filepath.Join(localRepositoryPath(repository), "config")
+	if local := localRepositoryPath(repository); local != "" {
+		configPath := filepath.Join(local, "config")
 		_, statErr := os.Stat(configPath)
 		if errors.Is(statErr, os.ErrNotExist) {
 			if !autoInit {
@@ -285,6 +286,20 @@ func validateRepositoryConfig(cfg config) error {
 		return errors.New("restic password file is empty")
 	}
 	return nil
+}
+
+func redactBackupError(cfg config, err error) error {
+	if err == nil {
+		return nil
+	}
+	text := err.Error()
+	if value := strings.TrimSpace(cfg.Repository); value != "" {
+		text = strings.ReplaceAll(text, value, "[repository]")
+	}
+	if value := strings.TrimSpace(cfg.PasswordFile); value != "" {
+		text = strings.ReplaceAll(text, value, "[password-file]")
+	}
+	return errors.New(text)
 }
 
 func boundedText(value []byte, max int) string {
