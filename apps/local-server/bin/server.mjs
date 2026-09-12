@@ -8,6 +8,7 @@ import { createApi, D1AgentStore, D1JobRepository } from "../../control-plane/di
 import { createBackupPlanService } from "../lib/backup-plans.mjs";
 import { createPlanMaintenanceService, enrichPlanJob } from "../lib/plan-maintenance.mjs";
 import { listAgents, listJobs, loadSanitizedAgentConfig } from "../lib/dashboard-data.mjs";
+import { listRepositoryInventories, queueRepositoryInventory } from "../lib/repository-inventory.mjs";
 import { getRuntimeTelemetry, recordRuntimeEvents } from "../lib/runtime-telemetry.mjs";
 import { openSqliteD1 } from "../lib/sqlite-d1.mjs";
 
@@ -113,10 +114,12 @@ const STATIC_FILES = new Map([
   ["/telemetry.js", ["telemetry.js", "text/javascript; charset=utf-8"]],
   ["/plans.js", ["plans.js", "text/javascript; charset=utf-8"]],
   ["/maintenance.js", ["maintenance.js", "text/javascript; charset=utf-8"]],
+  ["/repository-inventory.js", ["repository-inventory.js", "text/javascript; charset=utf-8"]],
   ["/styles.css", ["styles.css", "text/css; charset=utf-8"]],
   ["/telemetry.css", ["telemetry.css", "text/css; charset=utf-8"]],
   ["/plans.css", ["plans.css", "text/css; charset=utf-8"]],
   ["/maintenance.css", ["maintenance.css", "text/css; charset=utf-8"]],
+  ["/repository-inventory.css", ["repository-inventory.css", "text/css; charset=utf-8"]],
   ["/favicon.svg", ["favicon.svg", "image/svg+xml"]],
 ]);
 
@@ -140,6 +143,7 @@ const server = createServer(async (request, response) => {
         telemetryPollIntervalMs: 1000,
         schedulerIntervalMs,
         retentionEnforcement: true,
+        repositoryInventory: true,
       });
       return;
     }
@@ -151,6 +155,28 @@ const server = createServer(async (request, response) => {
 
     if (path === "/v1/local/agents" && request.method === "GET") {
       sendJson(response, 200, { agents: await listAgents(db) });
+      return;
+    }
+
+    if (path === "/v1/local/repositories" && request.method === "GET") {
+      const config = await loadSanitizedAgentConfig(agentConfigPath);
+      sendJson(response, 200, {
+        available: config.available,
+        repositories: await listRepositoryInventories(db, config.repositories ?? []),
+      });
+      return;
+    }
+
+    const repositoryRefreshMatch = path.match(/^\/v1\/local\/repositories\/([^/]+)\/refresh$/);
+    if (request.method === "POST" && repositoryRefreshMatch) {
+      const repositoryId = decodePathPart(repositoryRefreshMatch[1]);
+      const config = await loadSanitizedAgentConfig(agentConfigPath);
+      if (!config.available) throw statusError(409, "Agent config is unavailable");
+      sendJson(response, 202, await queueRepositoryInventory(db, {
+        repositoryId,
+        repositories: config.repositories ?? [],
+        enqueueJob,
+      }));
       return;
     }
 
@@ -255,11 +281,16 @@ const server = createServer(async (request, response) => {
         return;
       }
 
+      const expectedRepositoryId = job.type === "restic-inventory" && isRecord(job.payload)
+        && typeof job.payload.repositoryId === "string"
+        ? job.payload.repositoryId
+        : undefined;
       const accepted = await recordRuntimeEvents(db, {
         jobId,
         attempt: job.attempt,
         agentId: agent.id,
         events: body.events,
+        expectedRepositoryId,
       });
       await agentStore.touch(agent.id, new Date());
       sendJson(response, 202, { accepted });
@@ -315,7 +346,7 @@ const server = createServer(async (request, response) => {
       ? error.statusCode
       : error instanceof RangeError ? 400 : 500;
     sendJson(response, status, {
-      code: status === 413 ? "payload_too_large" : status === 404 ? "not_found" : status < 500 ? "validation_error" : "internal_error",
+      code: status === 413 ? "payload_too_large" : status === 404 ? "not_found" : status === 409 ? "conflict" : status < 500 ? "validation_error" : "internal_error",
       message: status === 413 ? "Request body exceeds 1 MiB" : status < 500 ? error.message : "Internal server error",
     });
   }
@@ -496,6 +527,10 @@ function statusError(statusCode, message) {
 function serializeError(error) {
   if (error instanceof Error) return { name: error.name, message: error.message };
   return { name: "Error", message: String(error) };
+}
+
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function log(level, message, data = {}) {

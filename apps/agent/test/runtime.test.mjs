@@ -96,6 +96,42 @@ test("telemetry sink coalesces progress and flushes logs with the active lease",
   assert.ok(calls[0].events.every((event) => typeof event.at === "string"));
 });
 
+test("inventory telemetry reaches control plane intact but Docker logs stay compact", async () => {
+  const calls = [];
+  const logs = [];
+  const sink = createBufferedTelemetrySink({
+    async runtimeEvents(jobId, agentId, leaseToken, events) {
+      calls.push({ jobId, agentId, leaseToken, events });
+    },
+  }, "local-agent", {
+    log: (level, message, data) => logs.push({ level, message, data }),
+    flushIntervalMs: 60_000,
+    now: () => new Date("2026-09-12T10:00:00.000Z"),
+  });
+  const inventory = {
+    type: "inventory",
+    tool: "restic",
+    repositoryId: "repo-main",
+    stats: { totalSize: 1234 },
+    snapshots: [{ id: "aaaaaaaaaaaaaaaa", paths: ["/private/path"], tags: [] }],
+    snapshotLimit: 250,
+    truncated: false,
+  };
+
+  sink.begin({ id: "job-inventory", lease: { token: "lease-inventory" } });
+  sink.emit(inventory);
+  await sink.end();
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].events[0].snapshots[0].id, "aaaaaaaaaaaaaaaa");
+  const executionLog = logs.find((entry) => entry.message === "execution event");
+  assert.ok(executionLog);
+  assert.equal(executionLog.data.event.type, "inventory");
+  assert.equal(executionLog.data.event.snapshots, 1);
+  assert.equal(JSON.stringify(executionLog).includes("/private/path"), false);
+  assert.equal(JSON.stringify(executionLog).includes("aaaaaaaaaaaaaaaa"), false);
+});
+
 test("telemetry delivery failures are logged but never fail the backup path", async () => {
   const logs = [];
   const sink = createBufferedTelemetrySink({
