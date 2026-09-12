@@ -277,6 +277,14 @@ function compactEventForLog(event) {
       entries: Array.isArray(event.entries) ? event.entries.length : 0,
     };
   }
+  if (event?.type === "transfer-groups") {
+    return {
+      type: "transfer-groups",
+      tool: event.tool,
+      ruleId: event.ruleId,
+      groups: Array.isArray(event.groups) ? event.groups.length : 0,
+    };
+  }
   return event;
 }
 
