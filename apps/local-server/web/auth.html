@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>Nexus Backup · Sign in</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/auth.css">
+</head>
+<body>
+  <main class="auth-shell">
+    <section class="auth-card">
+      <div class="brand-mark" aria-hidden="true">N</div>
+      <p class="eyebrow">Nexus Backup</p>
+      <h1 id="auth-title">Local admin</h1>
+      <p class="auth-copy" id="auth-copy">Checking local authentication…</p>
+      <form id="auth-form" class="hidden" autocomplete="on">
+        <label id="setup-token-field" class="hidden"><span>Setup token</span><input id="setup-token" autocomplete="one-time-code" spellcheck="false"></label>
+        <label><span>Password</span><input id="password" type="password" minlength="12" maxlength="256" autocomplete="current-password" required></label>
+        <label id="confirm-field" class="hidden"><span>Confirm password</span><input id="confirm-password" type="password" minlength="12" maxlength="256" autocomplete="new-password"></label>
+        <button class="primary" id="submit-button" type="submit">Sign in</button>
+      </form>
+      <div class="auth-error hidden" id="auth-error" role="alert"></div>
+      <p class="footnote" id="auth-note">Authentication stays entirely on this Nexus Backup installation.</p>
+    </section>
+  </main>
+  <script type="module" src="/auth.js"></script>
+</body>
+</html>
