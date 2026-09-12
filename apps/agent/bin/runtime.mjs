@@ -264,7 +264,6 @@ function compactEventForLog(event) {
       tool: event.tool,
       repositoryId: event.repositoryId,
       snapshotId: typeof event.snapshotId === "string" ? event.snapshotId.slice(0, 12) : null,
-      path: event.path,
       entries: Array.isArray(event.entries) ? event.entries.length : 0,
       entryLimit: event.entryLimit,
       truncated: event.truncated,
