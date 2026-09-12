@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  createBufferedTelemetrySink,
   loadRuntimeConfig,
   loadSecret,
   runAgentLoop,
@@ -61,6 +62,53 @@ test("runtime options accept either a direct token or shared token file", async 
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("telemetry sink coalesces progress and flushes logs with the active lease", async () => {
+  const calls = [];
+  const controlPlane = {
+    async runtimeEvents(jobId, agentId, leaseToken, events) {
+      calls.push({ jobId, agentId, leaseToken, events });
+    },
+  };
+  let tick = 0;
+  const sink = createBufferedTelemetrySink(controlPlane, "local-agent", {
+    log() {},
+    flushIntervalMs: 60_000,
+    maxBatchSize: 50,
+    now: () => new Date(`2026-09-12T10:00:0${tick++}.000Z`),
+  });
+
+  sink.begin({ id: "job-live", lease: { token: "lease-live" } });
+  sink.emit({ type: "progress", tool: "restic", bytesDone: 10, bytesTotal: 100 });
+  sink.emit({ type: "progress", tool: "restic", bytesDone: 40, bytesTotal: 100 });
+  sink.emit({ type: "log", tool: "restic", stream: "stdout", message: "working" });
+  await sink.end();
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].jobId, "job-live");
+  assert.equal(calls[0].agentId, "local-agent");
+  assert.equal(calls[0].leaseToken, "lease-live");
+  assert.equal(calls[0].events.length, 2);
+  assert.equal(calls[0].events[0].type, "progress");
+  assert.equal(calls[0].events[0].bytesDone, 40);
+  assert.equal(calls[0].events[1].message, "working");
+  assert.ok(calls[0].events.every((event) => typeof event.at === "string"));
+});
+
+test("telemetry delivery failures are logged but never fail the backup path", async () => {
+  const logs = [];
+  const sink = createBufferedTelemetrySink({
+    async runtimeEvents() { throw new Error("telemetry offline"); },
+  }, "local-agent", {
+    log: (level, message, data) => logs.push({ level, message, data }),
+    flushIntervalMs: 60_000,
+  });
+
+  sink.begin({ id: "job-live", lease: { token: "lease-live" } });
+  sink.emit({ type: "progress", tool: "rclone", bytesDone: 1 });
+  await assert.doesNotReject(() => sink.end());
+  assert.equal(logs.some((entry) => entry.level === "error" && /telemetry delivery failed/.test(entry.message)), true);
 });
 
 test("agent loop idles, reports failures, and stops cleanly on abort", async () => {

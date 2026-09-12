@@ -45,6 +45,11 @@ export class HttpControlPlaneClient implements ControlPlaneClient {
     await this.#request(`/v1/agent/jobs/${encodeURIComponent(jobId)}/transition`, body);
   }
 
+  async runtimeEvents(jobId: string, _agentId: string, leaseToken: string, events: readonly unknown[]): Promise<void> {
+    if (events.length === 0) return;
+    await this.#request(`/v1/agent/jobs/${encodeURIComponent(jobId)}/runtime`, { leaseToken, events });
+  }
+
   async #request(path: string, body: unknown): Promise<Response> {
     const response = await this.#fetch(`${this.#baseUrl}${path}`, {
       method: "POST",

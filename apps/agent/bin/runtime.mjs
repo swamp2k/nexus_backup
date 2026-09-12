@@ -50,24 +50,134 @@ export function runtimeOptionsFromEnv(env = process.env) {
 export async function createAgentRuntime(options, { log = defaultLog } = {}) {
   const config = await loadRuntimeConfig(options.configPath);
   const agentToken = options.agentToken ?? await loadSecret(options.agentTokenFile);
-  const events = {
-    emit(event) {
-      log("info", "execution event", { event });
-    },
-  };
-  const executor = createDefaultJobExecutor(config, events);
   const controlPlane = new HttpControlPlaneClient({
     baseUrl: options.baseUrl,
     agentToken,
     version: options.version,
     ...(options.leaseTtlMs === undefined ? {} : { leaseTtlMs: options.leaseTtlMs }),
   });
+  const telemetry = createBufferedTelemetrySink(controlPlane, options.agentId, { log });
+  const baseExecutor = createDefaultJobExecutor(config, telemetry);
+  const executor = {
+    async execute(job, signal) {
+      telemetry.begin(job);
+      try {
+        return await baseExecutor.execute(job, signal);
+      } finally {
+        await telemetry.end();
+      }
+    },
+  };
   const runner = new AgentRunner({
     agentId: options.agentId,
     controlPlane,
     executor,
   });
-  return { config, controlPlane, executor, runner };
+  return { config, controlPlane, executor, runner, telemetry };
+}
+
+export function createBufferedTelemetrySink(
+  controlPlane,
+  agentId,
+  {
+    log = defaultLog,
+    flushIntervalMs = 1000,
+    maxBatchSize = 50,
+    maxBufferSize = 500,
+    now = () => new Date(),
+  } = {},
+) {
+  let context = null;
+  let buffer = [];
+  let timer = null;
+  let flushing = null;
+
+  function clearTimer() {
+    if (timer !== null) clearTimeout(timer);
+    timer = null;
+  }
+
+  function schedule() {
+    if (timer !== null || !context || buffer.length === 0) return;
+    timer = setTimeout(() => {
+      timer = null;
+      void flush();
+    }, flushIntervalMs);
+    timer.unref?.();
+  }
+
+  async function flush() {
+    if (flushing) return flushing;
+    if (!context || buffer.length === 0) return;
+    clearTimer();
+    const activeContext = context;
+
+    flushing = (async () => {
+      while (context === activeContext && buffer.length > 0) {
+        const batch = buffer.splice(0, maxBatchSize);
+        try {
+          await controlPlane.runtimeEvents(
+            activeContext.jobId,
+            agentId,
+            activeContext.leaseToken,
+            batch,
+          );
+        } catch (error) {
+          log("error", "runtime telemetry delivery failed", {
+            jobId: activeContext.jobId,
+            dropped: batch.length,
+            error: serializeError(error),
+          });
+          break;
+        }
+      }
+    })().finally(() => {
+      flushing = null;
+      if (context === activeContext && buffer.length > 0) schedule();
+    });
+
+    return flushing;
+  }
+
+  return {
+    begin(job) {
+      clearTimer();
+      buffer = [];
+      const leaseToken = job?.lease?.token;
+      context = typeof job?.id === "string" && typeof leaseToken === "string" && leaseToken
+        ? { jobId: job.id, leaseToken }
+        : null;
+      if (!context) log("error", "runtime telemetry disabled for job without lease context", { jobId: job?.id });
+    },
+
+    emit(event) {
+      log("info", "execution event", { event });
+      if (!context) return;
+      const item = { ...event, at: now().toISOString() };
+      if (event.type === "progress") {
+        const index = buffer.findIndex((candidate) => candidate.type === "progress" && candidate.tool === event.tool);
+        if (index >= 0) buffer.splice(index, 1);
+      }
+      buffer.push(item);
+      while (buffer.length > maxBufferSize) {
+        const logIndex = buffer.findIndex((candidate) => candidate.type === "log");
+        buffer.splice(logIndex >= 0 ? logIndex : 0, 1);
+      }
+      if (buffer.length >= maxBatchSize) void flush();
+      else schedule();
+    },
+
+    async flush() {
+      await flush();
+    },
+
+    async end() {
+      clearTimer();
+      await flush();
+      context = null;
+      buffer = [];
+    },
+  };
 }
 
 export async function loadSecret(path) {

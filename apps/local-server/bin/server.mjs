@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createApi, D1AgentStore, D1JobRepository } from "../../control-plane/dist/index.js";
 import { listAgents, listJobs, loadSanitizedAgentConfig } from "../lib/dashboard-data.mjs";
+import { getRuntimeTelemetry, recordRuntimeEvents } from "../lib/runtime-telemetry.mjs";
 import { openSqliteD1 } from "../lib/sqlite-d1.mjs";
 
 const configDir = process.env.NEXUS_BACKUP_CONFIG_DIR?.trim() || "/config";
@@ -49,7 +50,9 @@ const STATIC_FILES = new Map([
   ["/", ["index.html", "text/html; charset=utf-8"]],
   ["/index.html", ["index.html", "text/html; charset=utf-8"]],
   ["/app.js", ["app.js", "text/javascript; charset=utf-8"]],
+  ["/telemetry.js", ["telemetry.js", "text/javascript; charset=utf-8"]],
   ["/styles.css", ["styles.css", "text/css; charset=utf-8"]],
+  ["/telemetry.css", ["telemetry.css", "text/css; charset=utf-8"]],
   ["/favicon.svg", ["favicon.svg", "image/svg+xml"]],
 ]);
 
@@ -70,6 +73,7 @@ const server = createServer(async (request, response) => {
         remoteControl: "optional",
         agentId,
         pollIntervalMs: 5000,
+        telemetryPollIntervalMs: 1000,
       });
       return;
     }
@@ -104,6 +108,63 @@ const server = createServer(async (request, response) => {
       return;
     }
 
+    const runtimeWriteMatch = path.match(/^\/v1\/agent\/jobs\/([^/]+)\/runtime$/);
+    if (request.method === "POST" && runtimeWriteMatch) {
+      const jobId = decodePathPart(runtimeWriteMatch[1]);
+      const rawAgentToken = bearerToken(request);
+      if (!rawAgentToken) {
+        sendJson(response, 401, { code: "unauthorized", message: "Missing agent bearer token" });
+        return;
+      }
+
+      const agentStore = new D1AgentStore(db);
+      const agent = await agentStore.findByRawToken(rawAgentToken);
+      if (!agent) {
+        sendJson(response, 401, { code: "unauthorized", message: "Invalid or disabled agent token" });
+        return;
+      }
+
+      const body = await readJsonBody(request);
+      const leaseToken = requireBodyString(body.leaseToken, "leaseToken", 1, 512);
+      const repository = new D1JobRepository(db);
+      const job = await repository.get(jobId);
+      if (!job) {
+        sendJson(response, 404, { code: "job_not_found", message: `Job not found: ${jobId}` });
+        return;
+      }
+      if (!job.lease
+        || job.lease.agentId !== agent.id
+        || !constantTimeEqual(job.lease.token, leaseToken)
+        || Date.parse(job.lease.expiresAt) <= Date.now()) {
+        sendJson(response, 409, { code: "job_conflict", message: "Agent does not hold the active job lease" });
+        return;
+      }
+
+      const accepted = await recordRuntimeEvents(db, {
+        jobId,
+        attempt: job.attempt,
+        agentId: agent.id,
+        events: body.events,
+      });
+      await agentStore.touch(agent.id, new Date());
+      sendJson(response, 202, { accepted });
+      return;
+    }
+
+    const runtimeReadMatch = path.match(/^\/v1\/local\/jobs\/([^/]+)\/runtime$/);
+    if (request.method === "GET" && runtimeReadMatch) {
+      const jobId = decodePathPart(runtimeReadMatch[1]);
+      const job = await new D1JobRepository(db).get(jobId);
+      if (!job) {
+        sendJson(response, 404, { code: "job_not_found", message: `Job not found: ${jobId}` });
+        return;
+      }
+      sendJson(response, 200, await getRuntimeTelemetry(db, jobId, job.attempt, {
+        logLimit: requestUrl.searchParams.get("logs") ?? 200,
+      }));
+      return;
+    }
+
     const eventsMatch = path.match(/^\/v1\/local\/jobs\/([^/]+)\/events$/);
     if (request.method === "GET" && eventsMatch) {
       const jobId = decodePathPart(eventsMatch[1]);
@@ -135,9 +196,10 @@ const server = createServer(async (request, response) => {
     await fromWebResponse(webResponse, response);
   } catch (error) {
     log("error", "request failed", { error: serializeError(error) });
-    sendJson(response, error?.statusCode === 413 ? 413 : 500, {
-      code: error?.statusCode === 413 ? "payload_too_large" : "internal_error",
-      message: error?.statusCode === 413 ? "Request body exceeds 1 MiB" : "Internal server error",
+    const status = error?.statusCode === 413 ? 413 : error instanceof RangeError ? 400 : 500;
+    sendJson(response, status, {
+      code: status === 413 ? "payload_too_large" : status === 400 ? "validation_error" : "internal_error",
+      message: status === 413 ? "Request body exceeds 1 MiB" : status === 400 ? error.message : "Internal server error",
     });
   }
 });
@@ -189,6 +251,21 @@ async function toWebRequest(request, { path, authorization } = {}) {
   const method = request.method || "GET";
   const body = method === "GET" || method === "HEAD" ? undefined : await readBody(request, 1_048_576);
   return new Request(url, { method, headers, ...(body === undefined ? {} : { body }) });
+}
+
+async function readJsonBody(request) {
+  const body = await readBody(request, 1_048_576);
+  if (body === undefined) throw new RangeError("JSON body is required");
+  let value;
+  try {
+    value = JSON.parse(body.toString("utf8"));
+  } catch {
+    throw new RangeError("Malformed JSON body");
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new RangeError("JSON body must be an object");
+  }
+  return value;
 }
 
 async function readBody(request, limit) {
@@ -247,6 +324,35 @@ function sendJson(response, status, value) {
   response.setHeader("cache-control", "no-store");
   response.setHeader("x-content-type-options", "nosniff");
   response.end(JSON.stringify(value));
+}
+
+function bearerToken(request) {
+  const header = Array.isArray(request.headers.authorization)
+    ? request.headers.authorization[0]
+    : request.headers.authorization;
+  if (typeof header !== "string") return null;
+  const match = header.match(/^Bearer\s+(.+)$/i);
+  return match?.[1]?.trim() || null;
+}
+
+function requireBodyString(value, name, min, max) {
+  if (typeof value !== "string") throw new RangeError(`${name} must be a string`);
+  const normalized = value.trim();
+  if (normalized.length < min || normalized.length > max) {
+    throw new RangeError(`${name} must be ${min}-${max} characters`);
+  }
+  return normalized;
+}
+
+function constantTimeEqual(left, right) {
+  const a = Buffer.from(left);
+  const b = Buffer.from(right);
+  let diff = a.length ^ b.length;
+  const length = Math.max(a.length, b.length);
+  for (let index = 0; index < length; index += 1) {
+    diff |= (a[index] ?? 0) ^ (b[index] ?? 0);
+  }
+  return diff === 0;
 }
 
 function decodePathPart(value) {
