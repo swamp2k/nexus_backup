@@ -34,60 +34,30 @@ export interface RepositorySnapshotBrowseEntryEvent {
   permissions: string | null;
 }
 
+export type TransferReadiness = "stability" | "rtorrent_complete" | "rtorrent_incomplete";
+
 export interface TransferDiscoveryEntryEvent {
   relPath: string;
   size: number;
   modTime: string;
+  readiness: TransferReadiness;
+  torrentHash?: string;
+  torrentName?: string;
+  torrentRoot?: string;
+}
+
+export interface TransferDiscoveryRtorrentEvent {
+  configured: boolean;
+  available: boolean;
 }
 
 export type ExecutionEvent =
-  | {
-      type: "log";
-      tool: "restic" | "rclone";
-      stream: "stdout" | "stderr";
-      message: string;
-    }
-  | {
-      type: "progress";
-      tool: "restic" | "rclone";
-      bytesDone?: number;
-      bytesTotal?: number;
-      filesDone?: number;
-      filesTotal?: number;
-      speedBytesPerSecond?: number;
-      etaSeconds?: number | null;
-      errors?: number;
-    }
-  | {
-      type: "summary";
-      tool: "restic" | "rclone";
-      data: Readonly<Record<string, unknown>>;
-    }
-  | {
-      type: "inventory";
-      tool: "restic";
-      repositoryId: string;
-      stats: RepositoryInventoryStatsEvent;
-      snapshots: readonly RepositoryInventorySnapshotEvent[];
-      snapshotLimit: number;
-      truncated: boolean;
-    }
-  | {
-      type: "snapshot-browse";
-      tool: "restic";
-      repositoryId: string;
-      snapshotId: string;
-      path: string;
-      entries: readonly RepositorySnapshotBrowseEntryEvent[];
-      entryLimit: number;
-      truncated: boolean;
-    }
-  | {
-      type: "transfer-discovery";
-      tool: "rclone";
-      ruleId: string;
-      entries: readonly TransferDiscoveryEntryEvent[];
-    };
+  | { type: "log"; tool: "restic" | "rclone"; stream: "stdout" | "stderr"; message: string }
+  | { type: "progress"; tool: "restic" | "rclone"; bytesDone?: number; bytesTotal?: number; filesDone?: number; filesTotal?: number; speedBytesPerSecond?: number; etaSeconds?: number | null; errors?: number }
+  | { type: "summary"; tool: "restic" | "rclone"; data: Readonly<Record<string, unknown>> }
+  | { type: "inventory"; tool: "restic"; repositoryId: string; stats: RepositoryInventoryStatsEvent; snapshots: readonly RepositoryInventorySnapshotEvent[]; snapshotLimit: number; truncated: boolean }
+  | { type: "snapshot-browse"; tool: "restic"; repositoryId: string; snapshotId: string; path: string; entries: readonly RepositorySnapshotBrowseEntryEvent[]; entryLimit: number; truncated: boolean }
+  | { type: "transfer-discovery"; tool: "rclone"; ruleId: string; rtorrent: TransferDiscoveryRtorrentEvent; entries: readonly TransferDiscoveryEntryEvent[] };
 
 export type ExecutionProgressEvent = Extract<ExecutionEvent, { type: "progress" }>;
 
@@ -101,10 +71,7 @@ export interface ExecutionProgressFields {
   errors?: number | undefined;
 }
 
-export function progressEvent(
-  tool: ExecutionProgressEvent["tool"],
-  fields: ExecutionProgressFields,
-): ExecutionProgressEvent {
+export function progressEvent(tool: ExecutionProgressEvent["tool"], fields: ExecutionProgressFields): ExecutionProgressEvent {
   const event: ExecutionProgressEvent = { type: "progress", tool };
   if (fields.bytesDone !== undefined) event.bytesDone = fields.bytesDone;
   if (fields.bytesTotal !== undefined) event.bytesTotal = fields.bytesTotal;
@@ -116,8 +83,5 @@ export function progressEvent(
   return event;
 }
 
-export interface ExecutionEventSink {
-  emit(event: ExecutionEvent): void;
-}
-
+export interface ExecutionEventSink { emit(event: ExecutionEvent): void; }
 export const noopExecutionEventSink: ExecutionEventSink = { emit() {} };

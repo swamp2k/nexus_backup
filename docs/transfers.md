@@ -1,6 +1,6 @@
 # Transfer rules
 
-Nexus Backup's M5 transfer engine ports the proven behavior of Copyarr into the existing Nexus job engine. It is not a second daemon with a separate queue: discovery and transfer work are normal leased Nexus jobs, while rule/object state is stored in the local SQLite database.
+Nexus Backup's M5 transfer engine ports the proven behavior of Copyarr into the existing Nexus job engine. Discovery and transfer work are normal leased Nexus jobs, while rule/object state is stored in the local SQLite database.
 
 ## Rule model
 
@@ -11,6 +11,7 @@ A transfer rule describes:
 - copy or verified move mode
 - first-scan behavior: `ignore_existing` or `process_existing`
 - scan interval and stability window
+- optional rTorrent readiness endpoint and whether RPC is required
 - bounded retry count and retry wait
 - include/exclude patterns
 - exact-size verification
@@ -18,7 +19,7 @@ A transfer rule describes:
 - optional per-rule rclone tuning arguments
 - cleanup-days policy for a later maintenance slice
 
-Endpoints are referenced only by configured IDs. The control plane never receives rclone credentials.
+Endpoints are referenced only by configured IDs. rclone credentials remain in the agent's rclone config. rTorrent password bytes are read from an agent-only `passwordFile`; the browser receives only the rTorrent endpoint ID.
 
 ## Object identity and discovery
 
@@ -30,11 +31,54 @@ An object generation is identified by SHA-256 over:
 relative path + NUL + byte size + NUL + normalized modification time
 ```
 
-This deliberately follows Copyarr's path + size + mtime identity. A file changed in place becomes a new generation instead of resurrecting an old completed/ignored object.
+This follows Copyarr's path + size + mtime identity. A file changed in place becomes a new generation instead of resurrecting an old completed/ignored object.
 
-The first successful scan initializes the rule. With `ignore_existing`, generations seen in that first scan are persisted as ignored; future generations start as discovered. With `process_existing`, first-scan generations are eligible for the normal stability gate.
+The first successful scan initializes the rule. With `ignore_existing`, generations seen in that first scan are persisted as ignored; future generations start as discovered. With `process_existing`, first-scan generations enter the normal readiness flow.
 
-A discovered object is eligible only if it was also seen in the latest scan and its `stable_since` age meets the rule's stability window. This prevents a stale database row from being queued after the source object disappeared.
+A discovered object must also have been seen in the latest scan. This prevents a stale database row from being queued after the source object disappeared.
+
+## rTorrent readiness
+
+A rule can optionally reference a local rTorrent endpoint. The agent uses the same XML-RPC contract as Copyarr:
+
+```text
+d.multicall2
+  d.hash=
+  d.name=
+  d.complete=
+  d.base_path=
+```
+
+The rTorrent endpoint is local agent configuration, for example:
+
+```json
+{
+  "rtorrentEndpoints": [
+    {
+      "id": "seedbox-rtorrent",
+      "url": "https://seedbox.example/RPC2",
+      "username": "user",
+      "passwordFile": "/state/secrets/rtorrent-password",
+      "view": "main",
+      "sourceBasePath": "/media/sdm1/USER/private/rtorrent/complete"
+    }
+  ]
+}
+```
+
+`/state` is mounted only in the agent container in the standard compose deployment, so the password bytes are not available to the control container.
+
+For each discovered file the agent derives one of three readiness states:
+
+- `rtorrent_complete`: the most-specific matching torrent root is complete; the file is immediately eligible without waiting for the stability window.
+- `rtorrent_incomplete`: the file belongs to an incomplete torrent; it is blocked and **does not** fall through to stability.
+- `stability`: rTorrent does not know the path, rTorrent is not configured, or optional rTorrent RPC is unavailable. The normal stability timer applies.
+
+If a rule enables **Require rTorrent RPC**, an RPC failure fails the discovery job before rclone discovery runs. No stale object can become newly eligible because transfer eligibility still requires presence in the latest successful scan.
+
+Only relative torrent root, hash/name and readiness are persisted. Absolute `sourceBasePath`, RPC URL, username and password bytes are not emitted in discovery telemetry.
+
+The first rTorrent slice deliberately keeps **one file per managed transfer job**. Copyarr can group a complete multi-file torrent into one job, but Nexus does not do that yet because move-mode source deletion must remain recoverable if deletion of a later file fails.
 
 ## Filter semantics
 
@@ -78,7 +122,7 @@ Per-rule rclone arguments are applied only to the copy-to-staging phase. The age
 
 ## Restart and retry behavior
 
-Rule state, object generations and job IDs live in SQLite. A restart does not forget what was discovered or committed.
+Rule state, object generations, readiness and job IDs live in SQLite. A restart does not forget what was discovered or committed.
 
 Each transfer attempt has a deterministic operation key derived from rule ID, object key and attempt number. Failed/partial/interrupted jobs enter `retry_wait` until the configured retry time, up to the bounded attempt budget. Cancelled objects are not retried automatically.
 
@@ -88,19 +132,20 @@ The Transfers page exposes:
 
 - enabled/paused rules
 - source -> destination route
-- scan/stability/bootstrap/retry settings
+- stability or rTorrent readiness policy
+- scan/bootstrap/retry settings
 - discovered, queued, completed and failed counts/bytes
 - manual Scan now
-- recent object generations
+- recent object generations with readiness reason
 - live transfer progress from normal Nexus runtime telemetry
 
-The dashboard never receives rclone secrets.
+The dashboard receives only rTorrent endpoint IDs, never RPC URLs, usernames, password-file contents or absolute rTorrent source paths.
 
 ## Deferred boundaries
 
-Two Copyarr behaviors are intentionally deferred from the first M5 slice:
+Two destructive/atomicity-sensitive behaviors remain intentionally deferred:
 
 - **destination cleanup:** `cleanup_days` is persisted as policy, but Nexus does not delete old committed destination files yet. Cleanup must first carry the same provenance/identity guarantees as Copyarr.
-- **rTorrent readiness:** stability is currently the readiness gate. rTorrent completion grouping/gating will be layered on top of the persistent rule/object model rather than replacing it.
+- **grouped torrent jobs:** readiness gating is active, but Nexus still schedules one file per transfer job. Grouped copy can come first; grouped move must wait for explicit partial-source-delete recovery semantics.
 
-These boundaries are deliberate: no cleanup or torrent-aware source deletion should be introduced as a hidden side effect of an otherwise successful copy job.
+These boundaries are deliberate: cleanup or grouped source deletion must not appear as hidden side effects of an otherwise successful copy job.

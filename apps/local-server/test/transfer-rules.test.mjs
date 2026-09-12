@@ -7,9 +7,9 @@ import { createTransferRuleService, persistTransferDiscovery } from "../lib/tran
 import { openSqliteD1 } from "../lib/sqlite-d1.mjs";
 
 const migrationsDir=new URL("../../../migrations/",import.meta.url).pathname;
-const config={available:true,endpoints:[{id:"seedbox",fs:"seedbox:",allowMove:true},{id:"downloads",fs:"/downloads",allowMove:false}]};
+const config={available:true,endpoints:[{id:"seedbox",fs:"seedbox:",allowMove:true},{id:"downloads",fs:"/downloads",allowMove:false}],rtorrentEndpoints:[{id:"rtorrent-main"}]};
 
-async function fixture({initialBehavior="ignore_existing",stabilitySeconds=600,scanIntervalSeconds=300,retryCount=3,retryWaitSeconds=300}={}){
+async function fixture({initialBehavior="ignore_existing",stabilitySeconds=600,scanIntervalSeconds=300,retryCount=3,retryWaitSeconds=300,rtorrentEndpointId=null,rtorrentRequired=false}={}){
   const dir=await mkdtemp(join(tmpdir(),"nexus-transfer-"));
   const db=await openSqliteD1({filename:join(dir,"backup.sqlite"),migrationsDir});
   let now=new Date("2026-09-12T10:00:00.000Z");let seq=0;const queued=[];
@@ -22,10 +22,10 @@ async function fixture({initialBehavior="ignore_existing",stabilitySeconds=600,s
     return{id,state:"queued"};
   }
   const service=createTransferRuleService({db,enqueueJob,loadAgentConfig:async()=>config,now:()=>new Date(now),id:()=>"rule-1"});
-  await service.create({name:"Seedbox → downloads",sourceEndpointId:"seedbox",sourcePath:"complete",destinationEndpointId:"downloads",destinationPath:"incoming",mode:"copy",initialBehavior,stabilitySeconds,scanIntervalSeconds,cleanupDays:14,verification:"size",retryCount,retryWaitSeconds,includes:[],excludes:[]});
+  await service.create({name:"Seedbox → downloads",sourceEndpointId:"seedbox",sourcePath:"complete",destinationEndpointId:"downloads",destinationPath:"incoming",mode:"copy",initialBehavior,stabilitySeconds,scanIntervalSeconds,cleanupDays:14,verification:"size",retryCount,retryWaitSeconds,includes:[],excludes:[],...(rtorrentEndpointId?{rtorrentEndpointId}:{}),rtorrentRequired});
   return{dir,db,service,queued,setNow(value){now=new Date(value)},async close(){db.close();await rm(dir,{recursive:true,force:true});}};
 }
-function discovery(ruleId,entries,at){return{type:"transfer-discovery",tool:"rclone",ruleId,at,entries};}
+function discovery(ruleId,entries,at,rtorrent={configured:false,available:false}){return{type:"transfer-discovery",tool:"rclone",ruleId,at,rtorrent,entries};}
 async function finish(db,id,state,at,error=null){await db.prepare("UPDATE backup_jobs SET state=?,updated_at=?,finished_at=?,last_error=? WHERE id=?").bind(state,at,at,error,id).run();}
 
 test("ignore-existing bootstrap tracks generations and queues only stable new objects",async()=>{
@@ -75,6 +75,36 @@ test("a changed path becomes a new generation without resurrecting the bootstrap
   }finally{await f.close();}
 });
 
+test("rTorrent completion bypasses stability, incomplete torrents stay blocked, unknown paths fall back",async()=>{
+  const f=await fixture({initialBehavior:"process_existing",stabilitySeconds:600,scanIntervalSeconds:3600,rtorrentEndpointId:"rtorrent-main",rtorrentRequired:true});
+  try{
+    const scan=await f.service.scanNow("rule-1");
+    const scanRequest=f.queued.find(item=>item.type==="rclone-discovery");
+    assert.equal(scanRequest.payload.rtorrentEndpointId,"rtorrent-main");
+    assert.equal(scanRequest.payload.rtorrentRequired,true);
+    await persistTransferDiscovery(f.db,{jobId:scan.job.id,expectedRuleId:"rule-1",event:discovery("rule-1",[
+      {relPath:"done/file.mkv",size:100,modTime:"2026-09-12T09:00:00Z",readiness:"rtorrent_complete",torrentHash:"AAA",torrentName:"Done",torrentRoot:"done"},
+      {relPath:"busy/file.mkv",size:200,modTime:"2026-09-12T09:00:00Z",readiness:"rtorrent_incomplete",torrentHash:"BBB",torrentName:"Busy",torrentRoot:"busy"},
+      {relPath:"manual/file.txt",size:10,modTime:"2026-09-12T09:00:00Z",readiness:"stability"},
+    ],"2026-09-12T10:00:01Z",{configured:true,available:true})});
+    await finish(f.db,scan.job.id,"completed","2026-09-12T10:00:02Z");
+
+    f.setNow("2026-09-12T10:00:03Z");
+    assert.equal((await f.service.runDue()).transfers,1);
+    let transfers=f.queued.filter(item=>item.type==="managed-transfer");
+    assert.equal(transfers[0].payload.items[0].relPath,"done/file.mkv");
+
+    f.setNow("2026-09-12T10:10:02Z");
+    assert.equal((await f.service.runDue()).transfers,1);
+    transfers=f.queued.filter(item=>item.type==="managed-transfer");
+    assert.equal(transfers.at(-1).payload.items[0].relPath,"manual/file.txt");
+    const objects=await f.service.objects("rule-1");
+    assert.equal(objects.find(item=>item.path==="busy/file.mkv").readiness,"rtorrent_incomplete");
+    assert.equal(objects.find(item=>item.path==="busy/file.mkv").state,"discovered");
+    assert.equal(objects.find(item=>item.path==="done/file.mkv").torrentName,"Done");
+  }finally{await f.close();}
+});
+
 test("failed transfers retry with a bounded attempt budget",async()=>{
   const f=await fixture({initialBehavior:"process_existing",stabilitySeconds:0,retryCount:1,retryWaitSeconds:60});
   try{
@@ -103,5 +133,13 @@ test("move rules require local allowMove on their source endpoint",async()=>{
   const f=await fixture();
   try{
     await assert.rejects(()=>f.service.create({id:"bad",name:"Bad move",sourceEndpointId:"downloads",destinationEndpointId:"seedbox",mode:"move",scanIntervalSeconds:300,stabilitySeconds:0,cleanupDays:0,retryCount:0,retryWaitSeconds:0}),/does not allow move/);
+  }finally{await f.close();}
+});
+
+test("rTorrent rules reference sanitized local endpoint IDs only",async()=>{
+  const f=await fixture();
+  try{
+    await assert.rejects(()=>f.service.create({id:"bad-rt",name:"Missing rTorrent",sourceEndpointId:"seedbox",destinationEndpointId:"downloads",rtorrentEndpointId:"missing",rtorrentRequired:true}),/unknown rtorrentEndpointId/);
+    await assert.rejects(()=>f.service.create({id:"required-no-endpoint",name:"Required no endpoint",sourceEndpointId:"seedbox",destinationEndpointId:"downloads",rtorrentRequired:true}),/needs rtorrentEndpointId/);
   }finally{await f.close();}
 });

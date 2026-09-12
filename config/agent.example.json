@@ -49,6 +49,7 @@
       "allowMove": false
     }
   ],
+  "rtorrentEndpoints": [],
   "tools": {
     "rcloneConfigPath": "/config/rclone/rclone.conf",
     "unmountBinary": "/usr/bin/fusermount3",
