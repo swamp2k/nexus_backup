@@ -2,6 +2,16 @@ declare const process: {
   env: Record<string, string | undefined>;
 };
 
+declare const Buffer: {
+  from(value: string, encoding?: string): {
+    toString(encoding: string): string;
+  };
+};
+
+declare module "node:fs/promises" {
+  export function readFile(path: string, encoding: "utf8"): Promise<string>;
+}
+
 declare module "node:child_process" {
   interface ReadableLike {
     setEncoding(encoding: string): void;
