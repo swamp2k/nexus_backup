@@ -25,6 +25,11 @@ $taskName = 'NexusBackupWorkstation'
 New-Item -ItemType Directory -Path $installDir -Force | Out-Null
 New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
 
+# Device credentials and the Restic password live below ProgramData. Do not inherit
+# ordinary Users read access; retain only SYSTEM and local Administrators.
+& icacls.exe $dataDir '/inheritance:r' '/grant:r' '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '/T' '/C' | Out-Null
+if ($LASTEXITCODE -ne 0) { Fail 'Could not secure the local NexusBackup data directory ACL.' }
+
 try { Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue } catch {}
 Start-Sleep -Milliseconds 300
 
@@ -92,6 +97,10 @@ if (-not [string]::IsNullOrWhiteSpace([string]$env:NEXUS_BACKUP_RESTIC_PASSWORD)
 }
 $configJson = $config | ConvertTo-Json -Depth 4
 [IO.File]::WriteAllText($configPath, $configJson, (New-Object Text.UTF8Encoding($false)))
+
+# Re-apply ACLs after writing files so later repair/update runs keep them protected.
+& icacls.exe $dataDir '/inheritance:r' '/grant:r' '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '/T' '/C' | Out-Null
+if ($LASTEXITCODE -ne 0) { Fail 'Could not protect Nexus Backup workstation configuration.' }
 
 $action = New-ScheduledTaskAction -Execute $agentPath -Argument '--run' -WorkingDirectory $installDir
 $trigger = New-ScheduledTaskTrigger -AtStartup
