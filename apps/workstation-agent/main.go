@@ -18,14 +18,14 @@ var version = "dev"
 const defaultConfigName = "workstation.json"
 
 type config struct {
-	ServerURL    string `json:"serverUrl"`
-	DeviceToken  string `json:"deviceToken"`
-	Repository   string `json:"repository"`
-	PasswordFile string `json:"passwordFile"`
-	ResticPath   string `json:"resticPath"`
-	PollSeconds  int    `json:"pollSeconds"`
-	ReportSeconds int   `json:"reportSeconds"`
-	AutoInit     bool   `json:"autoInit"`
+	ServerURL     string `json:"serverUrl"`
+	DeviceToken   string `json:"deviceToken"`
+	Repository    string `json:"repository"`
+	PasswordFile  string `json:"passwordFile"`
+	ResticPath    string `json:"resticPath"`
+	PollSeconds   int    `json:"pollSeconds"`
+	ReportSeconds int    `json:"reportSeconds"`
+	AutoInit      bool   `json:"autoInit"`
 }
 
 type localState struct {
@@ -195,11 +195,32 @@ func (a *agent) pollOnce() error {
 
 func (a *agent) execute(run workstationRun) {
 	log.Printf("workstation run %s starting with %d source path(s)", run.ID, len(run.SourcePaths))
+	heartbeatStop := make(chan struct{})
+	heartbeatDone := make(chan struct{})
+	go func() {
+		defer close(heartbeatDone)
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-heartbeatStop:
+				return
+			case <-ticker.C:
+				if err := a.client.reportProgress(run.ID, run.LeaseToken, backupProgress{Phase: "running"}); err != nil {
+					log.Printf("run %s lease heartbeat failed: %v", run.ID, err)
+				}
+			}
+		}
+	}()
+
 	result := executeResticBackup(a.cfg, run, func(progress backupProgress) {
 		if err := a.client.reportProgress(run.ID, run.LeaseToken, progress); err != nil {
 			log.Printf("run %s progress report failed: %v", run.ID, err)
 		}
 	})
+	close(heartbeatStop)
+	<-heartbeatDone
+
 	finished := time.Now().UTC().Format(time.RFC3339)
 	status := "success"
 	if result.Partial {
@@ -209,11 +230,11 @@ func (a *agent) execute(run workstationRun) {
 		status = "failure"
 	}
 	payload := map[string]any{
-		"snapshotId": result.SnapshotID,
-		"filesNew": result.FilesNew,
-		"filesChanged": result.FilesChanged,
+		"snapshotId":      result.SnapshotID,
+		"filesNew":        result.FilesNew,
+		"filesChanged":    result.FilesChanged,
 		"filesUnmodified": result.FilesUnmodified,
-		"dataAdded": result.DataAdded,
+		"dataAdded":       result.DataAdded,
 		"durationSeconds": result.Duration.Seconds(),
 	}
 	errText := ""
