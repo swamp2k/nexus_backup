@@ -40,6 +40,13 @@ export interface TransferDiscoveryEntryEvent {
   modTime: string;
 }
 
+export interface TransferGroupEvent {
+  kind: "torrent";
+  key: string;
+  name: string;
+  root: string;
+}
+
 export type ExecutionEvent =
   | {
       type: "log";
@@ -87,6 +94,12 @@ export type ExecutionEvent =
       tool: "rclone";
       ruleId: string;
       entries: readonly TransferDiscoveryEntryEvent[];
+    }
+  | {
+      type: "transfer-groups";
+      tool: "rclone";
+      ruleId: string;
+      groups: readonly TransferGroupEvent[];
     };
 
 export type ExecutionProgressEvent = Extract<ExecutionEvent, { type: "progress" }>;

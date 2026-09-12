@@ -194,7 +194,7 @@ export function createTransferRuleService({ db, enqueueJob, loadAgentConfig, now
              r.retry_count,r.retry_wait_seconds,r.cleanup_days,r.stability_seconds,r.last_scan_started_at
       FROM transfer_objects AS o
       JOIN transfer_rules AS r ON r.id=o.rule_id
-      WHERE r.enabled=1 AND (
+      WHERE r.enabled=1 AND o.group_key IS NULL AND (
         (o.state='discovered'
           AND julianday(o.stable_since)<=julianday(?)-(CAST(r.stability_seconds AS REAL)/86400.0)
           AND (r.last_scan_started_at IS NULL OR julianday(o.last_seen_at)>=julianday(r.last_scan_started_at)))

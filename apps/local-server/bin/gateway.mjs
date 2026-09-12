@@ -8,6 +8,7 @@ import { confirmationPhrase, createLocalAuth } from "../lib/local-auth.mjs";
 import { assertRecentRestorePreview, normalizeRestoreScope, queueRestoreExecution } from "../lib/restore-execution.mjs";
 import { openSqliteD1 } from "../lib/sqlite-d1.mjs";
 import { createTransferCleanupService } from "../lib/transfer-cleanup.mjs";
+import { createTransferGroupService } from "../lib/transfer-groups.mjs";
 import { createTransferRuleService } from "../lib/transfer-rules.mjs";
 
 const publicHost = process.env.NEXUS_BACKUP_HOST?.trim() || "0.0.0.0";
@@ -32,6 +33,7 @@ const transferService = createTransferRuleService({
   enqueueJob,
   loadAgentConfig: () => loadSanitizedAgentConfig(agentConfigPath),
 });
+const transferGroupService = createTransferGroupService({ db, enqueueJob });
 const transferCleanupService = createTransferCleanupService({ db, enqueueJob });
 
 let transferSchedulerRunning = false;
@@ -39,6 +41,10 @@ async function runTransferScheduler() {
   if (transferSchedulerRunning) return;
   transferSchedulerRunning = true;
   try {
+    const groups = await transferGroupService.runDue();
+    if (groups.queued > 0) log("info", "completed torrent groups queued", { groups: groups.queued });
+    for (const failure of groups.failures) log("error", "torrent group enqueue failed", failure);
+
     const result = await transferService.runDue();
     if (result.scans > 0 || result.transfers > 0) log("info", "transfer scheduler queued work", { scans: result.scans, transfers: result.transfers });
     for (const failure of result.failures) log("error", "transfer scheduler action failed", failure);
@@ -107,7 +113,7 @@ const gateway = createServer(async (request, response) => {
       const upstream = await fetch(`${internalBase}/v1/local/info`, { headers: { accept: "application/json" } });
       const data = await upstream.json().catch(() => ({}));
       if (!upstream.ok) throw statusError(upstream.status, data.message || `Local info failed with ${upstream.status}`);
-      sendJson(response, 200, { ...data, localAuth: true, restoreExecution: true, transferRules: true, transferCleanup: true, transferSchedulerIntervalMs });
+      sendJson(response, 200, { ...data, localAuth: true, restoreExecution: true, transferRules: true, transferCleanup: true, transferTorrentGroups: true, transferSchedulerIntervalMs });
       return;
     }
 

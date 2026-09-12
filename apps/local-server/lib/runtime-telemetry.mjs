@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { normalizeInventoryEvent, persistRepositoryInventory } from "./repository-inventory.mjs";
 import { normalizeSnapshotBrowseEvent, persistSnapshotBrowse } from "./snapshot-restore.mjs";
+import { normalizeTransferGroupsEvent, persistTransferGroups } from "./transfer-groups.mjs";
 import { normalizeTransferDiscoveryEvent, persistTransferDiscovery } from "./transfer-rules.mjs";
 
 const TOOLS = new Set(["restic", "rclone"]);
@@ -37,12 +38,14 @@ export async function recordRuntimeEvents(
   const inventories = [];
   const browses = [];
   const discoveries = [];
+  const transferGroups = [];
   let wroteLog = false;
 
   for (const event of normalized) {
     if (event.type === "inventory") { inventories.push(event); continue; }
     if (event.type === "snapshot-browse") { browses.push(event); continue; }
     if (event.type === "transfer-discovery") { discoveries.push(event); continue; }
+    if (event.type === "transfer-groups") { transferGroups.push(event); continue; }
 
     if (event.type === "progress") {
       statements.push(db.prepare(`
@@ -117,6 +120,9 @@ export async function recordRuntimeEvents(
   for (const discovery of discoveries) {
     await persistTransferDiscovery(db, { jobId, attempt, agentId, expectedRuleId, event: discovery, at: now });
   }
+  for (const groups of transferGroups) {
+    await persistTransferGroups(db, { jobId, attempt, agentId, expectedRuleId, event: groups, at: now });
+  }
   return normalized.length;
 }
 
@@ -169,6 +175,7 @@ export function normalizeRuntimeEvents(value, now = new Date(), {
   let inventoryCount = 0;
   let browseCount = 0;
   let discoveryCount = 0;
+  let transferGroupCount = 0;
   return value.map((event) => {
     if (isRecord(event) && event.type === "inventory") {
       if (effectiveKind !== "inventory") throw new RangeError("inventory events are only accepted from restic-inventory jobs");
@@ -187,6 +194,12 @@ export function normalizeRuntimeEvents(value, now = new Date(), {
       discoveryCount += 1;
       if (discoveryCount > 1) throw new RangeError("runtime batch may contain at most one transfer discovery event");
       return normalizeTransferDiscoveryEvent(event, { expectedRuleId, now });
+    }
+    if (isRecord(event) && event.type === "transfer-groups") {
+      if (effectiveKind !== "transfer-discovery") throw new RangeError("transfer group events are only accepted from rclone-discovery jobs");
+      transferGroupCount += 1;
+      if (transferGroupCount > 1) throw new RangeError("runtime batch may contain at most one transfer groups event");
+      return normalizeTransferGroupsEvent(event, { expectedRuleId, now });
     }
     return normalizeRuntimeEvent(event, now);
   });
@@ -236,7 +249,7 @@ function normalizeRuntimeEvent(value, now) {
     return { type, tool, data: value.data, at };
   }
 
-  throw new RangeError("runtime event type must be log, progress, summary, inventory, snapshot-browse, or transfer-discovery");
+  throw new RangeError("runtime event type must be log, progress, summary, inventory, snapshot-browse, transfer-discovery, or transfer-groups");
 }
 
 function normalizeAt(value, fallback) { if (typeof value !== "string" || !Number.isFinite(Date.parse(value))) return fallback.toISOString(); return new Date(value).toISOString(); }

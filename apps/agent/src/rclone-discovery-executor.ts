@@ -1,5 +1,5 @@
 import type { BackupJob } from "@nexus-backup/core";
-import type { ExecutionEventSink } from "./execution-events.js";
+import type { ExecutionEventSink, TransferGroupEvent } from "./execution-events.js";
 import { noopExecutionEventSink } from "./execution-events.js";
 import type { JobExecutionResult, JobExecutor } from "./executor.js";
 import type { CommandRunner } from "./process-runner.js";
@@ -10,6 +10,7 @@ import type { AgentRuntimeConfig } from "./runtime-config.js";
 const MAX_FILES = 5000;
 const MAX_RAW_JSON = 800_000;
 const MAX_EVENT_JSON = 600_000;
+const MAX_GROUP_EVENT_JSON = 180_000;
 
 interface DiscoveryPayload {
   ruleId: string;
@@ -20,6 +21,7 @@ interface DiscoveryPayload {
   rtorrentGateId?: string;
 }
 interface DiscoveryEntry { relPath: string; size: number; modTime: string; }
+interface TorrentMatch { torrent: RtorrentTorrent; root: string; }
 
 export class RcloneDiscoveryExecutor implements JobExecutor {
   readonly #config: AgentRuntimeConfig;
@@ -60,16 +62,14 @@ export class RcloneDiscoveryExecutor implements JobExecutor {
     if (!Array.isArray(raw)) throw new Error("rclone discovery did not return a JSON file list");
 
     let entries: DiscoveryEntry[] = [];
-    let encodedSize = 2;
     for (const item of raw) {
       const entry = parseLsjsonItem(item);
       if (!pathAllowed(entry.relPath, payload.includes, payload.excludes)) continue;
       if (entries.length >= MAX_FILES) throw new Error(`transfer discovery exceeds ${MAX_FILES} files; narrow the rule with include/exclude filters`);
-      encodedSize += JSON.stringify(entry).length + 1;
-      if (encodedSize > MAX_EVENT_JSON) throw new Error("filtered transfer discovery result is too large; narrow the rule with include/exclude filters");
       entries.push(entry);
     }
 
+    let groups: TransferGroupEvent[] = [];
     let rtorrentSummary: Record<string, unknown> = { enabled: false };
     if (payload.rtorrentGateId) {
       const gate = this.#config.rtorrentGate(payload.rtorrentGateId);
@@ -77,31 +77,52 @@ export class RcloneDiscoveryExecutor implements JobExecutor {
         const torrents = await new RtorrentClient(gate).torrents(signal);
         const complete = torrents.filter((torrent) => torrent.complete).length;
         let blocked = 0;
-        entries = entries.filter((entry) => {
-          const torrent = torrentForPath(entry.relPath, torrents, gate.sourceBasePath);
-          if (!torrent || torrent.complete) return true;
-          blocked += 1;
-          return false;
+        let grouped = 0;
+        const groupMap = new Map<string, TransferGroupEvent>();
+        entries = entries.flatMap((entry) => {
+          const match = torrentForPath(entry.relPath, torrents, gate.sourceBasePath);
+          if (!match) return [entry];
+          if (!match.torrent.complete) {
+            blocked += 1;
+            return [];
+          }
+          grouped += 1;
+          const key = requireTorrentKey(match.torrent.hash);
+          const name = compactGroupName(match.torrent.name, match.root);
+          const existing = groupMap.get(key);
+          if (existing && existing.root !== match.root) throw new Error(`rtorrent group ${key} resolved to multiple roots`);
+          if (!existing) groupMap.set(key, { kind: "torrent", key, name, root: match.root });
+          return [entry];
         });
+        groups = [...groupMap.values()].sort((left, right) => left.root.localeCompare(right.root));
+        if (JSON.stringify(groups).length > MAX_GROUP_EVENT_JSON) {
+          throw new Error("rtorrent group manifest is too large; narrow the rule with include/exclude filters");
+        }
         rtorrentSummary = {
           enabled: true,
           gateId: payload.rtorrentGateId,
           available: true,
           parsed: torrents.length,
           complete,
+          groups: groups.length,
+          groupedCompleteFiles: grouped,
           blockedIncompleteFiles: blocked,
         };
-        this.#events.emit({ type: "log", tool: "rclone", stream: "stdout", message: `rTorrent gate ${payload.rtorrentGateId}: ${torrents.length} torrents, ${complete} complete, ${blocked} incomplete file${blocked === 1 ? "" : "s"} held back` });
+        this.#events.emit({ type: "log", tool: "rclone", stream: "stdout", message: `rTorrent gate ${payload.rtorrentGateId}: ${torrents.length} torrents, ${complete} complete, ${groups.length} group${groups.length === 1 ? "" : "s"}, ${blocked} incomplete file${blocked === 1 ? "" : "s"} held back` });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         if (gate.required) throw new Error(`rtorrent required: ${message}`);
+        groups = [];
         rtorrentSummary = { enabled: true, gateId: payload.rtorrentGateId, available: false, fallback: "stability", error: message };
         this.#events.emit({ type: "log", tool: "rclone", stream: "stderr", message: `rTorrent gate unavailable; using stability fallback (${message})` });
       }
     }
 
+    if (JSON.stringify(entries).length > MAX_EVENT_JSON) throw new Error("filtered transfer discovery result is too large; narrow the rule with include/exclude filters");
+
     this.#events.emit({ type: "transfer-discovery", tool: "rclone", ruleId: payload.ruleId, entries });
-    this.#events.emit({ type: "summary", tool: "rclone", data: { operation: "transfer-discovery", ruleId: payload.ruleId, files: entries.length, rtorrent: rtorrentSummary } });
+    if (payload.rtorrentGateId) this.#events.emit({ type: "transfer-groups", tool: "rclone", ruleId: payload.ruleId, groups });
+    this.#events.emit({ type: "summary", tool: "rclone", data: { operation: "transfer-discovery", ruleId: payload.ruleId, files: entries.length, groups: groups.length, rtorrent: rtorrentSummary } });
     return { status: "completed" };
   }
 }
@@ -125,14 +146,14 @@ function parseLsjsonItem(value: unknown): DiscoveryEntry {
   if (typeof value.ModTime !== "string" || !Number.isFinite(Date.parse(value.ModTime))) throw new Error(`invalid rclone modification time for ${relPath}`);
   return { relPath, size, modTime: new Date(value.ModTime).toISOString() };
 }
-function torrentForPath(relPath: string, torrents: readonly RtorrentTorrent[], sourceBasePath: string): RtorrentTorrent | null {
-  let best: { torrent: RtorrentTorrent; root: string } | null = null;
+function torrentForPath(relPath: string, torrents: readonly RtorrentTorrent[], sourceBasePath: string): TorrentMatch | null {
+  let best: TorrentMatch | null = null;
   for (const torrent of torrents) {
     const root = torrentRelativeRoot(torrent.basePath, sourceBasePath);
     if (!root || !pathWithinRoot(relPath, root)) continue;
     if (!best || root.length > best.root.length) best = { torrent, root };
   }
-  return best?.torrent ?? null;
+  return best;
 }
 function torrentRelativeRoot(basePath: string, sourceBasePath: string): string {
   let value = basePath.trim().replaceAll("\\", "/").replace(/\/+$/g, "");
@@ -148,6 +169,15 @@ function pathWithinRoot(relPath: string, root: string): boolean {
   const rel = relPath.replace(/^\/+|\/+$/g, "");
   const normalizedRoot = root.replace(/^\/+|\/+$/g, "");
   return rel === normalizedRoot || rel.startsWith(`${normalizedRoot}/`);
+}
+function compactGroupName(name: string, root: string): string {
+  const candidate = name.trim() || root.split("/").filter(Boolean).at(-1) || "torrent";
+  return candidate.slice(0, 240);
+}
+function requireTorrentKey(value: string): string {
+  const key = value.trim();
+  if (!/^(?:[A-Fa-f0-9]{40}|[A-Fa-f0-9]{64})$/.test(key)) throw new Error("rtorrent returned an invalid torrent info hash");
+  return key.toLowerCase();
 }
 function pathAllowed(rel: string, includes: readonly string[], excludes: readonly string[]): boolean { for (const pattern of includes) if (filterMatch(pattern, rel)) return true; for (const pattern of excludes) if (filterMatch(pattern, rel)) return false; return true; }
 function filterMatch(input: string, rel: string): boolean { let pattern=input.trim().replace(/^\/+/,""); if(!pattern)return false; if(pattern.endsWith("/"))pattern+="**"; const regex=new RegExp(globRegex(pattern)); if(regex.test(rel))return true; if(!pattern.includes("/"))return regex.test(rel.split("/").at(-1)??rel); return false; }
