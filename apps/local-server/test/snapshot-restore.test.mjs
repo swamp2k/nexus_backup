@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { loadSanitizedAgentConfig } from "../lib/dashboard-data.mjs";
+import { normalizeRuntimeEvents } from "../lib/runtime-telemetry.mjs";
 import {
   getSnapshotBrowse,
   persistSnapshotBrowse,
@@ -60,7 +62,7 @@ test("browser only descends through previously discovered directories",async()=>
   let seq=0;
   const enqueueJob=async input=>{
     calls.push(input);const id=`job-${++seq}`;const at="2026-09-12T10:00:00.000Z";
-    await db.prepare(`INSERT INTO backup_jobs(id,operation_key,type,state,attempt,revision,payload_json,created_at,updated_at,last_mutation_id) VALUES(?,?,?,'queued',0,0,?,?,?,?,?)`)
+    await db.prepare(`INSERT INTO backup_jobs(id,operation_key,type,state,attempt,revision,payload_json,created_at,updated_at,last_mutation_id) VALUES(?,?,?,'queued',0,0,?,?,?,?)`)
       .bind(id,input.operationKey,input.type,JSON.stringify(input.payload),at,at,`mutation-${id}`).run();
     return {id,state:"queued"};
   };
@@ -98,4 +100,25 @@ test("restore preview accepts only configured target ids and discovered snapshot
     await assert.rejects(()=>queueRestorePreview(db,{...common,targetId:"/tmp/raw-path",path:"/data/file.txt"}),/Restore target not found/);
     await assert.rejects(()=>queueRestorePreview(db,{...common,targetId:"restore-staging",path:"/data/not-seen.txt"}),/has not been discovered/);
   }finally{db.close();await rm(dir,{recursive:true,force:true});}
+});
+
+test("special runtime events are accepted only for their matching job kind",()=>{
+  const inventory={type:"inventory",tool:"restic",repositoryId:"repo-main",stats:{},snapshots:[],snapshotLimit:250,truncated:false};
+  const browse=browseEvent("/");
+  assert.throws(()=>normalizeRuntimeEvents([inventory],new Date(),{runtimeKind:"snapshot-browse",expectedRepositoryId:"repo-main"}),/only accepted from restic-inventory/);
+  assert.throws(()=>normalizeRuntimeEvents([browse],new Date(),{runtimeKind:"inventory",expectedRepositoryId:"repo-main",expectedSnapshotId:SNAPSHOT,expectedPath:"/"}),/only accepted from restic-browse/);
+  assert.doesNotThrow(()=>normalizeRuntimeEvents([browse],new Date(),{runtimeKind:"snapshot-browse",expectedRepositoryId:"repo-main",expectedSnapshotId:SNAPSHOT,expectedPath:"/"}));
+});
+
+test("sanitized restore targets expose policy but never the local target path",async()=>{
+  const dir=await mkdtemp(join(tmpdir(),"nexus-restore-config-"));
+  try{
+    const configPath=join(dir,"agent.json");
+    await writeFile(configPath,JSON.stringify({
+      restoreTargets:[{id:"safe",label:"Safe staging",path:"/super/secret/restore",overwrite:"never"}],
+    }));
+    const config=await loadSanitizedAgentConfig(configPath);
+    assert.deepEqual(config.restoreTargets,[{id:"safe",label:"Safe staging",overwrite:"never"}]);
+    assert.equal(JSON.stringify(config).includes("/super/secret/restore"),false);
+  }finally{await rm(dir,{recursive:true,force:true});}
 });
