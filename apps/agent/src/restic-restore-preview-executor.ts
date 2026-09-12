@@ -161,7 +161,7 @@ function requireSnapshotPath(value: unknown): string {
 }
 
 function escapeIncludePattern(path: string): string {
-  return path.replace(/[\\*?[]/g, (character) => `\\${character}`);
+  return path.replace(/[\\*?\[\]]/g, (character) => `\\${character}`);
 }
 
 function requireString(value: unknown, name: string, min: number, max: number): string {
