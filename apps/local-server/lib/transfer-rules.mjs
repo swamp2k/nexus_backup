@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 const ACTIVE_STATES = new Set(["queued", "leased", "preparing", "running", "finalizing"]);
 const FAILURE_STATES = new Set(["failed", "partial", "interrupted"]);
 const TERMINAL_STATES = new Set(["completed", "partial", "failed", "cancelled", "interrupted"]);
-const OBJECT_STATES = new Set(["discovered", "ignored", "queued", "retry_wait", "done", "failed", "cancelled", "superseded", "cleaned"]);
+const OBJECT_STATES = ["discovered", "ignored", "queued", "retry_wait", "done", "failed", "cancelled", "superseded", "cleaned"];
 const MAX_DISCOVERY_OBJECTS = 5000;
 const MAX_DISCOVERY_JSON = 700_000;
 
@@ -18,36 +18,52 @@ export function createTransferRuleService({
   if (typeof enqueueJob !== "function") throw new TypeError("enqueueJob is required");
 
   async function list() {
-    const rules = (await db.prepare(`
-      SELECT r.*, j.state AS scan_job_state, j.updated_at AS scan_job_updated_at, j.finished_at AS scan_job_finished_at,
-             j.last_error AS scan_job_error
+    const rows = (await db.prepare(`
+      SELECT r.*, j.state AS scan_job_state, j.updated_at AS scan_job_updated_at,
+             j.finished_at AS scan_job_finished_at, j.last_error AS scan_job_error
       FROM transfer_rules AS r
       LEFT JOIN backup_jobs AS j ON j.id = r.last_scan_job_id
       ORDER BY r.name COLLATE NOCASE ASC, r.id ASC
     `).all()).results ?? [];
-    const counts = (await db.prepare(`
+    const countRows = (await db.prepare(`
       SELECT rule_id, state, COUNT(*) AS count, COALESCE(SUM(size),0) AS bytes
       FROM transfer_objects GROUP BY rule_id, state
     `).all()).results ?? [];
-    const byRule = new Map();
-    for (const row of counts) {
-      if (!byRule.has(row.rule_id)) byRule.set(row.rule_id, {});
-      byRule.get(row.rule_id)[String(row.state)] = { count: Number(row.count), bytes: Number(row.bytes) };
+    const counts = new Map();
+    for (const row of countRows) {
+      const key = String(row.rule_id);
+      if (!counts.has(key)) counts.set(key, {});
+      counts.get(key)[String(row.state)] = { count: Number(row.count), bytes: Number(row.bytes) };
     }
-    return rules.map((row) => rowToRule(row, byRule.get(row.id) ?? {}));
+    return rows.map((row) => rowToRule(row, counts.get(String(row.id)) ?? {}));
   }
 
   async function get(ruleId) {
-    const rule = (await list()).find((item) => item.id === ruleId);
-    return rule ?? null;
+    const normalized = requireId(ruleId, "ruleId");
+    return (await list()).find((rule) => rule.id === normalized) ?? null;
+  }
+
+  async function objects(ruleId, { limit = 100 } = {}) {
+    const normalized = requireId(ruleId, "ruleId");
+    if (!await get(normalized)) throw notFound(normalized);
+    const rows = (await db.prepare(`
+      SELECT o.*, j.state AS job_state, j.updated_at AS job_updated_at, j.last_error AS job_error,
+             p.bytes_done AS runtime_bytes_done, p.bytes_total AS runtime_bytes_total,
+             p.speed_bytes_per_second AS runtime_speed, p.eta_seconds AS runtime_eta
+      FROM transfer_objects AS o
+      LEFT JOIN backup_jobs AS j ON j.id=o.last_job_id
+      LEFT JOIN backup_job_runtime_progress AS p ON p.job_id=j.id AND p.attempt=j.attempt
+      WHERE o.rule_id=?
+      ORDER BY o.first_seen_at DESC, o.rel_path COLLATE NOCASE ASC
+      LIMIT ?
+    `).bind(normalized, clampInteger(limit, 1, 500, 100)).all()).results ?? [];
+    return rows.map(objectRow);
   }
 
   async function create(input) {
     const at = nowDate(now);
     const value = await normalizeRuleInput(input, { loadAgentConfig });
-    const ruleId = typeof input?.id === "string" && input.id.trim()
-      ? requireId(input.id, "id")
-      : id();
+    const ruleId = typeof input?.id === "string" && input.id.trim() ? requireId(input.id, "id") : id();
     await db.prepare(`
       INSERT INTO transfer_rules (
         id,name,enabled,source_endpoint_id,source_path,destination_endpoint_id,destination_path,
@@ -78,18 +94,23 @@ export function createTransferRuleService({
       || value.initialBehavior !== existing.initialBehavior
       || JSON.stringify(value.includes) !== JSON.stringify(existing.includes)
       || JSON.stringify(value.excludes) !== JSON.stringify(existing.excludes);
+
     if (structuralChange) {
-      const active = await activeManagedJobs(db, ruleId);
-      if (active.length > 0) throw statusError(409, "Transfer rule cannot change endpoints/filters while jobs are active");
+      if (existing.lastScanJob && ACTIVE_STATES.has(existing.lastScanJob.state)) {
+        throw statusError(409, "Transfer rule cannot change endpoints/filters during an active scan");
+      }
+      if ((await activeManagedJobs(db, existing.id)).length > 0) {
+        throw statusError(409, "Transfer rule cannot change endpoints/filters while transfers are active");
+      }
     }
+
     await db.batch([
       db.prepare(`
         UPDATE transfer_rules SET
           name=?,enabled=?,source_endpoint_id=?,source_path=?,destination_endpoint_id=?,destination_path=?,
           mode=?,initial_behavior=?,stability_seconds=?,scan_interval_seconds=?,cleanup_days=?,verification=?,
-          retry_count=?,retry_wait_seconds=?,includes_json=?,excludes_json=?,
-          next_scan_at=?,updated_at=?,revision=revision+1,
-          initialized_at=CASE WHEN ? THEN NULL ELSE initialized_at END
+          retry_count=?,retry_wait_seconds=?,includes_json=?,excludes_json=?,next_scan_at=?,updated_at=?,
+          revision=revision+1,initialized_at=CASE WHEN ? THEN NULL ELSE initialized_at END
         WHERE id=?
       `).bind(
         value.name, value.enabled ? 1 : 0,
@@ -97,11 +118,11 @@ export function createTransferRuleService({
         value.mode, value.initialBehavior, value.stabilitySeconds, value.scanIntervalSeconds,
         value.cleanupDays, value.verification, value.retryCount, value.retryWaitSeconds,
         JSON.stringify(value.includes), JSON.stringify(value.excludes),
-        value.enabled ? at.toISOString() : null, at.toISOString(), structuralChange ? 1 : 0, ruleId,
+        value.enabled ? at.toISOString() : null, at.toISOString(), structuralChange ? 1 : 0, existing.id,
       ),
-      ...(structuralChange ? [db.prepare("DELETE FROM transfer_objects WHERE rule_id=?").bind(ruleId)] : []),
+      ...(structuralChange ? [db.prepare("DELETE FROM transfer_objects WHERE rule_id=?").bind(existing.id)] : []),
     ]);
-    return get(ruleId);
+    return get(existing.id);
   }
 
   async function setEnabled(ruleId, enabled) {
@@ -110,18 +131,18 @@ export function createTransferRuleService({
     if (!existing) throw notFound(ruleId);
     const at = nowDate(now);
     await db.prepare(`UPDATE transfer_rules SET enabled=?,next_scan_at=?,updated_at=?,revision=revision+1 WHERE id=?`)
-      .bind(enabled ? 1 : 0, enabled ? at.toISOString() : null, at.toISOString(), ruleId).run();
-    return get(ruleId);
+      .bind(enabled ? 1 : 0, enabled ? at.toISOString() : null, at.toISOString(), existing.id).run();
+    return get(existing.id);
   }
 
   async function scanNow(ruleId) {
     const rule = await get(ruleId);
     if (!rule) throw notFound(ruleId);
     if (!rule.enabled) throw statusError(409, "Transfer rule is disabled");
-    const active = rule.lastScanJob && ACTIVE_STATES.has(rule.lastScanJob.state) ? rule.lastScanJob : null;
-    if (active) return { job: active, alreadyRunning: true };
-    const job = await queueDiscovery(rule, nowDate(now), true);
-    return { job, alreadyRunning: false };
+    if (rule.lastScanJob && ACTIVE_STATES.has(rule.lastScanJob.state)) {
+      return { job: rule.lastScanJob, alreadyRunning: true };
+    }
+    return { job: await queueDiscovery(rule, nowDate(now), true), alreadyRunning: false };
   }
 
   async function runDue({ scanLimit = 10, transferLimit = 50 } = {}) {
@@ -135,11 +156,11 @@ export function createTransferRuleService({
   }
 
   async function queueDiscovery(rule, at, manual) {
-    const operationKey = manual
-      ? `transfer-scan:${rule.id}:manual:${at.toISOString()}:${id()}`
-      : `transfer-scan:${rule.id}:${rule.nextScanAt ?? at.toISOString()}`;
+    const scheduled = rule.nextScanAt ?? at.toISOString();
     const job = await enqueueJob({
-      operationKey,
+      operationKey: manual
+        ? `transfer-scan:${rule.id}:manual:${at.toISOString()}:${id()}`
+        : `transfer-scan:${rule.id}:${scheduled}`,
       type: "rclone-discovery",
       payload: {
         ruleId: rule.id,
@@ -151,28 +172,29 @@ export function createTransferRuleService({
     });
     const nextScanAt = new Date(at.getTime() + rule.scanIntervalSeconds * 1000).toISOString();
     await db.prepare(`
-      UPDATE transfer_rules SET last_scan_started_at=?,last_scan_job_id=?,next_scan_at=?,last_error=NULL,updated_at=?
+      UPDATE transfer_rules
+      SET last_scan_started_at=?,last_scan_job_id=?,next_scan_at=?,last_error=NULL,updated_at=?
       WHERE id=?
     `).bind(at.toISOString(), job.id, nextScanAt, at.toISOString(), rule.id).run();
     return job;
   }
 
   async function queueDueScans(at, limit, failures) {
-    const due = (await db.prepare(`
+    const rows = (await db.prepare(`
       SELECT id FROM transfer_rules
-      WHERE enabled=1 AND next_scan_at IS NOT NULL AND next_scan_at<=?
+      WHERE enabled=1 AND next_scan_at IS NOT NULL AND julianday(next_scan_at)<=julianday(?)
       ORDER BY next_scan_at ASC,id ASC LIMIT ?
     `).bind(at.toISOString(), limit).all()).results ?? [];
     let enqueued = 0;
-    for (const row of due) {
+    for (const row of rows) {
+      const ruleId = String(row.id);
       try {
-        const rule = await get(String(row.id));
-        if (!rule) continue;
-        if (rule.lastScanJob && ACTIVE_STATES.has(rule.lastScanJob.state)) continue;
+        const rule = await get(ruleId);
+        if (!rule || (rule.lastScanJob && ACTIVE_STATES.has(rule.lastScanJob.state))) continue;
         await queueDiscovery(rule, at, false);
         enqueued += 1;
       } catch (error) {
-        failures.push({ ruleId: String(row.id), phase: "scan", message: errorMessage(error) });
+        failures.push({ ruleId, phase: "scan", message: errorMessage(error) });
       }
     }
     return enqueued;
@@ -181,49 +203,53 @@ export function createTransferRuleService({
   async function queueReadyTransfers(at, limit, failures) {
     const rows = (await db.prepare(`
       SELECT o.*,r.source_endpoint_id,r.source_path,r.destination_endpoint_id,r.destination_path,r.mode,
-             r.verification,r.retry_count,r.retry_wait_seconds,r.cleanup_days,r.stability_seconds,r.enabled,
+             r.verification,r.retry_count,r.retry_wait_seconds,r.cleanup_days,r.stability_seconds,
              r.last_scan_started_at
       FROM transfer_objects AS o
       JOIN transfer_rules AS r ON r.id=o.rule_id
       WHERE r.enabled=1 AND (
-        (o.state='discovered' AND o.stable_since<=datetime(?, '-' || r.stability_seconds || ' seconds')
-          AND (r.last_scan_started_at IS NULL OR o.last_seen_at>=r.last_scan_started_at))
-        OR (o.state='retry_wait' AND o.next_retry_at IS NOT NULL AND o.next_retry_at<=?)
+        (o.state='discovered'
+          AND julianday(o.stable_since)<=julianday(?)-(CAST(r.stability_seconds AS REAL)/86400.0)
+          AND (r.last_scan_started_at IS NULL OR julianday(o.last_seen_at)>=julianday(r.last_scan_started_at)))
+        OR (o.state='retry_wait' AND o.next_retry_at IS NOT NULL AND julianday(o.next_retry_at)<=julianday(?))
       )
-      ORDER BY o.first_seen_at ASC,o.rel_path ASC LIMIT ?
+      ORDER BY o.first_seen_at ASC,o.rel_path COLLATE NOCASE ASC LIMIT ?
     `).bind(at.toISOString(), at.toISOString(), limit).all()).results ?? [];
+
     let enqueued = 0;
     for (const row of rows) {
+      const ruleId = String(row.rule_id);
+      const objectKey = String(row.object_key);
       try {
         const attempt = Number(row.attempt_count) + 1;
-        const payload = {
-          ruleId: String(row.rule_id),
-          sourceEndpointId: String(row.source_endpoint_id),
-          sourcePath: String(row.source_path),
-          destinationEndpointId: String(row.destination_endpoint_id),
-          destinationPath: String(row.destination_path),
-          mode: String(row.mode),
-          verification: String(row.verification),
-          transferAttempt: attempt,
-          items: [{
-            relPath: String(row.rel_path),
-            size: Number(row.size),
-            modTime: String(row.mod_time),
-            objectKey: String(row.object_key),
-          }],
-        };
         const job = await enqueueJob({
-          operationKey: `transfer:${row.rule_id}:${row.object_key}:attempt:${attempt}`,
+          operationKey: `transfer:${ruleId}:${objectKey}:attempt:${attempt}`,
           type: "managed-transfer",
-          payload,
+          payload: {
+            ruleId,
+            sourceEndpointId: String(row.source_endpoint_id),
+            sourcePath: String(row.source_path),
+            destinationEndpointId: String(row.destination_endpoint_id),
+            destinationPath: String(row.destination_path),
+            mode: String(row.mode),
+            verification: String(row.verification),
+            transferAttempt: attempt,
+            items: [{
+              relPath: String(row.rel_path),
+              size: Number(row.size),
+              modTime: String(row.mod_time),
+              objectKey,
+            }],
+          },
         });
         const changed = await db.prepare(`
-          UPDATE transfer_objects SET state='queued',last_job_id=?,attempt_count=?,next_retry_at=NULL,last_error=NULL
+          UPDATE transfer_objects
+          SET state='queued',last_job_id=?,attempt_count=?,next_retry_at=NULL,last_error=NULL
           WHERE rule_id=? AND object_key=? AND state IN ('discovered','retry_wait')
-        `).bind(job.id, attempt, row.rule_id, row.object_key).run();
+        `).bind(job.id, attempt, ruleId, objectKey).run();
         if (Number(changed.meta?.changes ?? 0) > 0) enqueued += 1;
       } catch (error) {
-        failures.push({ ruleId: String(row.rule_id), objectKey: String(row.object_key), phase: "transfer", message: errorMessage(error) });
+        failures.push({ ruleId, objectKey, phase: "transfer", message: errorMessage(error) });
       }
     }
     return enqueued;
@@ -231,7 +257,7 @@ export function createTransferRuleService({
 
   async function reconcileTerminalTransfers(at, failures) {
     const rows = (await db.prepare(`
-      SELECT o.rule_id,o.object_key,o.rel_path,o.attempt_count,o.state,j.id AS job_id,j.state AS job_state,
+      SELECT o.rule_id,o.object_key,o.attempt_count,j.id AS job_id,j.state AS job_state,
              j.finished_at,j.updated_at,j.last_error,r.retry_count,r.retry_wait_seconds,r.cleanup_days
       FROM transfer_objects AS o
       JOIN backup_jobs AS j ON j.id=o.last_job_id
@@ -240,6 +266,8 @@ export function createTransferRuleService({
       ORDER BY j.updated_at ASC LIMIT 200
     `).all()).results ?? [];
     for (const row of rows) {
+      const ruleId = String(row.rule_id);
+      const objectKey = String(row.object_key);
       try {
         const finishedAt = validDate(row.finished_at ?? row.updated_at, at);
         if (row.job_state === "completed") {
@@ -247,14 +275,17 @@ export function createTransferRuleService({
             ? new Date(finishedAt.getTime() + Number(row.cleanup_days) * 86400000).toISOString()
             : null;
           await db.prepare(`
-            UPDATE transfer_objects SET state='done',committed_at=?,destination_rel_path=rel_path,cleanup_after=?,last_error=NULL
+            UPDATE transfer_objects
+            SET state='done',committed_at=?,destination_rel_path=rel_path,cleanup_after=?,last_error=NULL,next_retry_at=NULL
             WHERE rule_id=? AND object_key=? AND state='queued' AND last_job_id=?
-          `).bind(finishedAt.toISOString(), cleanupAfter, row.rule_id, row.object_key, row.job_id).run();
+          `).bind(finishedAt.toISOString(), cleanupAfter, ruleId, objectKey, row.job_id).run();
           continue;
         }
         if (row.job_state === "cancelled") {
-          await db.prepare(`UPDATE transfer_objects SET state='cancelled',last_error=? WHERE rule_id=? AND object_key=? AND last_job_id=?`)
-            .bind(row.last_error ?? "transfer cancelled", row.rule_id, row.object_key, row.job_id).run();
+          await db.prepare(`
+            UPDATE transfer_objects SET state='cancelled',next_retry_at=NULL,last_error=?
+            WHERE rule_id=? AND object_key=? AND state='queued' AND last_job_id=?
+          `).bind(row.last_error ?? "transfer cancelled", ruleId, objectKey, row.job_id).run();
           continue;
         }
         if (FAILURE_STATES.has(String(row.job_state)) && Number(row.attempt_count) <= Number(row.retry_count)) {
@@ -262,15 +293,15 @@ export function createTransferRuleService({
           await db.prepare(`
             UPDATE transfer_objects SET state='retry_wait',next_retry_at=?,last_error=?
             WHERE rule_id=? AND object_key=? AND state='queued' AND last_job_id=?
-          `).bind(retryAt, row.last_error ?? `transfer ${row.job_state}`, row.rule_id, row.object_key, row.job_id).run();
+          `).bind(retryAt, row.last_error ?? `transfer ${row.job_state}`, ruleId, objectKey, row.job_id).run();
         } else {
           await db.prepare(`
             UPDATE transfer_objects SET state='failed',next_retry_at=NULL,last_error=?
             WHERE rule_id=? AND object_key=? AND state='queued' AND last_job_id=?
-          `).bind(row.last_error ?? `transfer ${row.job_state}`, row.rule_id, row.object_key, row.job_id).run();
+          `).bind(row.last_error ?? `transfer ${row.job_state}`, ruleId, objectKey, row.job_id).run();
         }
       } catch (error) {
-        failures.push({ ruleId: String(row.rule_id), objectKey: String(row.object_key), phase: "reconcile", message: errorMessage(error) });
+        failures.push({ ruleId, objectKey, phase: "reconcile", message: errorMessage(error) });
       }
     }
   }
@@ -283,28 +314,26 @@ export function createTransferRuleService({
     `).all()).results ?? [];
     for (const row of rows) {
       const finishedAt = validDate(row.finished_at ?? row.updated_at, at).toISOString();
-      if (row.last_scan_completed_at && Date.parse(row.last_scan_completed_at) >= Date.parse(finishedAt)) continue;
-      await db.prepare(`UPDATE transfer_rules SET last_scan_completed_at=?,last_error=?,updated_at=? WHERE id=? AND last_scan_job_id=?`)
-        .bind(finishedAt, row.last_error ?? `scan ${row.state}`, at.toISOString(), row.id, row.last_scan_job_id).run();
+      if (row.last_scan_completed_at && Date.parse(String(row.last_scan_completed_at)) >= Date.parse(finishedAt)) continue;
+      await db.prepare(`
+        UPDATE transfer_rules SET last_scan_completed_at=?,last_error=?,updated_at=?
+        WHERE id=? AND last_scan_job_id=?
+      `).bind(finishedAt, row.last_error ?? `scan ${row.state}`, at.toISOString(), row.id, row.last_scan_job_id).run();
     }
   }
 
-  return { list, get, create, update, setEnabled, scanNow, runDue };
+  return { list, get, objects, create, update, setEnabled, scanNow, runDue };
 }
 
-export async function persistTransferDiscovery(db, {
-  jobId,
-  expectedRuleId,
-  event,
-  at = new Date(),
-}) {
+export async function persistTransferDiscovery(db, { jobId, expectedRuleId, event, at = new Date() }) {
   const normalized = normalizeTransferDiscoveryEvent(event, { expectedRuleId, now: at });
   const rule = await db.prepare("SELECT * FROM transfer_rules WHERE id=?").bind(normalized.ruleId).first();
   if (!rule) throw new RangeError(`transfer discovery rule does not exist: ${normalized.ruleId}`);
-  const seenAt = normalized.at;
   const firstScan = rule.initialized_at === null || rule.initialized_at === undefined;
   const initialState = firstScan && rule.initial_behavior === "ignore_existing" ? "ignored" : "discovered";
+  const seenAt = normalized.at;
   const statements = [db.prepare("DELETE FROM transfer_discovery_entries WHERE job_id=?").bind(jobId)];
+
   for (const item of normalized.entries) {
     const key = objectKey(item.relPath, item.size, item.modTime);
     statements.push(db.prepare(`
@@ -312,8 +341,9 @@ export async function persistTransferDiscovery(db, {
       VALUES(?,?,?,?,?,?,?)
     `).bind(jobId, normalized.ruleId, key, item.relPath, item.size, item.modTime, seenAt));
   }
+
   statements.push(db.prepare(`
-    UPDATE transfer_objects SET state='superseded'
+    UPDATE transfer_objects SET state='superseded',next_retry_at=NULL
     WHERE rule_id=? AND state IN ('discovered','retry_wait')
       AND EXISTS (
         SELECT 1 FROM transfer_discovery_entries AS s
@@ -330,7 +360,8 @@ export async function persistTransferDiscovery(db, {
     ON CONFLICT(rule_id,object_key) DO UPDATE SET last_seen_at=excluded.last_seen_at
   `).bind(initialState, jobId));
   statements.push(db.prepare(`
-    UPDATE transfer_rules SET initialized_at=COALESCE(initialized_at,?),last_scan_completed_at=?,last_error=NULL,updated_at=?
+    UPDATE transfer_rules
+    SET initialized_at=COALESCE(initialized_at,?),last_scan_completed_at=?,last_error=NULL,updated_at=?
     WHERE id=? AND last_scan_job_id=?
   `).bind(seenAt, seenAt, seenAt, normalized.ruleId, jobId));
   statements.push(db.prepare("DELETE FROM transfer_discovery_entries WHERE job_id=?").bind(jobId));
@@ -394,42 +425,52 @@ export async function normalizeRuleInput(value, { loadAgentConfig } = {}) {
 
 function normalizeDiscoveryEntry(value) {
   if (!isRecord(value)) throw new RangeError("transfer discovery entry must be an object");
-  const relPath = normalizeObjectPath(value.relPath);
-  const size = integerRange(value.size, "entry.size", 0, Number.MAX_SAFE_INTEGER);
-  const modTime = requireDate(value.modTime, "entry.modTime");
-  return { relPath, size, modTime };
+  return {
+    relPath: normalizeObjectPath(value.relPath),
+    size: integerRange(value.size, "entry.size", 0, Number.MAX_SAFE_INTEGER),
+    modTime: requireDate(value.modTime, "entry.modTime"),
+  };
 }
 
 function objectKey(relPath, size, modTime) {
   return createHash("sha256").update(`${relPath}\0${size}\0${modTime}`).digest("hex");
 }
 
-function normalizeObjectPath(value) {
-  const path = requireString(value, "entry.relPath", 1, 4096, false).replaceAll("\\", "/").replace(/^\/+/, "");
-  if (!path || path.split("/").some((part) => !part || part === "." || part === "..")) throw new RangeError("entry.relPath must be a safe relative path");
-  return path;
-}
-
-function normalizeRelativeBase(value) {
-  if (typeof value !== "string") throw new RangeError("path must be a string");
-  const normalized = value.trim().replaceAll("\\", "/").replace(/^\/+|\/+$/g, "");
-  if (!normalized) return "";
-  if (normalized.split("/").some((part) => !part || part === "." || part === "..")) throw new RangeError("path may not contain dot segments");
-  if (normalized.length > 2048) throw new RangeError("path is too long");
-  return normalized;
-}
-
-function normalizePatterns(value) {
-  if (value === undefined || value === null) return [];
-  if (!Array.isArray(value)) throw new RangeError("include/exclude patterns must be arrays");
-  const result = [...new Set(value.map((item) => requireString(item, "pattern", 1, 512)))];
-  if (result.length > 50) throw new RangeError("include/exclude patterns may contain at most 50 values");
-  return result;
+function objectRow(row) {
+  return {
+    objectKey: String(row.object_key),
+    path: String(row.rel_path),
+    size: Number(row.size),
+    modTime: String(row.mod_time),
+    state: String(row.state),
+    firstSeenAt: String(row.first_seen_at),
+    lastSeenAt: String(row.last_seen_at),
+    stableSince: String(row.stable_since),
+    attemptCount: Number(row.attempt_count),
+    nextRetryAt: nullableString(row.next_retry_at),
+    committedAt: nullableString(row.committed_at),
+    cleanupAfter: nullableString(row.cleanup_after),
+    error: nullableString(row.last_error),
+    job: row.last_job_id === null || row.last_job_id === undefined ? null : {
+      id: String(row.last_job_id),
+      state: nullableString(row.job_state),
+      updatedAt: nullableString(row.job_updated_at),
+      error: nullableString(row.job_error),
+      progress: row.runtime_bytes_done === null || row.runtime_bytes_done === undefined ? null : {
+        bytesDone: Number(row.runtime_bytes_done),
+        bytesTotal: row.runtime_bytes_total === null ? null : Number(row.runtime_bytes_total),
+        speedBytesPerSecond: row.runtime_speed === null ? null : Number(row.runtime_speed),
+        etaSeconds: row.runtime_eta === null ? null : Number(row.runtime_eta),
+      },
+    },
+  };
 }
 
 function rowToRule(row, counts) {
   const scanJobId = nullableString(row.last_scan_job_id);
   const scanState = nullableString(row.scan_job_state);
+  const normalizedCounts = {};
+  for (const state of OBJECT_STATES) normalizedCounts[state] = counts[state] ?? { count: 0, bytes: 0 };
   return {
     id: String(row.id), name: String(row.name), enabled: Number(row.enabled) === 1,
     sourceEndpointId: String(row.source_endpoint_id), sourcePath: String(row.source_path),
@@ -441,40 +482,45 @@ function rowToRule(row, counts) {
     includes: parseJsonArray(row.includes_json), excludes: parseJsonArray(row.excludes_json),
     initializedAt: nullableString(row.initialized_at), nextScanAt: nullableString(row.next_scan_at),
     lastScanStartedAt: nullableString(row.last_scan_started_at), lastScanCompletedAt: nullableString(row.last_scan_completed_at),
-    lastError: nullableString(row.last_error), revision: Number(row.revision), counts: normalizeCounts(counts),
-    lastScanJob: scanJobId ? { id: scanJobId, state: scanState, terminal: scanState ? TERMINAL_STATES.has(scanState) : false,
-      updatedAt: nullableString(row.scan_job_updated_at), finishedAt: nullableString(row.scan_job_finished_at), error: nullableString(row.scan_job_error) } : null,
+    lastError: nullableString(row.last_error), revision: Number(row.revision), counts: normalizedCounts,
+    lastScanJob: scanJobId ? {
+      id: scanJobId, state: scanState, terminal: scanState ? TERMINAL_STATES.has(scanState) : false,
+      updatedAt: nullableString(row.scan_job_updated_at), finishedAt: nullableString(row.scan_job_finished_at),
+      error: nullableString(row.scan_job_error),
+    } : null,
     createdAt: String(row.created_at), updatedAt: String(row.updated_at),
   };
 }
 
-function normalizeCounts(counts) {
-  const result = {};
-  for (const state of OBJECT_STATES) result[state] = counts[state] ?? { count: 0, bytes: 0 };
-  return result;
-}
-
 async function activeManagedJobs(db, ruleId) {
-  const rows = (await db.prepare(`SELECT id,state FROM backup_jobs WHERE type='managed-transfer' AND state IN ('queued','leased','preparing','running','finalizing') ORDER BY created_at`)
-    .all()).results ?? [];
-  const matched = [];
-  for (const row of rows) {
-    const payload = await db.prepare("SELECT payload_json FROM backup_jobs WHERE id=?").bind(row.id).first("payload_json");
-    try { if (JSON.parse(payload)?.ruleId === ruleId) matched.push({ id: String(row.id), state: String(row.state) }); } catch {}
-  }
-  return matched;
+  const rows = (await db.prepare(`
+    SELECT id,state,payload_json FROM backup_jobs
+    WHERE type='managed-transfer' AND state IN ('queued','leased','preparing','running','finalizing')
+    ORDER BY created_at
+  `).all()).results ?? [];
+  return rows.flatMap((row) => {
+    try { return JSON.parse(String(row.payload_json))?.ruleId === ruleId ? [{ id: String(row.id), state: String(row.state) }] : []; }
+    catch { return []; }
+  });
 }
 
+function normalizeObjectPath(value) {
+  const path = requireString(value, "entry.relPath", 1, 4096, false).replaceAll("\\", "/").replace(/^\/+/, "").replace(/\/+$/, "");
+  if (!path || path.split("/").some((part) => !part || part === "." || part === "..")) throw new RangeError("entry.relPath must be a safe relative path");
+  return path;
+}
+function normalizeRelativeBase(value) { if (typeof value !== "string") throw new RangeError("path must be a string"); const normalized = value.trim().replaceAll("\\", "/").replace(/^\/+|\/+$/g, ""); if (!normalized) return ""; if (normalized.split("/").some((part) => !part || part === "." || part === "..")) throw new RangeError("path may not contain dot segments"); if (normalized.length > 2048) throw new RangeError("path is too long"); return normalized; }
+function normalizePatterns(value) { if (value === undefined || value === null) return []; if (!Array.isArray(value)) throw new RangeError("include/exclude patterns must be arrays"); const result = [...new Set(value.map((item) => requireString(item, "pattern", 1, 512)))]; if (result.length > 50) throw new RangeError("include/exclude patterns may contain at most 50 values"); return result; }
 function parseJsonArray(value) { if (typeof value !== "string") return []; try { const parsed = JSON.parse(value); return Array.isArray(parsed) ? parsed : []; } catch { return []; } }
-function requireId(value, name) { const id = requireString(value, name, 1, 128); if (!/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(id)) throw new RangeError(`${name} contains unsupported characters`); return id; }
-function requireString(value, name, min, max, trim = true) { if (typeof value !== "string") throw new RangeError(`${name} must be a string`); const normalized = trim ? value.trim() : value; if (normalized.length < min || normalized.length > max) throw new RangeError(`${name} must be ${min}-${max} characters`); return normalized; }
+function requireId(value, name) { const result = requireString(value, name, 1, 128); if (!/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(result)) throw new RangeError(`${name} contains unsupported characters`); return result; }
+function requireString(value, name, min, max, trim = true) { if (typeof value !== "string") throw new RangeError(`${name} must be a string`); const result = trim ? value.trim() : value; if (result.length < min || result.length > max) throw new RangeError(`${name} must be ${min}-${max} characters`); return result; }
 function requireBoolean(value, name) { if (typeof value !== "boolean") throw new RangeError(`${name} must be a boolean`); return value; }
 function requireEnum(value, allowed, name) { if (typeof value !== "string" || !allowed.has(value)) throw new RangeError(`${name} is invalid`); return value; }
 function integerRange(value, name, min, max) { if (!Number.isSafeInteger(value) || value < min || value > max) throw new RangeError(`${name} must be an integer between ${min} and ${max}`); return value; }
 function requireDate(value, name) { if (typeof value !== "string" || !Number.isFinite(Date.parse(value))) throw new RangeError(`${name} must be a valid date`); return new Date(value).toISOString(); }
 function normalizeAt(value, fallback) { return typeof value === "string" && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString() : fallback.toISOString(); }
-function nowDate(now) { const date = now(); const result = date instanceof Date ? new Date(date) : new Date(date); if (!Number.isFinite(result.getTime())) throw new TypeError("now() must return a valid date"); return result; }
-function validDate(value, fallback) { const parsed = new Date(value); return Number.isFinite(parsed.getTime()) ? parsed : new Date(fallback); }
+function nowDate(now) { const value = now(); const result = value instanceof Date ? new Date(value) : new Date(value); if (!Number.isFinite(result.getTime())) throw new TypeError("now() must return a valid date"); return result; }
+function validDate(value, fallback) { const result = new Date(value); return Number.isFinite(result.getTime()) ? result : new Date(fallback); }
 function clampInteger(value, min, max, fallback) { const number = Number(value); return Number.isInteger(number) ? Math.min(max, Math.max(min, number)) : fallback; }
 function nullableString(value) { return value === null || value === undefined ? null : String(value); }
 function statusError(statusCode, message) { const error = new Error(message); error.statusCode = statusCode; return error; }
