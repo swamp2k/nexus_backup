@@ -50,7 +50,7 @@ export interface LocalRtorrentGate {
   username?: string;
   password?: string;
   view?: string;
-  sourceBasePath?: string;
+  sourceBasePath: string;
   required?: boolean;
 }
 
@@ -209,10 +209,10 @@ function normalizeRtorrentGate(input: LocalRtorrentGate): LocalRtorrentGate {
   return Object.freeze({
     id: requireNonEmpty(input.id, "rtorrent gate id"),
     url: parsed.toString(),
+    sourceBasePath: requireNonEmpty(input.sourceBasePath, "rtorrent source base path"),
     ...(input.username === undefined ? {} : { username: requireNonEmpty(input.username, "rtorrent username") }),
     ...(input.password === undefined ? {} : { password: requireNonEmpty(input.password, "rtorrent password") }),
     ...(input.view === undefined ? {} : { view: requireNonEmpty(input.view, "rtorrent view") }),
-    ...(input.sourceBasePath === undefined ? {} : { sourceBasePath: requireNonEmpty(input.sourceBasePath, "rtorrent source base path") }),
     required: input.required === true,
   });
 }
