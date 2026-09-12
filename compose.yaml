@@ -10,9 +10,11 @@ services:
       - "${NEXUS_BACKUP_PORT:-8787}:8787"
     environment:
       NEXUS_BACKUP_AGENT_ID: local-agent
+      NEXUS_BACKUP_AGENT_CONFIG: /agent-config/agent.json
     volumes:
       - control-config:/config
       - runtime:/run/nexus-backup
+      - agent-config:/agent-config:ro
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 10s
