@@ -38,6 +38,10 @@ export interface TransferDiscoveryEntryEvent {
   relPath: string;
   size: number;
   modTime: string;
+  groupKind?: "torrent";
+  groupKey?: string;
+  groupName?: string;
+  groupRoot?: string;
 }
 
 export type ExecutionEvent =
