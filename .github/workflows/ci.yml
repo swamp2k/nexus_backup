@@ -14,9 +14,25 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: apps/workstation-agent/go.mod
+          cache-dependency-path: apps/workstation-agent/go.mod
       - run: npm ci
       - run: npm test
       - run: npm run typecheck
+      - name: Test workstation agent
+        working-directory: apps/workstation-agent
+        run: go test ./...
+      - name: Vet workstation agent
+        working-directory: apps/workstation-agent
+        run: go vet ./...
+      - name: Cross-build Windows workstation agent
+        working-directory: apps/workstation-agent
+        run: GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags="-X main.version=0.0.0-ci -s -w" -o /tmp/nexus-backup-workstation-windows-amd64.exe .
+      - name: Parse workstation installer
+        shell: pwsh
+        run: '[scriptblock]::Create((Get-Content -Raw apps/local-server/web/install.ps1)) | Out-Null'
       - name: Validate Unraid templates
         shell: bash
         run: |
