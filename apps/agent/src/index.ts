@@ -6,6 +6,8 @@ export * from "./executor.js";
 export * from "./http-control-plane.js";
 export * from "./process-runner.js";
 export * from "./rclone-executor.js";
+export * from "./rclone-mount-manager.js";
+export * from "./rclone-mounted-restic-executor.js";
 export * from "./restic-executor.js";
 export * from "./runner.js";
 export * from "./runtime-config.js";

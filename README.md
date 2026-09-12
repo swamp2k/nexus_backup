@@ -4,7 +4,7 @@ Nexus Backup is the backup and transfer engine for Nexus. Nexus is the control p
 
 ## Status
 
-M1 and M2 are implemented. M3 execution foundation is implemented; host-specific rclone mount orchestration is intentionally deferred until the Unraid agent runtime is selected.
+M1 and M2 are implemented. M3 now contains the complete local rclone -> restic execution pipeline; packaging the long-running Unraid agent process is next.
 
 ### M1 - job engine and agent lifecycle
 
@@ -29,7 +29,7 @@ M1 and M2 are implemented. M3 execution foundation is implemented; host-specific
 - HTTP control-plane client for the agent
 - SQLite-backed contract and end-to-end tests
 
-### M3 - execution foundation
+### M3 - execution pipeline
 
 - cancellable child-process runner with TERM -> KILL escalation
 - local-only source, repository and rclone endpoint registry
@@ -37,10 +37,12 @@ M1 and M2 are implemented. M3 execution foundation is implemented; host-specific
 - restic exit code 3 mapped to `partial`
 - rclone copy/move executor with JSON stats parsing
 - destructive rclone `move` requires local source opt-in
+- read-only rclone FUSE mount lifecycle for remote backup sources
+- configurable local VFS cache/mount policy
+- guaranteed unmount on completed, partial and failed remote backups
+- cleanup uses its own timeout and surfaces leaked-mount failures
 - composite executor dispatch by job type
-- raw source/repository paths cannot be supplied by control-plane jobs
-
-The remaining host-specific M3 work is rclone mount lifecycle and cache/unmount policy for remote-as-source backups such as Google Drive -> restic.
+- raw source/repository/mount paths cannot be supplied by control-plane jobs
 
 Backup payloads must never pass through the Nexus control plane.
 
@@ -48,10 +50,10 @@ Backup payloads must never pass through the Nexus control plane.
 
 ```text
 packages/core          Domain model, state machine, leases and repository contracts
-apps/agent             Agent runner and HTTP control-plane client
+apps/agent             Agent runner, execution adapters and HTTP control-plane client
 apps/control-plane     Worker-compatible API, D1 repository and agent auth
 migrations             D1 schema migrations
-docs                   Architecture and control-plane notes
+docs                   Architecture, control-plane and Unraid runtime notes
 ```
 
 ## Development
@@ -80,7 +82,7 @@ The actual D1 database name/id and deployment target must be selected before a W
 
 1. M1 - Core engine and agent lifecycle ✅
 2. M2 - Control-plane API, D1 persistence and agent authentication ✅
-3. M3 - rclone + restic pipeline (execution foundation ✅; mount integration pending)
+3. M3 - rclone + restic pipeline ✅
 4. M4 - Nexus UI
 5. M5 - transfer engine / Copyarr capabilities
 6. M6 - device / PCWatch integration
@@ -88,4 +90,6 @@ The actual D1 database name/id and deployment target must be selected before a W
 8. M8 - recovery torture testing
 9. M9 - architecture/security review
 
-See `docs/architecture.md` and `docs/control-plane.md` for the invariants later milestones must preserve.
+Before M4, package the long-running Unraid agent process described in `docs/unraid-agent.md` so the control plane and execution pipeline can be exercised end-to-end on the real host.
+
+See `docs/architecture.md`, `docs/control-plane.md` and `docs/unraid-agent.md` for the invariants later milestones must preserve.

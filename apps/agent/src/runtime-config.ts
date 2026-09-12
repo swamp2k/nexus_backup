@@ -10,11 +10,27 @@ export interface LocalResticRepository {
   environment?: Readonly<Record<string, string>>;
 }
 
+export type RcloneVfsCacheMode = "off" | "minimal" | "writes" | "full";
+
+export interface LocalRcloneMountConfig {
+  mountPoint: string;
+  daemonWait?: string;
+  cacheDir?: string;
+  vfsCacheMode?: RcloneVfsCacheMode;
+  vfsCacheMaxSize?: string;
+  dirCacheTime?: string;
+  pollInterval?: string;
+  bufferSize?: string;
+  args?: readonly string[];
+}
+
 export interface LocalRcloneEndpoint {
   id: string;
   fs: string;
   /** Destructive rclone move jobs are rejected unless the source endpoint explicitly opts in. */
   allowMove?: boolean;
+  /** Optional local-only mount policy used by remote-as-source backup jobs. */
+  mount?: LocalRcloneMountConfig;
 }
 
 export interface AgentToolConfig {
@@ -22,6 +38,9 @@ export interface AgentToolConfig {
   rcloneBinary?: string;
   rcloneConfigPath?: string;
   rcloneArgs?: readonly string[];
+  unmountBinary?: string;
+  unmountArgs?: readonly string[];
+  unmountTimeoutMs?: number;
 }
 
 export interface AgentRuntimeConfig {
@@ -70,6 +89,7 @@ export class StaticAgentRuntimeConfig implements AgentRuntimeConfig {
         id: requireNonEmpty(item.id, "rclone endpoint id"),
         fs: requireNonEmpty(item.fs, "rclone endpoint fs"),
         ...(item.allowMove === undefined ? {} : { allowMove: item.allowMove }),
+        ...(item.mount === undefined ? {} : { mount: normalizeMount(item.mount) }),
       }),
     );
     this.tools = normalizeTools(input.tools ?? {});
@@ -102,7 +122,30 @@ function indexById<T extends { id: string }>(
   return map;
 }
 
+function normalizeMount(input: LocalRcloneMountConfig): LocalRcloneMountConfig {
+  const vfsCacheMode = input.vfsCacheMode;
+  if (vfsCacheMode !== undefined && !["off", "minimal", "writes", "full"].includes(vfsCacheMode)) {
+    throw new Error(`Unsupported rclone VFS cache mode: ${vfsCacheMode}`);
+  }
+  return Object.freeze({
+    mountPoint: requireNonEmpty(input.mountPoint, "rclone mount point"),
+    ...(input.daemonWait === undefined ? {} : { daemonWait: requireNonEmpty(input.daemonWait, "rclone daemon wait") }),
+    ...(input.cacheDir === undefined ? {} : { cacheDir: requireNonEmpty(input.cacheDir, "rclone cache directory") }),
+    ...(vfsCacheMode === undefined ? {} : { vfsCacheMode }),
+    ...(input.vfsCacheMaxSize === undefined ? {} : { vfsCacheMaxSize: requireNonEmpty(input.vfsCacheMaxSize, "rclone VFS cache max size") }),
+    ...(input.dirCacheTime === undefined ? {} : { dirCacheTime: requireNonEmpty(input.dirCacheTime, "rclone dir cache time") }),
+    ...(input.pollInterval === undefined ? {} : { pollInterval: requireNonEmpty(input.pollInterval, "rclone poll interval") }),
+    ...(input.bufferSize === undefined ? {} : { bufferSize: requireNonEmpty(input.bufferSize, "rclone buffer size") }),
+    ...(input.args === undefined ? {} : {
+      args: Object.freeze(input.args.map((arg, index) => requireNonEmpty(arg, `rclone mount argument ${index + 1}`))),
+    }),
+  });
+}
+
 function normalizeTools(input: AgentToolConfig): AgentToolConfig {
+  if (input.unmountTimeoutMs !== undefined && (!Number.isInteger(input.unmountTimeoutMs) || input.unmountTimeoutMs <= 0)) {
+    throw new Error("unmountTimeoutMs must be a positive integer");
+  }
   return Object.freeze({
     ...(input.resticBinary === undefined ? {} : { resticBinary: requireNonEmpty(input.resticBinary, "restic binary") }),
     ...(input.rcloneBinary === undefined ? {} : { rcloneBinary: requireNonEmpty(input.rcloneBinary, "rclone binary") }),
@@ -110,6 +153,11 @@ function normalizeTools(input: AgentToolConfig): AgentToolConfig {
     ...(input.rcloneArgs === undefined ? {} : {
       rcloneArgs: Object.freeze(input.rcloneArgs.map((arg, index) => requireNonEmpty(arg, `rclone argument ${index + 1}`))),
     }),
+    ...(input.unmountBinary === undefined ? {} : { unmountBinary: requireNonEmpty(input.unmountBinary, "unmount binary") }),
+    ...(input.unmountArgs === undefined ? {} : {
+      unmountArgs: Object.freeze(input.unmountArgs.map((arg, index) => requireNonEmpty(arg, `unmount argument ${index + 1}`))),
+    }),
+    ...(input.unmountTimeoutMs === undefined ? {} : { unmountTimeoutMs: input.unmountTimeoutMs }),
   });
 }
 

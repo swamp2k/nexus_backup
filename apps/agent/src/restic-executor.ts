@@ -12,6 +12,12 @@ export interface ResticBackupPayload {
   tags?: readonly string[];
 }
 
+export interface ResticBackupRequest {
+  paths: readonly string[];
+  repositoryId: string;
+  tags?: readonly string[];
+}
+
 export class ResticBackupExecutor implements JobExecutor {
   readonly #config: AgentRuntimeConfig;
   readonly #runner: CommandRunner;
@@ -26,60 +32,79 @@ export class ResticBackupExecutor implements JobExecutor {
   async execute(job: BackupJob, signal: AbortSignal): Promise<JobExecutionResult> {
     const payload = parsePayload(job.payload);
     const source = this.#config.source(payload.sourceId);
-    const repository = this.#config.resticRepository(payload.repositoryId);
-    if (source.paths.length === 0) throw new Error(`Backup source ${source.id} has no local paths`);
-
-    const args = ["backup", "--json"];
-    for (const tag of payload.tags ?? []) args.push("--tag", tag);
-    args.push("--", ...source.paths);
-
-    const env: Record<string, string> = {
-      ...(repository.environment ?? {}),
-      RESTIC_REPOSITORY: repository.repository,
-      RESTIC_PROGRESS_FPS: repository.environment?.RESTIC_PROGRESS_FPS ?? "1",
-    };
-    if (repository.passwordFile) env.RESTIC_PASSWORD_FILE = repository.passwordFile;
-
-    const result = await this.#runner.run({
-      executable: this.#config.tools.resticBinary ?? "restic",
-      args,
-      env,
-    }, signal, {
-      stdout: (line) => this.#handleStdout(line),
-      stderr: (line) => this.#events.emit({ type: "log", tool: "restic", stream: "stderr", message: line }),
-    });
-
-    if (result.exitCode === 0) return { status: "completed" };
-    if (result.exitCode === 3) {
-      return { status: "partial", message: "Restic created an incomplete snapshot because some source files could not be read" };
-    }
-    throw new ToolExitError("restic", result);
+    return runResticBackup(
+      this.#config,
+      this.#runner,
+      this.#events,
+      {
+        paths: source.paths,
+        repositoryId: payload.repositoryId,
+        ...(payload.tags === undefined ? {} : { tags: payload.tags }),
+      },
+      signal,
+    );
   }
+}
 
-  #handleStdout(line: string): void {
-    const message = parseJsonLine(line);
-    if (!message) {
-      this.#events.emit({ type: "log", tool: "restic", stream: "stdout", message: line });
-      return;
-    }
-    if (message.message_type === "status") {
-      this.#events.emit(progressEvent("restic", {
-        bytesDone: numberValue(message.bytes_done),
-        bytesTotal: numberValue(message.total_bytes),
-        filesDone: numberValue(message.files_done),
-        filesTotal: numberValue(message.total_files),
-        etaSeconds: nullableNumberValue(message.seconds_remaining),
-        errors: numberValue(message.error_count),
-      }));
-      return;
-    }
-    if (message.message_type === "summary") {
-      this.#events.emit({ type: "summary", tool: "restic", data: message });
-      return;
-    }
-    if (message.message_type === "error") {
-      this.#events.emit({ type: "log", tool: "restic", stream: "stdout", message: jsonErrorMessage(message) });
-    }
+export async function runResticBackup(
+  config: AgentRuntimeConfig,
+  runner: CommandRunner,
+  events: ExecutionEventSink,
+  request: ResticBackupRequest,
+  signal: AbortSignal,
+): Promise<JobExecutionResult> {
+  if (request.paths.length === 0) throw new Error("restic backup requires at least one local source path");
+  const repository = config.resticRepository(request.repositoryId);
+  const args = ["backup", "--json"];
+  for (const tag of request.tags ?? []) args.push("--tag", tag);
+  args.push("--", ...request.paths);
+
+  const env: Record<string, string> = {
+    ...(repository.environment ?? {}),
+    RESTIC_REPOSITORY: repository.repository,
+    RESTIC_PROGRESS_FPS: repository.environment?.RESTIC_PROGRESS_FPS ?? "1",
+  };
+  if (repository.passwordFile) env.RESTIC_PASSWORD_FILE = repository.passwordFile;
+
+  const result = await runner.run({
+    executable: config.tools.resticBinary ?? "restic",
+    args,
+    env,
+  }, signal, {
+    stdout: (line) => handleStdout(events, line),
+    stderr: (line) => events.emit({ type: "log", tool: "restic", stream: "stderr", message: line }),
+  });
+
+  if (result.exitCode === 0) return { status: "completed" };
+  if (result.exitCode === 3) {
+    return { status: "partial", message: "Restic created an incomplete snapshot because some source files could not be read" };
+  }
+  throw new ToolExitError("restic", result);
+}
+
+function handleStdout(events: ExecutionEventSink, line: string): void {
+  const message = parseJsonLine(line);
+  if (!message) {
+    events.emit({ type: "log", tool: "restic", stream: "stdout", message: line });
+    return;
+  }
+  if (message.message_type === "status") {
+    events.emit(progressEvent("restic", {
+      bytesDone: numberValue(message.bytes_done),
+      bytesTotal: numberValue(message.total_bytes),
+      filesDone: numberValue(message.files_done),
+      filesTotal: numberValue(message.total_files),
+      etaSeconds: nullableNumberValue(message.seconds_remaining),
+      errors: numberValue(message.error_count),
+    }));
+    return;
+  }
+  if (message.message_type === "summary") {
+    events.emit({ type: "summary", tool: "restic", data: message });
+    return;
+  }
+  if (message.message_type === "error") {
+    events.emit({ type: "log", tool: "restic", stream: "stdout", message: jsonErrorMessage(message) });
   }
 }
 
@@ -87,14 +112,20 @@ function parsePayload(value: unknown): ResticBackupPayload {
   const record = requireRecord(value, "restic backup payload");
   const sourceId = requireString(record.sourceId, "sourceId");
   const repositoryId = requireString(record.repositoryId, "repositoryId");
-  let tags: readonly string[] | undefined;
-  if (record.tags !== undefined) {
-    if (!Array.isArray(record.tags) || record.tags.some((tag) => typeof tag !== "string" || !tag.trim())) {
-      throw new Error("tags must be an array of non-empty strings");
-    }
-    tags = record.tags.map((tag) => tag.trim());
+  const tags = parseTags(record.tags);
+  return tags === undefined ? { sourceId, repositoryId } : { sourceId, repositoryId, tags };
+}
+
+export function parseResticTags(value: unknown): readonly string[] | undefined {
+  return parseTags(value);
+}
+
+function parseTags(value: unknown): readonly string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.some((tag) => typeof tag !== "string" || !tag.trim())) {
+    throw new Error("tags must be an array of non-empty strings");
   }
-  return tags ? { sourceId, repositoryId, tags } : { sourceId, repositoryId };
+  return value.map((tag) => tag.trim());
 }
 
 function parseJsonLine(line: string): Record<string, unknown> | null {

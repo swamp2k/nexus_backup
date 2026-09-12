@@ -3,6 +3,7 @@ import type { ExecutionEventSink } from "./execution-events.js";
 import { noopExecutionEventSink } from "./execution-events.js";
 import { NodeCommandRunner, type CommandRunner } from "./process-runner.js";
 import { RcloneTransferExecutor } from "./rclone-executor.js";
+import { RcloneMountedResticExecutor } from "./rclone-mounted-restic-executor.js";
 import { ResticBackupExecutor } from "./restic-executor.js";
 import type { AgentRuntimeConfig } from "./runtime-config.js";
 
@@ -14,5 +15,6 @@ export function createDefaultJobExecutor(
   return new CompositeJobExecutor({
     "restic-backup": new ResticBackupExecutor(config, runner, events),
     "rclone-transfer": new RcloneTransferExecutor(config, runner, events),
+    "rclone-restic-backup": new RcloneMountedResticExecutor(config, runner, events),
   });
 }
