@@ -38,10 +38,6 @@ export interface TransferDiscoveryEntryEvent {
   relPath: string;
   size: number;
   modTime: string;
-  groupKind?: "torrent";
-  groupKey?: string;
-  groupName?: string;
-  groupRoot?: string;
 }
 
 export interface TransferGroupEvent {
@@ -49,7 +45,7 @@ export interface TransferGroupEvent {
   key: string;
   name: string;
   root: string;
-  entries: readonly TransferDiscoveryEntryEvent[];
+  paths: readonly string[];
 }
 
 export type ExecutionEvent =
