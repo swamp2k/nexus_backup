@@ -17,6 +17,50 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run typecheck
+      - name: Validate Unraid templates
+        shell: bash
+        run: |
+          python - <<'PY'
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          control_path = Path("unraid/templates/nexus-backup-control.xml")
+          agent_path = Path("unraid/templates/nexus-backup-agent.xml")
+          control = ET.parse(control_path).getroot()
+          agent = ET.parse(agent_path).getroot()
+
+          assert control.tag == agent.tag == "Container"
+          assert control.attrib.get("version") == agent.attrib.get("version") == "2"
+          assert control.findtext("Repository") == "ghcr.io/swamp2k/nexus-backup-control:latest"
+          assert agent.findtext("Repository") == "ghcr.io/swamp2k/nexus-backup-agent:latest"
+          assert control.findtext("Network") == agent.findtext("Network") == "host"
+          assert control.findtext("Privileged") == agent.findtext("Privileged") == "false"
+          assert control.findtext("Beta") == agent.findtext("Beta") == "True"
+
+          def configs(root):
+              return {item.attrib["Target"]: item.attrib for item in root.findall("Config")}
+
+          cc = configs(control)
+          ac = configs(agent)
+          assert cc["/run/nexus-backup"]["Default"] == ac["/run/nexus-backup"]["Default"]
+          assert cc["/agent-config"]["Default"] == ac["/config"]["Default"]
+          assert cc["/agent-config"]["Mode"] == "ro"
+          assert ac["/config"]["Mode"] == "rw"
+          assert ac["/run/nexus-backup"]["Mode"] == "ro"
+          assert ac["/data"]["Mode"] == "ro"
+
+          control_extra = control.findtext("ExtraParams") or ""
+          agent_extra = agent.findtext("ExtraParams") or ""
+          assert "SYS_ADMIN" not in control_extra and "/dev/fuse" not in control_extra
+          assert "--cap-add=SYS_ADMIN" in agent_extra
+          assert "--device=/dev/fuse" in agent_extra
+
+          agent_vars = {item.attrib["Target"]: item.attrib for item in agent.findall("Config") if item.attrib.get("Type") == "Variable"}
+          assert agent_vars["NEXUS_BACKUP_URL"]["Default"] == "http://127.0.0.1:8787"
+          assert agent_vars["NEXUS_BACKUP_AGENT_TOKEN_FILE"]["Default"] == "/run/nexus-backup/agent-token"
+
+          print("Unraid templates are well-formed and shared-path/security contracts match")
+          PY
 
   images:
     runs-on: ubuntu-latest
