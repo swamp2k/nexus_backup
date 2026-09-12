@@ -37,6 +37,16 @@
         "dirCacheTime": "5m",
         "pollInterval": "1m"
       }
+    },
+    {
+      "id": "seedbox",
+      "fs": "seedbox:",
+      "allowMove": false
+    },
+    {
+      "id": "local-downloads",
+      "fs": "/downloads",
+      "allowMove": false
     }
   ],
   "tools": {
