@@ -4,7 +4,8 @@ import { randomBytes } from "node:crypto";
 import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createApi, D1AgentStore } from "../../control-plane/dist/index.js";
+import { createApi, D1AgentStore, D1JobRepository } from "../../control-plane/dist/index.js";
+import { listAgents, listJobs, loadSanitizedAgentConfig } from "../lib/dashboard-data.mjs";
 import { openSqliteD1 } from "../lib/sqlite-d1.mjs";
 
 const configDir = process.env.NEXUS_BACKUP_CONFIG_DIR?.trim() || "/config";
@@ -12,6 +13,9 @@ const runtimeDir = process.env.NEXUS_BACKUP_RUNTIME_DIR?.trim() || "/run/nexus-b
 const databasePath = process.env.NEXUS_BACKUP_DB?.trim() || join(configDir, "nexus-backup.sqlite");
 const migrationsDir = process.env.NEXUS_BACKUP_MIGRATIONS?.trim()
   || fileURLToPath(new URL("../../../migrations/", import.meta.url));
+const webDir = process.env.NEXUS_BACKUP_WEB_DIR?.trim()
+  || fileURLToPath(new URL("../web/", import.meta.url));
+const agentConfigPath = process.env.NEXUS_BACKUP_AGENT_CONFIG?.trim() || "/agent-config/agent.json";
 const host = process.env.NEXUS_BACKUP_HOST?.trim() || "0.0.0.0";
 const port = positiveInteger(process.env.NEXUS_BACKUP_PORT ?? "8787", "NEXUS_BACKUP_PORT");
 const agentId = process.env.NEXUS_BACKUP_AGENT_ID?.trim() || "local-agent";
@@ -41,16 +45,91 @@ const recoveryTimer = setInterval(() => {
 }, recoveryIntervalMs);
 recoveryTimer.unref();
 
+const STATIC_FILES = new Map([
+  ["/", ["index.html", "text/html; charset=utf-8"]],
+  ["/index.html", ["index.html", "text/html; charset=utf-8"]],
+  ["/app.js", ["app.js", "text/javascript; charset=utf-8"]],
+  ["/styles.css", ["styles.css", "text/css; charset=utf-8"]],
+  ["/favicon.svg", ["favicon.svg", "image/svg+xml"]],
+]);
+
 const server = createServer(async (request, response) => {
   try {
-    if (request.url === "/" || request.url === "/index.html") {
-      sendHtml(response, landingPage());
+    const requestUrl = new URL(request.url || "/", `http://${request.headers.host || `127.0.0.1:${port}`}`);
+    const path = requestUrl.pathname;
+
+    if (request.method === "GET" && STATIC_FILES.has(path)) {
+      await serveStatic(path, response);
       return;
     }
-    if (request.url === "/v1/local/info" && request.method === "GET") {
-      sendJson(response, 200, { mode: "local", selfContained: true, remoteControl: "optional" });
+
+    if (path === "/v1/local/info" && request.method === "GET") {
+      sendJson(response, 200, {
+        mode: "local",
+        selfContained: true,
+        remoteControl: "optional",
+        agentId,
+        pollIntervalMs: 5000,
+      });
       return;
     }
+
+    if (path === "/v1/local/config" && request.method === "GET") {
+      sendJson(response, 200, await loadSanitizedAgentConfig(agentConfigPath));
+      return;
+    }
+
+    if (path === "/v1/local/agents" && request.method === "GET") {
+      sendJson(response, 200, { agents: await listAgents(db) });
+      return;
+    }
+
+    if (path === "/v1/local/jobs" && request.method === "GET") {
+      sendJson(response, 200, {
+        jobs: await listJobs(db, {
+          limit: requestUrl.searchParams.get("limit") ?? 100,
+          state: requestUrl.searchParams.get("state") ?? undefined,
+        }),
+      });
+      return;
+    }
+
+    if (path === "/v1/local/jobs" && request.method === "POST") {
+      const webRequest = await toWebRequest(request, {
+        path: "/v1/jobs",
+        authorization: `Bearer ${controlToken}`,
+      });
+      const webResponse = await api.fetch(webRequest, env);
+      await fromWebResponse(webResponse, response);
+      return;
+    }
+
+    const eventsMatch = path.match(/^\/v1\/local\/jobs\/([^/]+)\/events$/);
+    if (request.method === "GET" && eventsMatch) {
+      const jobId = decodePathPart(eventsMatch[1]);
+      const repository = new D1JobRepository(db);
+      const job = await repository.get(jobId);
+      if (!job) {
+        sendJson(response, 404, { code: "job_not_found", message: `Job not found: ${jobId}` });
+        return;
+      }
+      sendJson(response, 200, { events: await repository.listEvents(jobId) });
+      return;
+    }
+
+    const jobMatch = path.match(/^\/v1\/local\/jobs\/([^/]+)$/);
+    if (request.method === "GET" && jobMatch) {
+      const jobId = decodePathPart(jobMatch[1]);
+      const job = await new D1JobRepository(db).get(jobId);
+      if (!job) {
+        sendJson(response, 404, { code: "job_not_found", message: `Job not found: ${jobId}` });
+        return;
+      }
+      const { token: _token, ...safeLease } = job.lease ?? {};
+      sendJson(response, 200, { job: { ...job, lease: job.lease ? safeLease : null } });
+      return;
+    }
+
     const webRequest = await toWebRequest(request);
     const webResponse = await api.fetch(webRequest, env);
     await fromWebResponse(webResponse, response);
@@ -82,16 +161,31 @@ async function shutdown(signal) {
 process.once("SIGTERM", () => void shutdown("SIGTERM"));
 process.once("SIGINT", () => void shutdown("SIGINT"));
 
-async function toWebRequest(request) {
+async function serveStatic(path, response) {
+  const [file, contentType] = STATIC_FILES.get(path);
+  const content = await readFile(join(webDir, file));
+  response.statusCode = 200;
+  response.setHeader("content-type", contentType);
+  response.setHeader("cache-control", path === "/" || path === "/index.html" ? "no-store" : "public, max-age=300");
+  response.setHeader("x-content-type-options", "nosniff");
+  response.end(content);
+}
+
+async function toWebRequest(request, { path, authorization } = {}) {
   const protocol = request.headers["x-forwarded-proto"] || "http";
   const hostHeader = request.headers.host || `127.0.0.1:${port}`;
-  const url = `${protocol}://${hostHeader}${request.url || "/"}`;
+  const url = new URL(`${protocol}://${hostHeader}${request.url || "/"}`);
+  if (path) {
+    url.pathname = path;
+    url.search = "";
+  }
   const headers = new Headers();
   for (const [name, value] of Object.entries(request.headers)) {
     if (value === undefined) continue;
     if (Array.isArray(value)) for (const item of value) headers.append(name, item);
     else headers.set(name, value);
   }
+  if (authorization) headers.set("authorization", authorization);
   const method = request.method || "GET";
   const body = method === "GET" || method === "HEAD" ? undefined : await readBody(request, 1_048_576);
   return new Request(url, { method, headers, ...(body === undefined ? {} : { body }) });
@@ -115,6 +209,7 @@ async function readBody(request, limit) {
 async function fromWebResponse(webResponse, response) {
   response.statusCode = webResponse.status;
   for (const [name, value] of webResponse.headers.entries()) response.setHeader(name, value);
+  response.setHeader("cache-control", "no-store");
   if (!webResponse.body) {
     response.end();
     return;
@@ -149,20 +244,17 @@ async function mirrorSecret(secret, path) {
 function sendJson(response, status, value) {
   response.statusCode = status;
   response.setHeader("content-type", "application/json; charset=utf-8");
+  response.setHeader("cache-control", "no-store");
+  response.setHeader("x-content-type-options", "nosniff");
   response.end(JSON.stringify(value));
 }
 
-function sendHtml(response, html) {
-  response.statusCode = 200;
-  response.setHeader("content-type", "text/html; charset=utf-8");
-  response.end(html);
-}
-
-function landingPage() {
-  return `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Nexus Backup</title><style>body{font-family:system-ui,sans-serif;background:#111827;color:#f9fafb;margin:0;display:grid;min-height:100vh;place-items:center}.card{max-width:680px;padding:32px;border:1px solid #374151;border-radius:18px;background:#1f2937}h1{margin:0 0 8px}p{color:#d1d5db;line-height:1.5}.ok{color:#86efac;font-weight:700}code{background:#111827;padding:2px 6px;border-radius:6px}</style></head>
-<body><main class="card"><h1>Nexus Backup</h1><p class="ok">Local-first control plane is online.</p><p>This container owns the local API and SQLite database. The backup agent runs beside it and moves data directly between your storage endpoints. Cloudflare is not required.</p><p>The full M4 dashboard will replace this shell at the same address. Health endpoint: <code>/healthz</code>.</p></main></body></html>`;
+function decodePathPart(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
 }
 
 function positiveInteger(value, name) {
