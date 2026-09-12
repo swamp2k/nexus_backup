@@ -20,7 +20,6 @@ const webDir = process.env.NEXUS_BACKUP_WEB_DIR?.trim() || fileURLToPath(new URL
 const agentConfigPath = process.env.NEXUS_BACKUP_AGENT_CONFIG?.trim() || "/agent-config/agent.json";
 const transferSchedulerIntervalMs = positiveInteger(process.env.NEXUS_BACKUP_TRANSFER_INTERVAL_MS ?? "15000", "NEXUS_BACKUP_TRANSFER_INTERVAL_MS");
 
-// The existing local server remains authoritative, but is reachable only over loopback.
 process.env.NEXUS_BACKUP_HOST = "127.0.0.1";
 process.env.NEXUS_BACKUP_PORT = String(internalPort);
 await import("./server.mjs");
@@ -39,9 +38,7 @@ async function runTransferScheduler() {
   transferSchedulerRunning = true;
   try {
     const result = await transferService.runDue();
-    if (result.scans > 0 || result.transfers > 0) {
-      log("info", "transfer scheduler queued work", { scans: result.scans, transfers: result.transfers });
-    }
+    if (result.scans > 0 || result.transfers > 0) log("info", "transfer scheduler queued work", { scans: result.scans, transfers: result.transfers });
     for (const failure of result.failures) log("error", "transfer scheduler action failed", failure);
   } catch (error) {
     log("error", "transfer scheduler failed", { error: serializeError(error) });
@@ -104,13 +101,7 @@ const gateway = createServer(async (request, response) => {
       const upstream = await fetch(`${internalBase}/v1/local/info`, { headers: { accept: "application/json" } });
       const data = await upstream.json().catch(() => ({}));
       if (!upstream.ok) throw statusError(upstream.status, data.message || `Local info failed with ${upstream.status}`);
-      sendJson(response, 200, {
-        ...data,
-        localAuth: true,
-        restoreExecution: true,
-        transferRules: true,
-        transferSchedulerIntervalMs,
-      });
+      sendJson(response, 200, { ...data, localAuth: true, restoreExecution: true, transferRules: true, transferSchedulerIntervalMs });
       return;
     }
 
@@ -126,6 +117,12 @@ const gateway = createServer(async (request, response) => {
     const transferScanMatch = path.match(/^\/v1\/local\/transfers\/([^/]+)\/scan$/);
     if (request.method === "POST" && transferScanMatch) {
       sendJson(response, 202, await transferService.scanNow(decodePathPart(transferScanMatch[1])));
+      return;
+    }
+    const transferObjectsMatch = path.match(/^\/v1\/local\/transfers\/([^/]+)\/objects$/);
+    if (request.method === "GET" && transferObjectsMatch) {
+      const ruleId = decodePathPart(transferObjectsMatch[1]);
+      sendJson(response, 200, { objects: await transferService.objects(ruleId, { limit: url.searchParams.get("limit") ?? 100 }) });
       return;
     }
     const transferMatch = path.match(/^\/v1\/local\/transfers\/([^/]+)$/);
