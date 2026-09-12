@@ -2,6 +2,7 @@
   "files": [],
   "references": [
     { "path": "./packages/core" },
-    { "path": "./apps/agent" }
+    { "path": "./apps/agent" },
+    { "path": "./apps/control-plane" }
   ]
 }

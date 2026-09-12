@@ -10,3 +10,4 @@ export class DuplicateOperationError extends NexusBackupError {}
 export class InvalidJobTransitionError extends NexusBackupError {}
 export class LeaseConflictError extends NexusBackupError {}
 export class LeaseExpiredError extends NexusBackupError {}
+export class ConcurrentMutationError extends NexusBackupError {}

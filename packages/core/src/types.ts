@@ -36,6 +36,7 @@ export interface BackupJob<TPayload = unknown> {
   type: string;
   state: JobState;
   attempt: number;
+  revision: number;
   payload: TPayload;
   lease: JobLease | null;
   createdAt: string;
@@ -53,12 +54,15 @@ export type JobEventType =
   | "job.recovered"
   | "job.note";
 
-export interface JobEvent<TData = unknown> {
+export interface JobEventDraft<TData = unknown> {
   id: string;
-  jobId: string;
   type: JobEventType;
   at: string;
   data: TData;
+}
+
+export interface JobEvent<TData = unknown> extends JobEventDraft<TData> {
+  jobId: string;
 }
 
 export interface AgentHeartbeat {
@@ -77,6 +81,13 @@ export interface CreateJobInput<TPayload = unknown> {
 
 export interface LeaseRequest {
   jobId: string;
+  agentId: string;
+  token: string;
+  now: Date;
+  ttlMs: number;
+}
+
+export interface ClaimRequest {
   agentId: string;
   token: string;
   now: Date;

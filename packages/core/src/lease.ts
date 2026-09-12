@@ -7,7 +7,6 @@ export function isLeaseExpired(lease: JobLease, now: Date): boolean {
 
 export function buildLease(request: Omit<LeaseRequest, "jobId">): JobLease {
   if (request.ttlMs <= 0) throw new RangeError("Lease ttlMs must be greater than zero");
-
   const acquiredAt = request.now.toISOString();
   return {
     agentId: request.agentId,
@@ -27,7 +26,6 @@ export function renewLease<TPayload>(job: BackupJob<TPayload>, request: LeaseRen
     throw new LeaseExpiredError(`Lease for job ${job.id} has expired`);
   }
   if (request.ttlMs <= 0) throw new RangeError("Lease ttlMs must be greater than zero");
-
   return {
     ...job,
     lease: {

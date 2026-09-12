@@ -1,12 +1,10 @@
 {
   "name": "@nexus-backup/agent",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "dependencies": {
     "@nexus-backup/core": "*"
   },
-  "scripts": {
-    "build": "tsc -p tsconfig.json"
-  }
+  "scripts": { "build": "tsc -p tsconfig.json" }
 }
