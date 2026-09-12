@@ -9,7 +9,7 @@ import { openSqliteD1 } from "../lib/sqlite-d1.mjs";
 const migrationsDir=new URL("../../../migrations/",import.meta.url).pathname;
 const config={available:true,endpoints:[{id:"seedbox",fs:"seedbox:",allowMove:true},{id:"downloads",fs:"/downloads",allowMove:false}]};
 
-async function fixture({initialBehavior="ignore_existing",stabilitySeconds=600,retryCount=3,retryWaitSeconds=300}={}){
+async function fixture({initialBehavior="ignore_existing",stabilitySeconds=600,scanIntervalSeconds=300,retryCount=3,retryWaitSeconds=300}={}){
   const dir=await mkdtemp(join(tmpdir(),"nexus-transfer-"));
   const db=await openSqliteD1({filename:join(dir,"backup.sqlite"),migrationsDir});
   let now=new Date("2026-09-12T10:00:00.000Z");let seq=0;const queued=[];
@@ -22,14 +22,14 @@ async function fixture({initialBehavior="ignore_existing",stabilitySeconds=600,r
     return{id,state:"queued"};
   }
   const service=createTransferRuleService({db,enqueueJob,loadAgentConfig:async()=>config,now:()=>new Date(now),id:()=>"rule-1"});
-  await service.create({name:"Seedbox → downloads",sourceEndpointId:"seedbox",sourcePath:"complete",destinationEndpointId:"downloads",destinationPath:"incoming",mode:"copy",initialBehavior,stabilitySeconds,scanIntervalSeconds:300,cleanupDays:14,verification:"size",retryCount,retryWaitSeconds,includes:[],excludes:[]});
-  return{dir,db,service,queued,get now(){return now},setNow(value){now=new Date(value)},async close(){db.close();await rm(dir,{recursive:true,force:true});}};
+  await service.create({name:"Seedbox → downloads",sourceEndpointId:"seedbox",sourcePath:"complete",destinationEndpointId:"downloads",destinationPath:"incoming",mode:"copy",initialBehavior,stabilitySeconds,scanIntervalSeconds,cleanupDays:14,verification:"size",retryCount,retryWaitSeconds,includes:[],excludes:[]});
+  return{dir,db,service,queued,setNow(value){now=new Date(value)},async close(){db.close();await rm(dir,{recursive:true,force:true});}};
 }
 function discovery(ruleId,entries,at){return{type:"transfer-discovery",tool:"rclone",ruleId,at,entries};}
 async function finish(db,id,state,at,error=null){await db.prepare("UPDATE backup_jobs SET state=?,updated_at=?,finished_at=?,last_error=? WHERE id=?").bind(state,at,at,error,id).run();}
 
 test("ignore-existing bootstrap tracks generations and queues only stable new objects",async()=>{
-  const f=await fixture();
+  const f=await fixture({scanIntervalSeconds:3600});
   try{
     const first=await f.service.scanNow("rule-1");
     await persistTransferDiscovery(f.db,{jobId:first.job.id,expectedRuleId:"rule-1",event:discovery("rule-1",[{relPath:"old.mkv",size:100,modTime:"2026-09-12T09:00:00Z"}],"2026-09-12T10:00:01Z")});
