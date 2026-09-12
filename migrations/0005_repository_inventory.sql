@@ -1,6 +1,6 @@
 CREATE TABLE IF NOT EXISTS repository_inventory (
   repository_id TEXT PRIMARY KEY,
-  job_id TEXT NOT NULL REFERENCES backup_jobs(id) ON DELETE CASCADE,
+  job_id TEXT REFERENCES backup_jobs(id) ON DELETE SET NULL,
   attempt INTEGER NOT NULL,
   agent_id TEXT NOT NULL,
   scanned_at TEXT NOT NULL,
