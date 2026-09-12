@@ -151,7 +151,7 @@ export function createBufferedTelemetrySink(
     },
 
     emit(event) {
-      log("info", "execution event", { event });
+      log("info", "execution event", { event: compactEventForLog(event) });
       if (!context) return;
       const item = { ...event, at: now().toISOString() };
       if (event.type === "progress") {
@@ -247,6 +247,18 @@ export function abortableSleep(ms, signal) {
   });
 }
 
+function compactEventForLog(event) {
+  if (event?.type !== "inventory") return event;
+  return {
+    type: "inventory",
+    tool: event.tool,
+    repositoryId: event.repositoryId,
+    snapshots: Array.isArray(event.snapshots) ? event.snapshots.length : 0,
+    snapshotLimit: event.snapshotLimit,
+    truncated: event.truncated,
+  };
+}
+
 function serializeError(error) {
   if (error instanceof AggregateError) {
     return {
@@ -259,19 +271,20 @@ function serializeError(error) {
   return { name: "Error", message: String(error) };
 }
 
-function requireString(value, name) {
-  if (typeof value !== "string" || !value.trim()) throw new Error(`${name} must be set to a non-empty value`);
-  return value.trim();
+function positiveInteger(value, name) {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) throw new Error(`${name} must be a positive integer`);
+  return parsed;
 }
 
 function optionalString(value) {
-  if (value === undefined || value === null || value === "") return undefined;
-  if (typeof value !== "string" || !value.trim()) return undefined;
-  return value.trim();
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim();
+  return normalized || undefined;
 }
 
-function positiveInteger(value, name) {
-  const number = Number(value);
-  if (!Number.isInteger(number) || number <= 0) throw new Error(`${name} must be a positive integer`);
-  return number;
+function requireString(value, name) {
+  const normalized = optionalString(value);
+  if (!normalized) throw new Error(`${name} must be set`);
+  return normalized;
 }
