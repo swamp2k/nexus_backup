@@ -128,9 +128,9 @@ function parsePayload(value: unknown): ResticRestorePreviewPayload {
 }
 
 function restoreAction(line: string): "restored" | "updated" | "unchanged" | null {
-  const match = line.trimStart().match(/^(restored|updated|unchanged)\s+/i);
-  if (!match) return null;
-  const action = match[1].toLowerCase();
+  const raw = line.trimStart().match(/^(restored|updated|unchanged)\s+/i)?.[1];
+  if (!raw) return null;
+  const action = raw.toLowerCase();
   return action === "restored" || action === "updated" || action === "unchanged" ? action : null;
 }
 
