@@ -28,9 +28,15 @@ export async function loadRuntimeConfig(configPath) {
 
 export function runtimeOptionsFromEnv(env = process.env) {
   const leaseTtlRaw = optionalString(env.NEXUS_BACKUP_LEASE_TTL_MS);
+  const agentToken = optionalString(env.NEXUS_BACKUP_AGENT_TOKEN);
+  const agentTokenFile = optionalString(env.NEXUS_BACKUP_AGENT_TOKEN_FILE);
+  if (agentToken === undefined && agentTokenFile === undefined) {
+    throw new Error("NEXUS_BACKUP_AGENT_TOKEN or NEXUS_BACKUP_AGENT_TOKEN_FILE must be set");
+  }
   return {
     baseUrl: requireString(env.NEXUS_BACKUP_URL, "NEXUS_BACKUP_URL"),
-    agentToken: requireString(env.NEXUS_BACKUP_AGENT_TOKEN, "NEXUS_BACKUP_AGENT_TOKEN"),
+    ...(agentToken === undefined ? {} : { agentToken }),
+    ...(agentTokenFile === undefined ? {} : { agentTokenFile }),
     agentId: requireString(env.NEXUS_BACKUP_AGENT_ID, "NEXUS_BACKUP_AGENT_ID"),
     configPath: optionalString(env.NEXUS_BACKUP_CONFIG) ?? "/config/agent.json",
     pollIntervalMs: positiveInteger(env.NEXUS_BACKUP_POLL_INTERVAL_MS ?? "5000", "NEXUS_BACKUP_POLL_INTERVAL_MS"),
@@ -43,6 +49,7 @@ export function runtimeOptionsFromEnv(env = process.env) {
 
 export async function createAgentRuntime(options, { log = defaultLog } = {}) {
   const config = await loadRuntimeConfig(options.configPath);
+  const agentToken = options.agentToken ?? await loadSecret(options.agentTokenFile);
   const events = {
     emit(event) {
       log("info", "execution event", { event });
@@ -51,7 +58,7 @@ export async function createAgentRuntime(options, { log = defaultLog } = {}) {
   const executor = createDefaultJobExecutor(config, events);
   const controlPlane = new HttpControlPlaneClient({
     baseUrl: options.baseUrl,
-    agentToken: options.agentToken,
+    agentToken,
     version: options.version,
     ...(options.leaseTtlMs === undefined ? {} : { leaseTtlMs: options.leaseTtlMs }),
   });
@@ -61,6 +68,19 @@ export async function createAgentRuntime(options, { log = defaultLog } = {}) {
     executor,
   });
   return { config, controlPlane, executor, runner };
+}
+
+export async function loadSecret(path) {
+  if (typeof path !== "string" || !path.trim()) throw new Error("Secret file path must be a non-empty string");
+  let raw;
+  try {
+    raw = await readFile(path, "utf8");
+  } catch (error) {
+    throw new Error(`Unable to read agent token file: ${path}`, { cause: error });
+  }
+  const token = raw.trim();
+  if (!token) throw new Error(`Agent token file is empty: ${path}`);
+  return token;
 }
 
 export async function runAgentLoop(

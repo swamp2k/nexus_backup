@@ -1,0 +1,49 @@
+name: nexus-backup
+
+services:
+  control:
+    build:
+      context: .
+      dockerfile: Dockerfile.local
+    restart: unless-stopped
+    ports:
+      - "${NEXUS_BACKUP_PORT:-8787}:8787"
+    environment:
+      NEXUS_BACKUP_AGENT_ID: local-agent
+    volumes:
+      - control-config:/config
+      - runtime:/run/nexus-backup
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
+    restart: unless-stopped
+    depends_on:
+      control:
+        condition: service_healthy
+    cap_add:
+      - SYS_ADMIN
+    devices:
+      - /dev/fuse:/dev/fuse
+    environment:
+      NEXUS_BACKUP_URL: http://control:8787
+      NEXUS_BACKUP_AGENT_ID: local-agent
+      NEXUS_BACKUP_AGENT_TOKEN_FILE: /run/nexus-backup/agent-token
+    volumes:
+      - runtime:/run/nexus-backup:ro
+      - agent-config:/config
+      - agent-state:/state
+      - ${NEXUS_BACKUP_DATA_PATH:-./.local/data}:/data:ro
+      - ${NEXUS_BACKUP_BACKUP_PATH:-./.local/backup}:/backup
+
+volumes:
+  control-config:
+  runtime:
+  agent-config:
+  agent-state:

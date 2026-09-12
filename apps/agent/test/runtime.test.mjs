@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   loadRuntimeConfig,
+  loadSecret,
   runAgentLoop,
   runtimeOptionsFromEnv,
 } from "../bin/runtime.mjs";
@@ -31,21 +32,35 @@ test("runtime config loader constructs the local-only registry from JSON", async
   }
 });
 
-test("runtime options require identity and secrets but keep sane container defaults", () => {
-  const options = runtimeOptionsFromEnv({
+test("runtime options accept either a direct token or shared token file", async () => {
+  const direct = runtimeOptionsFromEnv({
     NEXUS_BACKUP_URL: "https://backup.example",
     NEXUS_BACKUP_AGENT_TOKEN: "secret-token",
     NEXUS_BACKUP_AGENT_ID: "unraid-main",
   });
-  assert.equal(options.baseUrl, "https://backup.example");
-  assert.equal(options.agentId, "unraid-main");
-  assert.equal(options.configPath, "/config/agent.json");
-  assert.equal(options.pollIntervalMs, 5000);
-  assert.equal(options.version, "0.5.0");
+  assert.equal(direct.agentToken, "secret-token");
+  assert.equal(direct.configPath, "/config/agent.json");
+  assert.equal(direct.pollIntervalMs, 5000);
+
+  const file = runtimeOptionsFromEnv({
+    NEXUS_BACKUP_URL: "http://control:8787",
+    NEXUS_BACKUP_AGENT_TOKEN_FILE: "/run/nexus-backup/agent-token",
+    NEXUS_BACKUP_AGENT_ID: "local-agent",
+  });
+  assert.equal(file.agentTokenFile, "/run/nexus-backup/agent-token");
   assert.throws(
-    () => runtimeOptionsFromEnv({ NEXUS_BACKUP_URL: "https://backup.example" }),
-    /NEXUS_BACKUP_AGENT_TOKEN/,
+    () => runtimeOptionsFromEnv({ NEXUS_BACKUP_URL: "https://backup.example", NEXUS_BACKUP_AGENT_ID: "agent" }),
+    /NEXUS_BACKUP_AGENT_TOKEN.*NEXUS_BACKUP_AGENT_TOKEN_FILE/,
   );
+
+  const dir = await mkdtemp(join(tmpdir(), "nexus-backup-secret-"));
+  try {
+    const path = join(dir, "token");
+    await writeFile(path, "from-file\n");
+    assert.equal(await loadSecret(path), "from-file");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("agent loop idles, reports failures, and stops cleanly on abort", async () => {
