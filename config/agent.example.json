@@ -15,6 +15,14 @@
       }
     }
   ],
+  "restoreTargets": [
+    {
+      "id": "restore-staging",
+      "label": "Restore staging",
+      "path": "/restore",
+      "overwrite": "never"
+    }
+  ],
   "rcloneEndpoints": [
     {
       "id": "cloud-source",
