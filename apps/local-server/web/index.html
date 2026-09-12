@@ -25,6 +25,7 @@
         <button class="nav-item" data-view="jobs"><span class="nav-icon">↻</span><span>Jobs</span></button>
         <button class="nav-item" id="plans-nav"><span class="nav-icon">◷</span><span>Plans</span></button>
         <button class="nav-item" id="transfers-nav"><span class="nav-icon">⇄</span><span>Transfers</span></button>
+        <button class="nav-item" id="devices-nav"><span class="nav-icon">▰</span><span>Devices</span></button>
         <button class="nav-item" data-view="sources"><span class="nav-icon">⇤</span><span>Sources</span></button>
         <button class="nav-item" data-view="destinations"><span class="nav-icon">⇥</span><span>Destinations</span></button>
         <button class="nav-item" data-view="repositories"><span class="nav-icon">▣</span><span>Repositories</span></button>
@@ -49,6 +50,140 @@
   <script type="module" src="/maintenance.js"></script>
   <script type="module" src="/repository-inventory.js"></script>
   <script type="module" src="/transfers.js"></script>
+  <script type="module">
+    const deviceNav=document.querySelector("#devices-nav");
+    const deviceContent=document.querySelector("#content");
+    const deviceTitle=document.querySelector("#page-title");
+    const deviceEyebrow=document.querySelector("#page-eyebrow");
+    const deviceNewButton=document.querySelector("#new-job-button");
+    const deviceRefreshButton=document.querySelector("#refresh-button");
+    let devices=[];
+    let devicesLoading=false;
+    let deviceModal=null;
+
+    deviceNav?.addEventListener("click",()=>{location.hash="devices";activateDevices()});
+    window.addEventListener("hashchange",activateDevices);
+    document.addEventListener("click",event=>{
+      if(!devicesActive())return;
+      if(event.target.closest?.("#new-job-button")){event.preventDefault();event.stopImmediatePropagation();openDeviceModal();}
+      if(event.target.closest?.("#refresh-button")){event.preventDefault();event.stopImmediatePropagation();void refreshDevices();}
+    },true);
+    new MutationObserver(()=>{if(devicesActive()&&!deviceContent.querySelector("#devices-view"))queueMicrotask(renderDevices)}).observe(deviceContent,{childList:true});
+    setInterval(()=>{if(devicesActive())void refreshDevices(true)},5000);
+    activateDevices();
+
+    function devicesActive(){return(location.hash.replace(/^#/,"")||"overview")==="devices"}
+    function activateDevices(){
+      if(!devicesActive()){
+        deviceNav?.classList.remove("active");
+        closeDeviceModal();
+        return;
+      }
+      document.querySelectorAll("[data-view]").forEach(item=>item.classList.remove("active"));
+      document.querySelector("#plans-nav")?.classList.remove("active");
+      document.querySelector("#transfers-nav")?.classList.remove("active");
+      deviceNav?.classList.add("active");
+      if(deviceTitle)deviceTitle.textContent="Devices";
+      if(deviceEyebrow)deviceEyebrow.textContent="PCWatch integration";
+      if(deviceNewButton){deviceNewButton.hidden=false;deviceNewButton.textContent="Add device";}
+      renderDevices();void refreshDevices(devices.length>0);
+    }
+
+    async function refreshDevices(quiet=false){
+      if(devicesLoading)return;devicesLoading=true;
+      if(!quiet&&devicesActive())deviceRefreshButton.textContent="Refreshing…";
+      try{
+        const response=await fetch("/v1/local/devices",{headers:{accept:"application/json"}});
+        const data=await response.json().catch(()=>({}));
+        if(!response.ok)throw new Error(data.message||`Devices request failed (${response.status})`);
+        devices=data.devices??[];renderDevices();
+      }catch(error){if(!quiet)deviceToast("Devices refresh failed",error.message,true)}
+      finally{devicesLoading=false;if(!quiet&&devicesActive())deviceRefreshButton.textContent="Refresh";}
+    }
+
+    function renderDevices(){
+      if(!devicesActive())return;
+      document.querySelectorAll("[data-view]").forEach(item=>item.classList.remove("active"));
+      document.querySelector("#plans-nav")?.classList.remove("active");
+      document.querySelector("#transfers-nav")?.classList.remove("active");
+      deviceNav?.classList.add("active");
+      if(deviceTitle)deviceTitle.textContent="Devices";
+      if(deviceEyebrow)deviceEyebrow.textContent="PCWatch integration";
+      if(deviceNewButton){deviceNewButton.hidden=false;deviceNewButton.textContent="Add device";}
+      const enabled=devices.filter(item=>item.enabled).length;
+      const online=devices.filter(item=>item.online).length;
+      const pcwatch=devices.filter(item=>item.kind==="pcwatch").length;
+      const reporting=devices.filter(item=>item.lastSeenAt).length;
+      deviceContent.innerHTML=`<div id="devices-view">
+        <div class="transfer-hero"><div><p class="eyebrow">Managed device trust</p><h2>Devices</h2><p>Enroll PCWatch or other clients with a local bearer token. Devices report identity and capabilities; backup payloads and storage credentials stay outside this API.</p></div><span class="badge success">M6 foundation</span></div>
+        <div class="grid metrics">${deviceMetric("Enabled",enabled,`${devices.length} enrolled`)}${deviceMetric("Online",online,"Seen within 3 minutes",online?"blue":"")}${deviceMetric("PCWatch",pcwatch,"Device integrations")}${deviceMetric("Reporting",reporting,"Has checked in")}</div>
+        <div class="transfer-stack section-gap">${devices.map(deviceCard).join("")||'<div class="empty"><strong>No managed devices yet</strong><span>Add a PCWatch device to create a bearer token. The token is shown once and only its SHA-256 hash is stored.</span></div>'}</div>
+        <div class="transfer-note"><strong>Current M6 boundary:</strong> devices may report bounded metadata only. No arbitrary shell commands, raw filesystem paths, backup payloads or credentials are accepted here. Job delegation comes later as an explicit capability.</div>
+      </div>`;
+      bindDeviceActions();
+    }
+
+    function deviceMetric(label,value,sub,tone=""){return`<article class="metric ${tone}"><span>${deviceEsc(label)}</span><strong>${deviceEsc(value)}</strong><small>${deviceEsc(sub)}</small></article>`}
+    function deviceCard(device){
+      const status=!device.enabled?"Disabled":device.online?"Online":device.lastSeenAt?"Offline":"Never seen";
+      const tone=!device.enabled?"warn":device.online?"success":device.lastSeenAt?"danger":"warn";
+      return`<section class="card transfer-card" data-device="${deviceAttr(device.id)}">
+        <div class="transfer-head"><div class="transfer-title"><span class="transfer-state${device.online?"":" paused"}"></span><div><h2>${deviceEsc(device.name)}</h2><span>${deviceEsc(device.kind)} · ${deviceEsc(device.id)}</span></div></div><div class="transfer-actions"><span class="badge ${tone}">${status}</span><button class="button ghost compact" data-device-action="rotate" data-id="${deviceAttr(device.id)}">Rotate token</button><button class="button ghost compact" data-device-action="toggle" data-id="${deviceAttr(device.id)}">${device.enabled?"Disable":"Enable"}</button></div></div>
+        <div class="transfer-facts">${deviceFact("Version",device.version||"—",device.platform||"not reported")}${deviceFact("Host",device.hostname||"—",device.lastSeenAt?`Seen ${deviceRelative(device.lastSeenAt)}`:"never reported")}${deviceFact("Capabilities",device.capabilities?.length||0,"reported")}${deviceFact("Remotes",device.remotes?.length||0,"names only")}</div>
+        <div class="transfer-meta filters"><span>Capabilities: ${device.capabilities?.length?deviceEsc(device.capabilities.join(", ")):"none reported"}</span><span>Remotes: ${device.remotes?.length?deviceEsc(device.remotes.join(", ")):"none reported"}</span><span>First seen: ${device.firstSeenAt?deviceEsc(new Date(device.firstSeenAt).toLocaleString()):"—"}</span></div>
+      </section>`;
+    }
+    function deviceFact(label,value,sub){return`<div class="transfer-fact"><span>${deviceEsc(label)}</span><strong>${deviceEsc(value)}</strong><small>${deviceEsc(sub)}</small></div>`}
+
+    function bindDeviceActions(){
+      deviceContent.querySelectorAll("[data-device-action]").forEach(button=>button.addEventListener("click",async()=>{
+        const device=devices.find(item=>item.id===button.dataset.id);if(!device)return;
+        button.disabled=true;
+        try{
+          if(button.dataset.deviceAction==="toggle"){
+            await deviceApi(`/v1/local/devices/${encodeURIComponent(device.id)}`,{method:"PATCH",body:{enabled:!device.enabled}});
+            deviceToast(device.enabled?"Device disabled":"Device enabled",device.name);
+          }else if(button.dataset.deviceAction==="rotate"){
+            const result=await deviceApi(`/v1/local/devices/${encodeURIComponent(device.id)}/rotate-token`,{method:"POST",body:{}});
+            showDeviceToken(result.device,result.token,true);
+          }
+          await refreshDevices(true);
+        }catch(error){deviceToast("Device action failed",error.message,true)}finally{button.disabled=false;}
+      }));
+    }
+
+    function openDeviceModal(){
+      closeDeviceModal();
+      deviceModal=document.createElement("div");deviceModal.className="modal-backdrop";
+      deviceModal.innerHTML=`<section class="modal" role="dialog" aria-modal="true"><div class="modal-header"><div><p class="eyebrow">Managed device</p><h2>Add device</h2></div><button class="icon-button" data-device-close aria-label="Close">×</button></div><form id="device-form"><label><span>Name</span><input name="name" required maxlength="100" autocomplete="off" placeholder="Balder PC"></label><label><span>Integration</span><select name="kind"><option value="pcwatch">PCWatch</option><option value="generic">Generic client</option></select></label><div class="modal-actions"><button type="button" class="button ghost" data-device-close>Cancel</button><button type="submit" class="button primary">Create device</button></div></form></section>`;
+      document.body.append(deviceModal);
+      deviceModal.querySelectorAll("[data-device-close]").forEach(button=>button.addEventListener("click",closeDeviceModal));
+      deviceModal.querySelector("#device-form").addEventListener("submit",async event=>{
+        event.preventDefault();const submit=event.submitter;submit.disabled=true;
+        try{
+          const form=new FormData(event.currentTarget);
+          const result=await deviceApi("/v1/local/devices",{method:"POST",body:{name:String(form.get("name")||""),kind:String(form.get("kind")||"pcwatch")}});
+          showDeviceToken(result.device,result.token,false);await refreshDevices(true);
+        }catch(error){deviceToast("Could not create device",error.message,true);submit.disabled=false;}
+      });
+      deviceModal.querySelector('input[name="name"]')?.focus();
+    }
+
+    function showDeviceToken(device,token,rotated){
+      closeDeviceModal();
+      deviceModal=document.createElement("div");deviceModal.className="modal-backdrop";
+      deviceModal.innerHTML=`<section class="modal" role="dialog" aria-modal="true"><div class="modal-header"><div><p class="eyebrow">${rotated?"Token rotated":"Device created"}</p><h2>${deviceEsc(device.name)}</h2></div><button class="icon-button" data-device-close aria-label="Close">×</button></div><div class="repo-error"><strong>Copy this token now</strong><span>It is shown once. Nexus stores only its SHA-256 hash.</span></div><label><span>Bearer token</span><input id="device-token-once" readonly value="${deviceAttr(token)}"></label><div class="transfer-meta"><span>Report endpoint: <code>/v1/device/report</code></span><span>Suggested cadence: 60s</span></div><div class="modal-actions"><button type="button" class="button ghost" id="copy-device-token">Copy token</button><button type="button" class="button primary" data-device-close>Done</button></div></section>`;
+      document.body.append(deviceModal);
+      deviceModal.querySelectorAll("[data-device-close]").forEach(button=>button.addEventListener("click",closeDeviceModal));
+      deviceModal.querySelector("#copy-device-token")?.addEventListener("click",async()=>{try{await navigator.clipboard.writeText(token);deviceToast("Token copied",device.name)}catch{deviceModal.querySelector("#device-token-once")?.select()}});
+    }
+    function closeDeviceModal(){deviceModal?.remove();deviceModal=null;}
+    async function deviceApi(url,{method="GET",body}={}){const response=await fetch(url,{method,headers:{accept:"application/json",...(body===undefined?{}:{"content-type":"application/json"})},...(body===undefined?{}:{body:JSON.stringify(body)})});const data=await response.json().catch(()=>({}));if(!response.ok)throw new Error(data.message||`${method} ${url} failed (${response.status})`);return data}
+    function deviceToast(title,message,error=false){const stack=document.querySelector("#toast-stack");if(!stack)return;const item=document.createElement("div");item.className=`toast${error?" error":""}`;item.innerHTML=`<strong>${deviceEsc(title)}</strong><span>${deviceEsc(message||"")}</span>`;stack.append(item);setTimeout(()=>item.remove(),5000)}
+    function deviceRelative(value){const ms=Date.now()-Date.parse(value);if(!Number.isFinite(ms))return"—";const sec=Math.max(0,Math.floor(ms/1000));if(sec<60)return`${sec}s ago`;const min=Math.floor(sec/60);if(min<60)return`${min}m ago`;const h=Math.floor(min/60);if(h<48)return`${h}h ago`;return`${Math.floor(h/24)}d ago`}
+    function deviceEsc(value){return String(value??"").replace(/[&<>"']/g,char=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[char]))}
+    function deviceAttr(value){return deviceEsc(value).replace(/`/g,"&#096;")}
+  </script>
   <script type="module">
     let gates=[];
     let rules=[];
@@ -99,7 +234,7 @@
         }
       });
       const note=document.querySelector("#transfers-view .transfer-note");
-      if(note)note.innerHTML="<strong>Copyarr safety:</strong> staged transfer + exact-size verification are active. Move deletes source only after final verification. Cleanup re-checks destination provenance before delete. Optional rTorrent readiness gates hold back known incomplete torrents; credentials never leave local agent config.";
+      if(note)note.innerHTML="<strong>Copyarr safety:</strong> staged transfer + exact-size verification are active. Move deletes source only after final verification. Cleanup re-checks destination provenance before delete. Optional rTorrent readiness gates hold back known incomplete torrents; completed copy torrents are grouped as one manifest; credentials never leave local agent config.";
     }
 
     document.addEventListener("click",event=>{

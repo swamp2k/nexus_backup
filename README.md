@@ -38,11 +38,26 @@ M5 brings the proven Copyarr model into the Nexus job engine rather than running
 - verified move only after local `allowMove: true` opt-in
 - Copyarr defaults for multi-thread transfer tuning with single-thread fallback
 - per-rule rclone tuning with safety-critical flags reserved by Nexus
+- provenance-safe destination cleanup with exact committed-size verification
+- optional rTorrent readiness gates with required/fallback modes
+- completed rTorrent copy torrents grouped into one multi-file manifest job
+- grouped failures retry as one group; verified move remains per-file for source-delete safety
 - live object state and transfer progress in the Transfers dashboard
 
-Destination cleanup policy is stored but is not executed yet. rTorrent completion gating is the next transfer slice.
-
 See `docs/transfers.md` for transfer invariants and safety boundaries.
+
+### Managed devices
+
+M6 begins with a durable device trust layer for PCWatch and future clients:
+
+- authenticated local admins can enroll, disable and rotate device credentials
+- device bearer secrets are shown once; only SHA-256 hashes are stored
+- devices report bounded version, hostname, platform, capability and remote-name metadata
+- the initial report shape intentionally matches the useful metadata already emitted by the PCWatch backup agent
+- online/offline state and capabilities are visible in the Devices dashboard
+- device reports do not accept backup payloads, storage credentials, arbitrary filesystem paths or shell commands
+
+See `docs/devices.md` for the current M6 boundary and PCWatch migration path.
 
 ### Self-contained Docker runtime
 
@@ -52,9 +67,11 @@ See `docs/transfers.md` for transfer invariants and safety boundaries.
 - control and agent tokens are generated automatically and persisted locally
 - the agent token is shared through a private runtime volume
 - migrations are applied automatically at startup
-- storage paths remain parameterized; real Unraid paths are not hardcoded in the repository
+- coordinated control/agent release images use immutable SemVer tags plus a stable `latest` update channel
+- beta Unraid templates preserve the control/agent security boundary and track the coordinated `latest` images
+- storage paths remain parameterized; real deployment paths remain editable
 
-Backup payloads must never pass through the control plane, Cloudflare, or a remote relay.
+Backup payloads must never pass through the control plane, Cloudflare, PCWatch, or a remote relay.
 
 ## Run locally
 
@@ -64,7 +81,7 @@ docker compose up --build
 
 Then open `http://localhost:8787` and complete the local first-run authentication setup.
 
-For real storage, set the path variables used by `compose.yaml` or map the equivalent paths in the eventual Unraid template. The bundled defaults are intended only for safe local/dev use.
+For real storage, set the path variables used by `compose.yaml` or map the equivalent paths in the beta Unraid templates. The bundled defaults are intended only for safe local/dev use.
 
 ## Repository layout
 
@@ -76,6 +93,7 @@ apps/agent             Agent runtime and execution adapters
 config                 Local agent configuration example
 migrations             Shared SQLite/D1 schema migrations
 docs                   Architecture and runtime notes
+unraid                  Beta Unraid templates and install notes
 ```
 
 ## Development
@@ -88,7 +106,7 @@ npm test
 npm run typecheck
 ```
 
-CI builds and validates both Docker images after the test gate.
+CI builds and validates both Docker images after the test gate. It also checks release metadata and the beta Unraid template contracts.
 
 ## Remote control
 
@@ -101,10 +119,10 @@ Remote control is an optional capability layered on top of the local installatio
 3. M3 - rclone + Restic execution pipeline ✅
 4. Local-first Docker runtime ✅
 5. M4 - dashboard, plans, telemetry, repository browsing and guarded restore ✅
-6. M5 - persistent Transfer/Copyarr engine 🚧
-7. M6 - device / PCWatch integration
+6. M5 - persistent Transfer/Copyarr engine ✅
+7. M6 - device / PCWatch integration 🚧
 8. M7 - richer restore workflows
 9. M8 - recovery torture testing
 10. M9 - architecture/security review
 
-See `docs/local-first.md`, `docs/architecture.md`, `docs/control-plane.md`, `docs/dashboard.md`, `docs/transfers.md` and `docs/unraid-agent.md` for the invariants later milestones must preserve.
+See `docs/local-first.md`, `docs/architecture.md`, `docs/control-plane.md`, `docs/dashboard.md`, `docs/transfers.md`, `docs/devices.md`, `docs/releases.md`, `unraid/README.md` and `docs/unraid-agent.md` for the invariants later milestones must preserve.

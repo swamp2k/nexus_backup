@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadSanitizedAgentConfig } from "../lib/dashboard-data.mjs";
 import { confirmationPhrase, createLocalAuth } from "../lib/local-auth.mjs";
+import { createManagedDeviceService } from "../lib/managed-devices.mjs";
 import { assertRecentRestorePreview, normalizeRestoreScope, queueRestoreExecution } from "../lib/restore-execution.mjs";
 import { openSqliteD1 } from "../lib/sqlite-d1.mjs";
 import { createTransferCleanupService } from "../lib/transfer-cleanup.mjs";
@@ -28,6 +29,7 @@ await import("./server.mjs");
 
 const db = await openSqliteD1({ filename: databasePath, migrationsDir });
 const auth = await createLocalAuth({ configDir, log });
+const deviceService = createManagedDeviceService({ db });
 const transferService = createTransferRuleService({
   db,
   enqueueJob,
@@ -101,6 +103,12 @@ const gateway = createServer(async (request, response) => {
       return;
     }
 
+    if (path === "/v1/device/report" && request.method === "POST") {
+      const body = await readJsonBody(request);
+      sendJson(response, 200, await deviceService.report(requireBearerToken(request), body));
+      return;
+    }
+
     if (path === "/healthz" || path.startsWith("/v1/agent/")) {
       await proxy(request, response, url);
       return;
@@ -113,7 +121,26 @@ const gateway = createServer(async (request, response) => {
       const upstream = await fetch(`${internalBase}/v1/local/info`, { headers: { accept: "application/json" } });
       const data = await upstream.json().catch(() => ({}));
       if (!upstream.ok) throw statusError(upstream.status, data.message || `Local info failed with ${upstream.status}`);
-      sendJson(response, 200, { ...data, localAuth: true, restoreExecution: true, transferRules: true, transferCleanup: true, transferTorrentGroups: true, transferSchedulerIntervalMs });
+      sendJson(response, 200, { ...data, localAuth: true, restoreExecution: true, transferRules: true, transferCleanup: true, transferTorrentGroups: true, deviceIntegration: true, transferSchedulerIntervalMs });
+      return;
+    }
+
+    if (path === "/v1/local/devices" && request.method === "GET") {
+      sendJson(response, 200, { devices: await deviceService.list() });
+      return;
+    }
+    if (path === "/v1/local/devices" && request.method === "POST") {
+      sendJson(response, 201, await deviceService.create(await readJsonBody(request)));
+      return;
+    }
+    const deviceRotateMatch = path.match(/^\/v1\/local\/devices\/([^/]+)\/rotate-token$/);
+    if (request.method === "POST" && deviceRotateMatch) {
+      sendJson(response, 200, await deviceService.rotateToken(decodePathPart(deviceRotateMatch[1])));
+      return;
+    }
+    const deviceMatch = path.match(/^\/v1\/local\/devices\/([^/]+)$/);
+    if (deviceMatch && request.method === "PATCH") {
+      sendJson(response, 200, { device: await deviceService.update(decodePathPart(deviceMatch[1]), await readJsonBody(request)) });
       return;
     }
 
@@ -309,6 +336,7 @@ function sendJson(response, status, value) { response.statusCode = status; respo
 function acceptsHtml(request) { const accept = singleHeader(request.headers.accept) || ""; return accept.includes("text/html") && (request.method === "GET" || request.method === "HEAD"); }
 function isMutation(method) { return !["GET", "HEAD", "OPTIONS"].includes(method || "GET"); }
 function singleHeader(value) { return Array.isArray(value) ? value[0] : typeof value === "string" ? value : null; }
+function requireBearerToken(request) { const value = singleHeader(request.headers.authorization); const match = typeof value === "string" ? value.match(/^Bearer\s+(.+)$/i) : null; if (!match?.[1]) throw statusError(401, "Device bearer token is required"); return match[1]; }
 function decodePathPart(value) { try { return decodeURIComponent(value); } catch { return value; } }
 function positiveInteger(value, name) { const parsed = Number(value); if (!Number.isInteger(parsed) || parsed <= 0) throw new Error(`${name} must be a positive integer`); return parsed; }
 function stringId(value) { return typeof value === "string" ? value.trim() : ""; }
