@@ -40,6 +40,7 @@
   <div class="modal-backdrop hidden" id="job-modal"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="job-modal-title"><div class="modal-header"><div><p class="eyebrow">Queue work</p><h2 id="job-modal-title">New job</h2></div><button class="icon-button" data-close-modal aria-label="Close">×</button></div><form id="job-form"><label><span>Job type</span><select id="job-type" name="type"><option value="restic-backup">Local → Restic</option><option value="rclone-restic-backup">Remote mount → Restic</option><option value="rclone-transfer">Rclone copy</option></select></label><div id="job-fields"></div><label><span>Tags <small>optional, comma separated</small></span><input id="job-tags" autocomplete="off" placeholder="daily, appdata"></label><div class="modal-actions"><button type="button" class="button ghost" data-close-modal>Cancel</button><button type="submit" class="button primary">Queue job</button></div></form></section></div>
   <aside class="drawer" id="job-drawer" aria-hidden="true"><div class="drawer-header"><div><p class="eyebrow">Job detail</p><h2 id="drawer-title">Job</h2></div><button class="icon-button" id="drawer-close" aria-label="Close job details">×</button></div><div id="drawer-content" class="drawer-content"></div></aside>
   <div class="toast-stack" id="toast-stack" aria-live="polite"></div>
+  <script type="module" src="/session.js"></script>
   <script type="module" src="/app.js"></script>
   <script type="module" src="/telemetry.js"></script>
   <script type="module" src="/plans.js"></script>

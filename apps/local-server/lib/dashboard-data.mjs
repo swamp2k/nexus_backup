@@ -137,7 +137,7 @@ function sanitizeRestoreTargets(value) {
       const overwrite = ["always", "if-changed", "if-newer", "never"].includes(target.overwrite)
         ? target.overwrite
         : "never";
-      return { id, label, overwrite };
+      return { id, label, overwrite, writeEnabled: target.allowWrite === true };
     })
     .filter((target) => target.id);
 }

@@ -28,7 +28,7 @@ test("runtime config loader constructs the local-only registry from JSON", async
     const config = await loadRuntimeConfig(path);
     assert.deepEqual(config.source("data").paths, ["/data"]);
     assert.equal(config.resticRepository("repo").repository, "/backup/repo");
-    assert.deepEqual(config.restoreTarget("staging"), { id: "staging", label: "Safe staging", path: "/restore", overwrite: "never" });
+    assert.deepEqual(config.restoreTarget("staging"), { id: "staging", label: "Safe staging", path: "/restore", overwrite: "never", allowWrite: false });
     assert.equal(config.rcloneEndpoint("cloud").mount.mountPoint, "/state/mounts/cloud");
   } finally {
     await rm(dir, { recursive: true, force: true });

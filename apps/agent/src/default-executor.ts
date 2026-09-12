@@ -10,6 +10,7 @@ import { ResticBrowseExecutor } from "./restic-browse-executor.js";
 import { ResticInventoryExecutor } from "./restic-inventory-executor.js";
 import { ResticMaintenanceExecutor } from "./restic-maintenance-executor.js";
 import { ResticRepositoryGate, ResticRepositoryLockedExecutor } from "./restic-repository-lock.js";
+import { ResticRestoreExecutor } from "./restic-restore-executor.js";
 import { ResticRestorePreviewExecutor } from "./restic-restore-preview-executor.js";
 import type { AgentRuntimeConfig } from "./runtime-config.js";
 
@@ -30,5 +31,6 @@ export function createDefaultJobExecutor(
     "restic-inventory": withRepositoryLock(new ResticInventoryExecutor(config, runner, events)),
     "restic-browse": withRepositoryLock(new ResticBrowseExecutor(config, runner, events)),
     "restic-restore-preview": withRepositoryLock(new ResticRestorePreviewExecutor(config, runner, events)),
+    "restic-restore": withRepositoryLock(new ResticRestoreExecutor(config, runner, events)),
   });
 }

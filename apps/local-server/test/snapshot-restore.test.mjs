@@ -115,10 +115,10 @@ test("sanitized restore targets expose policy but never the local target path",a
   try{
     const configPath=join(dir,"agent.json");
     await writeFile(configPath,JSON.stringify({
-      restoreTargets:[{id:"safe",label:"Safe staging",path:"/super/secret/restore",overwrite:"never"}],
+      restoreTargets:[{id:"safe",label:"Safe staging",path:"/super/secret/restore",overwrite:"never",allowWrite:true}],
     }));
     const config=await loadSanitizedAgentConfig(configPath);
-    assert.deepEqual(config.restoreTargets,[{id:"safe",label:"Safe staging",overwrite:"never"}]);
+    assert.deepEqual(config.restoreTargets,[{id:"safe",label:"Safe staging",overwrite:"never",writeEnabled:true}]);
     assert.equal(JSON.stringify(config).includes("/super/secret/restore"),false);
   }finally{await rm(dir,{recursive:true,force:true});}
 });

@@ -13,6 +13,7 @@ export * from "./restic-browse-executor.js";
 export * from "./restic-inventory-executor.js";
 export * from "./restic-maintenance-executor.js";
 export * from "./restic-repository-lock.js";
+export * from "./restic-restore-executor.js";
 export * from "./restic-restore-preview-executor.js";
 export * from "./runner.js";
 export * from "./runtime-config.js";
