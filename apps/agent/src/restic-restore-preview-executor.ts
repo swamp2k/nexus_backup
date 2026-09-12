@@ -41,7 +41,7 @@ export class ResticRestorePreviewExecutor implements JobExecutor {
       "--overwrite",
       overwrite,
     ];
-    if (payload.path && payload.path !== "/") args.push("--include", escapeIncludePattern(payload.path));
+    if (payload.path && payload.path !== "/") args.push("--include", payload.path);
 
     let restored = 0;
     let updated = 0;
@@ -158,10 +158,6 @@ function requireSnapshotPath(value: unknown): string {
     throw new Error("snapshot path may not contain dot segments");
   }
   return path.length > 1 ? path.replace(/\/+$/, "") || "/" : "/";
-}
-
-function escapeIncludePattern(path: string): string {
-  return path.replace(/[\\*?\[\]]/g, (character) => `\\${character}`);
 }
 
 function requireString(value: unknown, name: string, min: number, max: number): string {
