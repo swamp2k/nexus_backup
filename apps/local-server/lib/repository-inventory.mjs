@@ -2,8 +2,9 @@ import { randomUUID } from "node:crypto";
 
 const ACTIVE_STATES = new Set(["queued", "leased", "preparing", "running", "finalizing"]);
 const MAX_SNAPSHOTS = 250;
-const MAX_PATHS = 64;
-const MAX_TAGS = 64;
+const MAX_PATHS = 16;
+const MAX_TAGS = 32;
+const MAX_INVENTORY_JSON = 700_000;
 
 export async function persistRepositoryInventory(
   db,
@@ -106,7 +107,7 @@ export async function listRepositoryInventories(db, repositories) {
     const inventoryRow = inventoryByRepository.get(repositoryId);
     const inventory = inventoryRow ? {
       scannedAt: String(inventoryRow.scanned_at),
-      jobId: String(inventoryRow.job_id),
+      jobId: nullableOutput(inventoryRow.job_id),
       attempt: Number(inventoryRow.attempt),
       stats: parseJsonObject(inventoryRow.stats_json) ?? {},
       snapshotLimit: Number(inventoryRow.snapshot_limit),
@@ -161,6 +162,9 @@ export function normalizeInventoryEvent(value, expectedRepositoryId, now = new D
   if (!isRecord(value) || value.type !== "inventory" || value.tool !== "restic") {
     throw new RangeError("inventory event must be a restic inventory object");
   }
+  if (JSON.stringify(value).length > MAX_INVENTORY_JSON) {
+    throw new RangeError(`inventory event exceeds ${MAX_INVENTORY_JSON} characters`);
+  }
   const repositoryId = requireString(value.repositoryId, "repositoryId", 1, 128);
   if (typeof expectedRepositoryId !== "string" || repositoryId !== expectedRepositoryId) {
     throw new RangeError("inventory repositoryId does not match the job payload");
@@ -202,8 +206,8 @@ function normalizeSnapshot(value) {
     parent: nullableString(value.parent, "snapshot.parent", 128),
     hostname: nullableString(value.hostname, "snapshot.hostname", 512),
     username: nullableString(value.username, "snapshot.username", 512),
-    paths: stringArray(value.paths, "snapshot.paths", MAX_PATHS, 4_096),
-    tags: stringArray(value.tags, "snapshot.tags", MAX_TAGS, 256),
+    paths: exactStringArray(value.paths, "snapshot.paths", MAX_PATHS, 2_048),
+    tags: trimmedStringArray(value.tags, "snapshot.tags", MAX_TAGS, 128),
     programVersion: nullableString(value.programVersion, "snapshot.programVersion", 256),
     totalFilesProcessed: nullableInteger(value.totalFilesProcessed, "snapshot.totalFilesProcessed"),
     totalBytesProcessed: nullableNumber(value.totalBytesProcessed, "snapshot.totalBytesProcessed"),
@@ -264,7 +268,18 @@ function parseJsonArray(value) {
   try { const parsed = JSON.parse(value); return Array.isArray(parsed) ? parsed.filter((item) => typeof item === "string") : []; } catch { return []; }
 }
 
-function stringArray(value, name, maxItems, maxLength) {
+function exactStringArray(value, name, maxItems, maxLength) {
+  if (!Array.isArray(value)) throw new RangeError(`${name} must be an array`);
+  if (value.length > maxItems) throw new RangeError(`${name} may contain at most ${maxItems} items`);
+  return value.map((item) => {
+    if (typeof item !== "string" || item.length < 1 || item.length > maxLength) {
+      throw new RangeError(`${name} items must be 1-${maxLength} characters`);
+    }
+    return item;
+  });
+}
+
+function trimmedStringArray(value, name, maxItems, maxLength) {
   if (!Array.isArray(value)) throw new RangeError(`${name} must be an array`);
   if (value.length > maxItems) throw new RangeError(`${name} may contain at most ${maxItems} items`);
   return value.map((item) => requireString(item, name, 0, maxLength));
