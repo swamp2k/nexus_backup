@@ -1,0 +1,446 @@
+import { randomBytes, randomUUID } from "node:crypto";
+import { nextScheduleAt } from "./backup-plans.mjs";
+
+const ACTIVE_STATES = new Set(["queued", "leased", "running"]);
+const FINAL_STATES = new Set(["completed", "partial", "failed", "cancelled"]);
+const DEFAULT_LEASE_MS = 5 * 60 * 1000;
+
+export function createWorkstationService({
+  db,
+  deviceService,
+  now = () => new Date(),
+  id = () => `wsrun-${randomUUID()}`,
+  leaseToken = () => `nxbws_${randomBytes(24).toString("base64url")}`,
+  leaseMs = DEFAULT_LEASE_MS,
+} = {}) {
+  if (!db) throw new TypeError("db is required");
+  if (!deviceService || typeof deviceService.authenticate !== "function") throw new TypeError("deviceService.authenticate is required");
+
+  async function list() {
+    const rows = (await db.prepare(`
+      SELECT
+        d.id,d.name,d.kind,d.enabled,d.version,d.hostname,d.platform,d.capabilities_json,d.first_seen_at,d.last_seen_at,
+        p.enabled AS policy_enabled,p.source_paths_json,p.exclude_patterns_json,p.schedule_json,p.timezone,p.retention_json,
+        p.next_run_at,p.last_scheduled_at,p.last_run_id,
+        s.repository_configured,s.repository_kind,s.agent_state,s.current_run_id,s.last_backup_at,s.last_success_at,
+        s.last_snapshot_id,s.last_error AS status_error,s.updated_at AS status_updated_at,
+        r.state AS last_run_state,r.queued_at AS last_run_queued_at,r.started_at AS last_run_started_at,
+        r.finished_at AS last_run_finished_at,r.progress_json AS last_run_progress_json,
+        r.result_json AS last_run_result_json,r.error_message AS last_run_error
+      FROM managed_devices d
+      LEFT JOIN workstation_policies p ON p.device_id=d.id
+      LEFT JOIN workstation_status s ON s.device_id=d.id
+      LEFT JOIN workstation_runs r ON r.id=p.last_run_id
+      WHERE d.kind='workstation'
+      ORDER BY d.name COLLATE NOCASE ASC,d.id ASC
+    `).all()).results ?? [];
+    return rows.map(presentWorkstation);
+  }
+
+  async function getPolicy(deviceId) {
+    const normalizedId = requireId(deviceId, "device id");
+    const row = await db.prepare("SELECT * FROM workstation_policies WHERE device_id=?").bind(normalizedId).first();
+    return row ? policyFromRow(row) : null;
+  }
+
+  async function putPolicy(deviceId, input) {
+    const device = await requireWorkstation(deviceId);
+    const policy = normalizePolicy(input);
+    const at = nowDate(now);
+    const nextRunAt = policy.enabled && policy.sourcePaths.length
+      ? nextScheduleAt(policy.schedule, policy.timezone, at).toISOString()
+      : null;
+    const existing = await getPolicy(device.id);
+    if (existing) {
+      await db.prepare(`
+        UPDATE workstation_policies SET enabled=?,source_paths_json=?,exclude_patterns_json=?,schedule_json=?,timezone=?,
+          retention_json=?,next_run_at=?,updated_at=? WHERE device_id=?
+      `).bind(
+        policy.enabled ? 1 : 0,
+        JSON.stringify(policy.sourcePaths),
+        JSON.stringify(policy.excludePatterns),
+        JSON.stringify(policy.schedule),
+        policy.timezone,
+        JSON.stringify(policy.retention),
+        nextRunAt,
+        at.toISOString(),
+        device.id,
+      ).run();
+    } else {
+      await db.prepare(`
+        INSERT INTO workstation_policies(device_id,enabled,source_paths_json,exclude_patterns_json,schedule_json,timezone,
+          retention_json,next_run_at,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?)
+      `).bind(
+        device.id,
+        policy.enabled ? 1 : 0,
+        JSON.stringify(policy.sourcePaths),
+        JSON.stringify(policy.excludePatterns),
+        JSON.stringify(policy.schedule),
+        policy.timezone,
+        JSON.stringify(policy.retention),
+        nextRunAt,
+        at.toISOString(),
+        at.toISOString(),
+      ).run();
+    }
+    return await getPolicy(device.id);
+  }
+
+  async function runNow(deviceId) {
+    const device = await requireWorkstation(deviceId);
+    const policy = await getPolicy(device.id);
+    if (!policy) throw statusError(409, "Workstation backup policy is not configured");
+    if (!policy.sourcePaths.length) throw statusError(409, "Workstation backup policy has no source paths");
+    const at = nowDate(now);
+    const run = await queueRun(device.id, policy, at.toISOString(), `workstation:${device.id}:manual:${at.toISOString()}:${randomUUID()}`);
+    await db.prepare("UPDATE workstation_policies SET last_scheduled_at=?,last_run_id=?,updated_at=? WHERE device_id=?")
+      .bind(at.toISOString(), run.id, at.toISOString(), device.id).run();
+    return run;
+  }
+
+  async function runDue({ limit = 20 } = {}) {
+    const at = nowDate(now);
+    await recoverExpired();
+    const normalizedLimit = clampInteger(limit, 1, 100, 20);
+    const rows = (await db.prepare(`
+      SELECT p.* FROM workstation_policies p
+      JOIN managed_devices d ON d.id=p.device_id
+      WHERE p.enabled=1 AND d.enabled=1 AND p.next_run_at IS NOT NULL AND p.next_run_at<=?
+      ORDER BY p.next_run_at ASC,p.device_id ASC LIMIT ?
+    `).bind(at.toISOString(), normalizedLimit).all()).results ?? [];
+    let queued = 0;
+    const failures = [];
+    for (const row of rows) {
+      const policy = policyFromRow(row);
+      const scheduledFor = String(row.next_run_at);
+      try {
+        const run = await queueRun(policy.deviceId, policy, scheduledFor, `workstation:${policy.deviceId}:${scheduledFor}`);
+        const nextRunAt = nextScheduleAt(policy.schedule, policy.timezone, at).toISOString();
+        const result = await db.prepare(`
+          UPDATE workstation_policies SET last_scheduled_at=?,last_run_id=?,next_run_at=?,updated_at=?
+          WHERE device_id=? AND enabled=1 AND next_run_at=?
+        `).bind(scheduledFor, run.id, nextRunAt, at.toISOString(), policy.deviceId, scheduledFor).run();
+        if (Number(result.meta?.changes ?? 0) > 0) queued += 1;
+      } catch (error) {
+        failures.push({ deviceId: policy.deviceId, message: error instanceof Error ? error.message : String(error) });
+      }
+    }
+    return { queued, failures };
+  }
+
+  async function poll(rawToken) {
+    const device = await requireAuthenticatedWorkstation(rawToken);
+    await recoverExpired(device.id);
+    const row = await db.prepare(`
+      SELECT * FROM workstation_runs WHERE device_id=? AND state='queued' ORDER BY queued_at ASC,id ASC LIMIT 1
+    `).bind(device.id).first();
+    if (!row) return { run: null, nextPollSeconds: 15 };
+    const token = requireLeaseToken(leaseToken());
+    const at = nowDate(now);
+    const expiresAt = new Date(at.getTime() + leaseMs).toISOString();
+    const claimed = await db.prepare(`
+      UPDATE workstation_runs SET state='leased',lease_token=?,lease_expires_at=?,leased_at=COALESCE(leased_at,?),updated_at=?
+      WHERE id=? AND device_id=? AND state='queued'
+    `).bind(token, expiresAt, at.toISOString(), at.toISOString(), row.id, device.id).run();
+    if (Number(claimed.meta?.changes ?? 0) === 0) return { run: null, nextPollSeconds: 2 };
+    const current = await db.prepare("SELECT * FROM workstation_runs WHERE id=?").bind(row.id).first();
+    return { run: presentRun(current, { includeLeaseToken: true }), nextPollSeconds: 15 };
+  }
+
+  async function progress(rawToken, runId, input) {
+    const device = await requireAuthenticatedWorkstation(rawToken);
+    const normalizedRunId = requireId(runId, "run id");
+    const token = requireLeaseToken(input?.leaseToken);
+    const progressValue = normalizeProgress(input?.progress ?? input);
+    const at = nowDate(now);
+    const expiresAt = new Date(at.getTime() + leaseMs).toISOString();
+    const result = await db.prepare(`
+      UPDATE workstation_runs SET state='running',started_at=COALESCE(started_at,?),progress_json=?,lease_expires_at=?,updated_at=?
+      WHERE id=? AND device_id=? AND lease_token=? AND state IN ('leased','running')
+    `).bind(at.toISOString(), JSON.stringify(progressValue), expiresAt, at.toISOString(), normalizedRunId, device.id, token).run();
+    if (Number(result.meta?.changes ?? 0) === 0) throw statusError(409, "Workstation run lease is stale or invalid");
+    await db.prepare(`
+      INSERT INTO workstation_status(device_id,repository_configured,agent_state,current_run_id,updated_at)
+      VALUES(?,0,'running',?,?)
+      ON CONFLICT(device_id) DO UPDATE SET agent_state='running',current_run_id=excluded.current_run_id,updated_at=excluded.updated_at
+    `).bind(device.id, normalizedRunId, at.toISOString()).run();
+    return presentRun(await db.prepare("SELECT * FROM workstation_runs WHERE id=?").bind(normalizedRunId).first());
+  }
+
+  async function finish(rawToken, runId, input) {
+    const device = await requireAuthenticatedWorkstation(rawToken);
+    const normalizedRunId = requireId(runId, "run id");
+    const token = requireLeaseToken(input?.leaseToken);
+    const state = normalizeResultState(input?.status);
+    const resultValue = normalizeResult(input?.result);
+    const errorMessage = state === "failed" || state === "partial" ? optionalString(input?.error, "error", 4000) : null;
+    const at = nowDate(now);
+    const result = await db.prepare(`
+      UPDATE workstation_runs SET state=?,finished_at=?,result_json=?,error_message=?,lease_token=NULL,lease_expires_at=NULL,updated_at=?
+      WHERE id=? AND device_id=? AND lease_token=? AND state IN ('leased','running')
+    `).bind(state, at.toISOString(), resultValue ? JSON.stringify(resultValue) : null, errorMessage, at.toISOString(), normalizedRunId, device.id, token).run();
+    if (Number(result.meta?.changes ?? 0) === 0) throw statusError(409, "Workstation run lease is stale or invalid");
+    const snapshotId = resultValue && typeof resultValue.snapshotId === "string" ? resultValue.snapshotId.slice(0, 128) : null;
+    const successAt = state === "completed" ? at.toISOString() : null;
+    await db.prepare(`
+      INSERT INTO workstation_status(device_id,repository_configured,agent_state,current_run_id,last_backup_at,last_success_at,last_snapshot_id,last_error,updated_at)
+      VALUES(?,0,'idle',NULL,?,?,?,?,?)
+      ON CONFLICT(device_id) DO UPDATE SET agent_state='idle',current_run_id=NULL,last_backup_at=excluded.last_backup_at,
+        last_success_at=COALESCE(excluded.last_success_at,workstation_status.last_success_at),
+        last_snapshot_id=COALESCE(excluded.last_snapshot_id,workstation_status.last_snapshot_id),last_error=excluded.last_error,updated_at=excluded.updated_at
+    `).bind(device.id, at.toISOString(), successAt, snapshotId, errorMessage, at.toISOString()).run();
+    return presentRun(await db.prepare("SELECT * FROM workstation_runs WHERE id=?").bind(normalizedRunId).first());
+  }
+
+  async function reportStatus(rawToken, input) {
+    const device = await requireAuthenticatedWorkstation(rawToken);
+    const status = normalizeStatus(input);
+    const at = nowDate(now).toISOString();
+    await db.prepare(`
+      INSERT INTO workstation_status(device_id,repository_configured,repository_kind,agent_state,current_run_id,last_backup_at,last_success_at,last_snapshot_id,last_error,updated_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(device_id) DO UPDATE SET repository_configured=excluded.repository_configured,repository_kind=excluded.repository_kind,
+        agent_state=excluded.agent_state,current_run_id=excluded.current_run_id,last_backup_at=COALESCE(excluded.last_backup_at,workstation_status.last_backup_at),
+        last_success_at=COALESCE(excluded.last_success_at,workstation_status.last_success_at),
+        last_snapshot_id=COALESCE(excluded.last_snapshot_id,workstation_status.last_snapshot_id),last_error=excluded.last_error,updated_at=excluded.updated_at
+    `).bind(
+      device.id,
+      status.repositoryConfigured ? 1 : 0,
+      status.repositoryKind,
+      status.agentState,
+      status.currentRunId,
+      status.lastBackupAt,
+      status.lastSuccessAt,
+      status.lastSnapshotId,
+      status.lastError,
+      at,
+    ).run();
+    return { ok: true, deviceId: device.id, nextReportSeconds: 60 };
+  }
+
+  async function recoverExpired(deviceId = null) {
+    const at = nowDate(now).toISOString();
+    const sql = deviceId
+      ? `UPDATE workstation_runs SET state='queued',lease_token=NULL,lease_expires_at=NULL,error_message='Previous lease expired; requeued',updated_at=? WHERE device_id=? AND state IN ('leased','running') AND lease_expires_at IS NOT NULL AND lease_expires_at<=?`
+      : `UPDATE workstation_runs SET state='queued',lease_token=NULL,lease_expires_at=NULL,error_message='Previous lease expired; requeued',updated_at=? WHERE state IN ('leased','running') AND lease_expires_at IS NOT NULL AND lease_expires_at<=?`;
+    const args = deviceId ? [at, deviceId, at] : [at, at];
+    const result = await db.prepare(sql).bind(...args).run();
+    return Number(result.meta?.changes ?? 0);
+  }
+
+  async function requireWorkstation(deviceId) {
+    const normalizedId = requireId(deviceId, "device id");
+    const row = await db.prepare("SELECT id,name,kind,enabled FROM managed_devices WHERE id=?").bind(normalizedId).first();
+    if (!row) throw statusError(404, `Device not found: ${normalizedId}`);
+    if (String(row.kind) !== "workstation") throw statusError(409, `Device is not a workstation: ${normalizedId}`);
+    return { id: String(row.id), name: String(row.name), enabled: Number(row.enabled) === 1 };
+  }
+
+  async function requireAuthenticatedWorkstation(rawToken) {
+    const device = await deviceService.authenticate(rawToken);
+    if (device.kind !== "workstation") throw statusError(403, "Device token is not a workstation token");
+    return device;
+  }
+
+  async function queueRun(deviceId, policy, scheduledFor, operationKey) {
+    const existing = await db.prepare("SELECT * FROM workstation_runs WHERE operation_key=?").bind(operationKey).first();
+    if (existing) return presentRun(existing);
+    const at = nowDate(now).toISOString();
+    const runId = requireId(id(), "generated run id");
+    await db.prepare(`
+      INSERT INTO workstation_runs(id,device_id,operation_key,state,scheduled_for,source_paths_json,exclude_patterns_json,retention_json,
+        queued_at,created_at,updated_at) VALUES(?,?,?,'queued',?,?,?,?,?,?,?)
+    `).bind(
+      runId,
+      deviceId,
+      operationKey,
+      scheduledFor,
+      JSON.stringify(policy.sourcePaths),
+      JSON.stringify(policy.excludePatterns),
+      JSON.stringify(policy.retention),
+      at,
+      at,
+      at,
+    ).run();
+    return presentRun(await db.prepare("SELECT * FROM workstation_runs WHERE id=?").bind(runId).first());
+  }
+
+  return { list, getPolicy, putPolicy, runNow, runDue, poll, progress, finish, reportStatus, recoverExpired };
+}
+
+export function workstationInstallCommand(origin, token) {
+  const base = String(origin ?? "").replace(/\/+$/, "");
+  if (!/^https?:\/\//i.test(base)) throw new RangeError("origin must be http(s)");
+  if (typeof token !== "string" || !token.startsWith("nxbdev_")) throw new RangeError("workstation token is invalid");
+  const q = (value) => String(value).replace(/'/g, "''");
+  return `$env:NEXUS_BACKUP_URL='${q(base)}';$env:NEXUS_BACKUP_TOKEN='${q(token)}';irm '${q(base)}/install.ps1'|iex`;
+}
+
+function normalizePolicy(value) {
+  if (!isRecord(value)) throw new RangeError("policy must be an object");
+  const enabled = value.enabled === undefined ? true : requireBoolean(value.enabled, "enabled");
+  const sourcePaths = uniqueStrings(value.sourcePaths, "sourcePaths", 32, 1024);
+  const excludePatterns = uniqueStrings(value.excludePatterns, "excludePatterns", 128, 512);
+  const schedule = normalizeSchedule(value.schedule ?? { kind: "daily", time: "02:00" });
+  const timezone = normalizeTimezone(value.timezone ?? "UTC");
+  const retentionValue = isRecord(value.retention) ? value.retention : {};
+  const retention = {
+    keepDaily: retentionInteger(retentionValue.keepDaily, 7, "retention.keepDaily"),
+    keepWeekly: retentionInteger(retentionValue.keepWeekly, 4, "retention.keepWeekly"),
+    keepMonthly: retentionInteger(retentionValue.keepMonthly, 12, "retention.keepMonthly"),
+  };
+  return { enabled, sourcePaths, excludePatterns, schedule, timezone, retention };
+}
+
+function normalizeSchedule(value) {
+  if (!isRecord(value)) throw new RangeError("schedule must be an object");
+  if (value.kind !== "daily" && value.kind !== "weekly") throw new RangeError("schedule.kind must be daily or weekly");
+  const time = requireString(value.time, "schedule.time", 5, 5);
+  if (!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(time)) throw new RangeError("schedule.time must be HH:MM");
+  if (value.kind === "daily") return { kind: "daily", time };
+  if (!Array.isArray(value.days) || value.days.length === 0) throw new RangeError("weekly schedules require days");
+  const days = [...new Set(value.days)];
+  if (days.some((day) => !Number.isInteger(day) || day < 0 || day > 6)) throw new RangeError("schedule.days must contain 0-6");
+  return { kind: "weekly", time, days };
+}
+
+function normalizeTimezone(value) {
+  const timezone = requireString(value, "timezone", 1, 100);
+  try { new Intl.DateTimeFormat("en-US", { timeZone: timezone }).format(new Date()); }
+  catch { throw new RangeError(`invalid timezone: ${timezone}`); }
+  return timezone;
+}
+
+function normalizeProgress(value) {
+  if (!isRecord(value)) throw new RangeError("progress must be an object");
+  const phase = optionalString(value.phase, "progress.phase", 80) ?? "running";
+  const percent = value.percent === undefined || value.percent === null ? null : boundedNumber(value.percent, 0, 100, "progress.percent");
+  const bytesDone = optionalNonNegativeInteger(value.bytesDone, "progress.bytesDone");
+  const bytesTotal = optionalNonNegativeInteger(value.bytesTotal, "progress.bytesTotal");
+  const filesDone = optionalNonNegativeInteger(value.filesDone, "progress.filesDone");
+  const filesTotal = optionalNonNegativeInteger(value.filesTotal, "progress.filesTotal");
+  const currentPath = optionalString(value.currentPath, "progress.currentPath", 1024);
+  return { phase, percent, bytesDone, bytesTotal, filesDone, filesTotal, currentPath };
+}
+
+function normalizeStatus(value) {
+  if (!isRecord(value)) throw new RangeError("status must be an object");
+  return {
+    repositoryConfigured: requireBoolean(value.repositoryConfigured, "repositoryConfigured"),
+    repositoryKind: optionalString(value.repositoryKind, "repositoryKind", 64),
+    agentState: optionalString(value.agentState, "agentState", 64) ?? "idle",
+    currentRunId: value.currentRunId ? requireId(value.currentRunId, "currentRunId") : null,
+    lastBackupAt: optionalDateString(value.lastBackupAt, "lastBackupAt"),
+    lastSuccessAt: optionalDateString(value.lastSuccessAt, "lastSuccessAt"),
+    lastSnapshotId: optionalString(value.lastSnapshotId, "lastSnapshotId", 128),
+    lastError: optionalString(value.lastError, "lastError", 4000),
+  };
+}
+
+function normalizeResultState(value) {
+  if (value === "success" || value === "completed") return "completed";
+  if (value === "partial") return "partial";
+  if (value === "failure" || value === "failed") return "failed";
+  throw new RangeError("status must be success, partial, or failure");
+}
+
+function normalizeResult(value) {
+  if (value === undefined || value === null) return null;
+  if (!isRecord(value)) throw new RangeError("result must be an object");
+  const encoded = JSON.stringify(value);
+  if (encoded.length > 64 * 1024) throw new RangeError("result is too large");
+  return value;
+}
+
+function policyFromRow(row) {
+  return {
+    deviceId: String(row.device_id),
+    enabled: Number(row.enabled) === 1,
+    sourcePaths: parseArray(row.source_paths_json),
+    excludePatterns: parseArray(row.exclude_patterns_json),
+    schedule: parseJson(row.schedule_json, { kind: "daily", time: "02:00" }),
+    timezone: String(row.timezone),
+    retention: parseJson(row.retention_json, { keepDaily: 7, keepWeekly: 4, keepMonthly: 12 }),
+    nextRunAt: nullableString(row.next_run_at),
+    lastScheduledAt: nullableString(row.last_scheduled_at),
+    lastRunId: nullableString(row.last_run_id),
+  };
+}
+
+function presentWorkstation(row) {
+  const lastSeenAt = nullableString(row.last_seen_at);
+  const lastSeenMs = lastSeenAt ? Date.parse(lastSeenAt) : NaN;
+  const online = Number(row.enabled) === 1 && Number.isFinite(lastSeenMs) && Date.now() - lastSeenMs <= 3 * 60 * 1000;
+  const policy = row.policy_enabled === null || row.policy_enabled === undefined ? null : {
+    enabled: Number(row.policy_enabled) === 1,
+    sourcePaths: parseArray(row.source_paths_json),
+    excludePatterns: parseArray(row.exclude_patterns_json),
+    schedule: parseJson(row.schedule_json, { kind: "daily", time: "02:00" }),
+    timezone: String(row.timezone),
+    retention: parseJson(row.retention_json, { keepDaily: 7, keepWeekly: 4, keepMonthly: 12 }),
+    nextRunAt: nullableString(row.next_run_at),
+    lastScheduledAt: nullableString(row.last_scheduled_at),
+  };
+  const lastRun = row.last_run_id ? {
+    id: String(row.last_run_id),
+    state: nullableString(row.last_run_state),
+    queuedAt: nullableString(row.last_run_queued_at),
+    startedAt: nullableString(row.last_run_started_at),
+    finishedAt: nullableString(row.last_run_finished_at),
+    progress: parseJson(row.last_run_progress_json, null),
+    result: parseJson(row.last_run_result_json, null),
+    error: nullableString(row.last_run_error),
+  } : null;
+  return {
+    id: String(row.id), name: String(row.name), enabled: Number(row.enabled) === 1, version: nullableString(row.version),
+    hostname: nullableString(row.hostname), platform: nullableString(row.platform), capabilities: parseArray(row.capabilities_json),
+    firstSeenAt: nullableString(row.first_seen_at), lastSeenAt, online, policy,
+    status: {
+      repositoryConfigured: Number(row.repository_configured ?? 0) === 1,
+      repositoryKind: nullableString(row.repository_kind), agentState: nullableString(row.agent_state), currentRunId: nullableString(row.current_run_id),
+      lastBackupAt: nullableString(row.last_backup_at), lastSuccessAt: nullableString(row.last_success_at), lastSnapshotId: nullableString(row.last_snapshot_id),
+      lastError: nullableString(row.status_error), updatedAt: nullableString(row.status_updated_at),
+    },
+    lastRun,
+  };
+}
+
+function presentRun(row, { includeLeaseToken = false } = {}) {
+  if (!row) return null;
+  const result = {
+    id: String(row.id), deviceId: String(row.device_id), state: String(row.state), scheduledFor: nullableString(row.scheduled_for),
+    sourcePaths: parseArray(row.source_paths_json), excludePatterns: parseArray(row.exclude_patterns_json),
+    retention: parseJson(row.retention_json, { keepDaily: 7, keepWeekly: 4, keepMonthly: 12 }),
+    queuedAt: String(row.queued_at), leasedAt: nullableString(row.leased_at), leaseExpiresAt: nullableString(row.lease_expires_at),
+    startedAt: nullableString(row.started_at), finishedAt: nullableString(row.finished_at), progress: parseJson(row.progress_json, null),
+    result: parseJson(row.result_json, null), error: nullableString(row.error_message), terminal: FINAL_STATES.has(String(row.state)), active: ACTIVE_STATES.has(String(row.state)),
+  };
+  if (includeLeaseToken) result.leaseToken = String(row.lease_token);
+  return result;
+}
+
+function uniqueStrings(value, name, maxItems, maxLength) {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value) || value.length > maxItems) throw new RangeError(`${name} may contain at most ${maxItems} values`);
+  const result = [];
+  const seen = new Set();
+  for (const item of value) { const normalized = requireString(item, name, 1, maxLength); if (!seen.has(normalized)) { seen.add(normalized); result.push(normalized); } }
+  return result;
+}
+function retentionInteger(value, fallback, name) { if (value === undefined) return fallback; if (!Number.isInteger(value) || value < 0 || value > 3650) throw new RangeError(`${name} must be 0-3650`); return value; }
+function optionalNonNegativeInteger(value, name) { if (value === undefined || value === null) return null; if (!Number.isInteger(value) || value < 0) throw new RangeError(`${name} must be a non-negative integer`); return value; }
+function boundedNumber(value, min, max, name) { if (typeof value !== "number" || !Number.isFinite(value) || value < min || value > max) throw new RangeError(`${name} must be ${min}-${max}`); return value; }
+function optionalDateString(value, name) { if (value === undefined || value === null || value === "") return null; const text = requireString(value, name, 1, 64); if (!Number.isFinite(Date.parse(text))) throw new RangeError(`${name} must be an ISO date`); return new Date(text).toISOString(); }
+function requireBoolean(value, name) { if (typeof value !== "boolean") throw new RangeError(`${name} must be boolean`); return value; }
+function requireString(value, name, min, max) { if (typeof value !== "string") throw new RangeError(`${name} must be a string`); const result = value.trim(); if (result.length < min || result.length > max) throw new RangeError(`${name} must be ${min}-${max} characters`); return result; }
+function optionalString(value, name, max) { if (value === undefined || value === null || value === "") return null; return requireString(value, name, 1, max); }
+function requireId(value, name) { if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value.trim())) throw new RangeError(`${name} is invalid`); return value.trim(); }
+function requireLeaseToken(value) { if (typeof value !== "string" || value.length < 24 || value.length > 256) throw statusError(401, "Invalid workstation lease token"); return value; }
+function parseArray(value) { const parsed = parseJson(value, []); return Array.isArray(parsed) ? parsed.filter((item) => typeof item === "string") : []; }
+function parseJson(value, fallback) { if (typeof value !== "string") return fallback; try { return JSON.parse(value); } catch { return fallback; } }
+function nullableString(value) { return typeof value === "string" && value ? value : null; }
+function isRecord(value) { return typeof value === "object" && value !== null && !Array.isArray(value); }
+function nowDate(now) { const value = now(); const date = value instanceof Date ? new Date(value) : new Date(value); if (!Number.isFinite(date.getTime())) throw new TypeError("now() must return a valid date"); return date; }
+function clampInteger(value, min, max, fallback) { const parsed = Number(value); return Number.isInteger(parsed) && parsed >= min && parsed <= max ? parsed : fallback; }
+function statusError(statusCode, message) { const error = new Error(message); error.statusCode = statusCode; return error; }
