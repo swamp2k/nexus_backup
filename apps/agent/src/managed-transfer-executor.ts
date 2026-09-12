@@ -14,6 +14,21 @@ interface ManagedTransferPayload {
 }
 interface ProgressBase { completedBytes: number; completedFiles: number; totalBytes: number; totalFiles: number; }
 
+const RESERVED_RCLONE_FLAGS = new Set([
+  "-n",
+  "--config",
+  "--dry-run",
+  "--use-json-log",
+  "--partial-suffix",
+  "--backup-dir",
+  "--compare-dest",
+  "--copy-dest",
+  "--suffix",
+  "--suffix-keep-extension",
+  "--log-file",
+  "--password-command",
+]);
+
 export class ManagedTransferExecutor implements JobExecutor {
   readonly #config: AgentRuntimeConfig;
   readonly #runner: CommandRunner;
@@ -92,9 +107,12 @@ export class ManagedTransferExecutor implements JobExecutor {
 }
 
 function parsePayload(value:unknown):ManagedTransferPayload{
-  if(!isRecord(value))throw new Error("managed transfer payload must be an object");const mode=value.mode;if(mode!=="copy"&&mode!=="move")throw new Error("managed transfer mode must be copy or move");if(value.verification!=="size")throw new Error("managed transfer verification must be size");if(!Array.isArray(value.items)||value.items.length===0||value.items.length>5000)throw new Error("managed transfer requires 1-5000 manifest items");const items=value.items.map(parseItem),paths=new Set<string>();for(const item of items){if(paths.has(item.relPath))throw new Error(`duplicate managed transfer path: ${item.relPath}`);paths.add(item.relPath)}return{ruleId:requireId(value.ruleId,"ruleId"),sourceEndpointId:requireId(value.sourceEndpointId,"sourceEndpointId"),sourcePath:normalizeBase(value.sourcePath,"sourcePath"),destinationEndpointId:requireId(value.destinationEndpointId,"destinationEndpointId"),destinationPath:normalizeBase(value.destinationPath,"destinationPath"),mode,verification:"size",transferAttempt:positiveInteger(value.transferAttempt,"transferAttempt"),multiThreadStreams:integerRange(value.multiThreadStreams??4,"multiThreadStreams",1,32),multiThreadCutoff:requireString(value.multiThreadCutoff??"256M","multiThreadCutoff",1,32),rcloneArgs:stringArray(value.rcloneArgs,"rcloneArgs"),items};
+  if(!isRecord(value))throw new Error("managed transfer payload must be an object");const mode=value.mode;if(mode!=="copy"&&mode!=="move")throw new Error("managed transfer mode must be copy or move");if(value.verification!=="size")throw new Error("managed transfer verification must be size");if(!Array.isArray(value.items)||value.items.length===0||value.items.length>5000)throw new Error("managed transfer requires 1-5000 manifest items");const items=value.items.map(parseItem),paths=new Set<string>();for(const item of items){if(paths.has(item.relPath))throw new Error(`duplicate managed transfer path: ${item.relPath}`);paths.add(item.relPath)}return{ruleId:requireId(value.ruleId,"ruleId"),sourceEndpointId:requireId(value.sourceEndpointId,"sourceEndpointId"),sourcePath:normalizeBase(value.sourcePath,"sourcePath"),destinationEndpointId:requireId(value.destinationEndpointId,"destinationEndpointId"),destinationPath:normalizeBase(value.destinationPath,"destinationPath"),mode,verification:"size",transferAttempt:positiveInteger(value.transferAttempt,"transferAttempt"),multiThreadStreams:integerRange(value.multiThreadStreams??4,"multiThreadStreams",1,32),multiThreadCutoff:sizeSuffix(value.multiThreadCutoff??"256M","multiThreadCutoff"),rcloneArgs:transferRcloneArgs(value.rcloneArgs),items};
 }
 function parseItem(value:unknown):TransferItem{if(!isRecord(value))throw new Error("managed transfer item must be an object");const size=Number(value.size);if(!Number.isSafeInteger(size)||size<0)throw new Error("managed transfer item size is invalid");const modTime=typeof value.modTime==="string"&&Number.isFinite(Date.parse(value.modTime))?new Date(value.modTime).toISOString():(()=>{throw new Error("managed transfer item modTime is invalid")})();return{relPath:normalizeObjectPath(value.relPath),size,modTime,objectKey:requireHex(value.objectKey,"objectKey")}}
+function transferRcloneArgs(value:unknown):string[]{const args=stringArray(value,"rcloneArgs");for(const arg of args){const flag=arg.split("=",1)[0]??arg;if(isReservedRcloneFlag(flag))throw new Error(`rcloneArgs may not override managed transfer safety flag: ${flag}`)}return args}
+function isReservedRcloneFlag(flag:string):boolean{return RESERVED_RCLONE_FLAGS.has(flag)||flag.startsWith("--stats")||flag.startsWith("--multi-thread-")||flag.startsWith("--delete-")||flag==="--rc"||flag.startsWith("--rc-")||flag==="--dump"||flag.startsWith("--dump-")}
+function sizeSuffix(value:unknown,name:string):string{const result=requireString(value,name,1,32);if(!/^\d+(?:\.\d+)?(?:[kKmMgGtTpPeE](?:i?[bB])?)?$/.test(result))throw new Error(`${name} must be a numeric rclone size suffix such as 256M or 1G`);return result}
 function isMultiThreadUnsupported(result:CommandResult):boolean{const text=`${result.stderrTail}\n${result.stdoutTail}`.toLowerCase();return text.includes("multi-thread")||text.includes("multithread")||text.includes("multi thread")||text.includes("not supported")}
 function joinTarget(base:string,relative:string):string{if(!relative)return base;if(base.endsWith(":")||base.endsWith("/"))return`${base}${relative}`;return`${base}/${relative}`}
 function joinRelative(...parts:string[]):string{return parts.filter(Boolean).map(part=>part.replace(/^\/+|\/+$/g,"")).filter(Boolean).join("/")}
