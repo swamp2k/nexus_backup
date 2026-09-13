@@ -18,7 +18,7 @@ function Download-VerifiedAsset([string]$Url, [string]$ChecksumUrl, [string]$Des
   }
 }
 
-function Write-WorkstationConfig([string]$Path, [hashtable]$Config) {
+function Write-WorkstationConfig([string]$Path, [System.Collections.IDictionary]$Config) {
   $json = $Config | ConvertTo-Json -Depth 4
   [IO.File]::WriteAllText($Path, $json, (New-Object Text.UTF8Encoding($false)))
 }
