@@ -9,6 +9,8 @@ import (
 	"syscall"
 )
 
+func initializeAgentProcessTree() error { return nil }
+
 func configureProcessTree(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }
