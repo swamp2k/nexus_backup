@@ -3,7 +3,7 @@
 Nexus Backup is a self-contained product made from two containers:
 
 1. **NexusBackup-Control** — dashboard, local auth, SQLite, schedules and job orchestration.
-2. **NexusBackup-Agent** — storage access, rclone, restic, FUSE and execution.
+2. **NexusBackup-Agent** — storage access, rclone, restic and execution. Optional FUSE support is available only when explicitly enabled for remote-as-mounted-source backups.
 
 The split is a security boundary, not a remote dependency. Both containers run on the same Unraid host and Nexus Backup remains fully functional without Cloudflare or another external service.
 
@@ -52,14 +52,19 @@ These are convenience defaults, not assumptions about your final layout. The `/d
 
 A critical containment rule still applies: **the configured backup source must not be able to descend into its own repository or restore staging tree**. Do not widen `/data` to `/mnt/user` and then configure `paths: ["/data"]` while `/backup` or `/restore` also map somewhere beneath `/mnt/user` on the host. Prefer a narrow `/data` host mapping and a correspondingly narrow path in `agent.json`.
 
-Agent is the only container granted:
+Control must not receive Agent storage mappings or elevated container privileges.
+
+### FUSE is optional and disabled by default
+
+Normal local Restic backup/restore, repository integrity/inventory, rclone copy/transfer and Copyarr-style managed transfers do **not** need FUSE. The default Agent template therefore does not grant `SYS_ADMIN` and does not expose `/dev/fuse`.
+
+Only the optional `rclone-restic-backup` path — where a remote rclone endpoint is mounted read-only and then used as a Restic source — needs FUSE. If you deliberately configure an endpoint with a `mount` block and use that job type, add these Docker extra parameters manually to **Agent only**:
 
 ```text
---cap-add=SYS_ADMIN
---device=/dev/fuse
+--cap-add=SYS_ADMIN --device=/dev/fuse
 ```
 
-Control must not receive these permissions or storage mappings.
+Treat this as an explicit privilege expansion. Remove those parameters again if the mounted-source feature is no longer used. Never add them to NexusBackup-Control.
 
 ## Install order
 
