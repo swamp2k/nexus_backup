@@ -7,11 +7,13 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
 type apiClient struct {
 	baseURL string
+	mu      sync.RWMutex
 	token   string
 	http    *http.Client
 }
@@ -28,7 +30,8 @@ type deviceReportResponse struct {
 	Device struct {
 		ID string `json:"id"`
 	} `json:"device"`
-	NextReportSeconds int `json:"nextReportSeconds"`
+	NextReportSeconds int    `json:"nextReportSeconds"`
+	DeviceToken       string `json:"deviceToken,omitempty"`
 }
 
 type workstationStatus struct {
@@ -43,14 +46,14 @@ type workstationStatus struct {
 }
 
 type workstationRun struct {
-	ID              string            `json:"id"`
-	DeviceID        string            `json:"deviceId"`
-	State           string            `json:"state"`
-	LeaseToken      string            `json:"leaseToken"`
-	LeaseExpiresAt  string            `json:"leaseExpiresAt"`
-	SourcePaths     []string          `json:"sourcePaths"`
-	ExcludePatterns []string          `json:"excludePatterns"`
-	Retention       retentionPolicy   `json:"retention"`
+	ID              string          `json:"id"`
+	DeviceID        string          `json:"deviceId"`
+	State           string          `json:"state"`
+	LeaseToken      string          `json:"leaseToken"`
+	LeaseExpiresAt  string          `json:"leaseExpiresAt"`
+	SourcePaths     []string        `json:"sourcePaths"`
+	ExcludePatterns []string        `json:"excludePatterns"`
+	Retention       retentionPolicy `json:"retention"`
 }
 
 type retentionPolicy struct {
@@ -80,6 +83,18 @@ func newAPIClient(baseURL, token string) *apiClient {
 		token:   token,
 		http:    &http.Client{Timeout: 45 * time.Second},
 	}
+}
+
+func (c *apiClient) setToken(token string) {
+	c.mu.Lock()
+	c.token = token
+	c.mu.Unlock()
+}
+
+func (c *apiClient) currentToken() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.token
 }
 
 func (c *apiClient) reportDevice(report deviceReport) (deviceReportResponse, error) {
@@ -130,7 +145,7 @@ func (c *apiClient) doJSON(method, path string, body any, out any) error {
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Authorization", "Bearer "+c.currentToken())
 	req.Header.Set("Accept", "application/json")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")

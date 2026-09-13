@@ -25,7 +25,7 @@ func TestAPIClientUsesBearerAndDeviceReportShape(t *testing.T) {
 		}
 		seen = true
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"device":{"id":"device-1"},"nextReportSeconds":60}`))
+		_, _ = w.Write([]byte(`{"device":{"id":"device-1"},"nextReportSeconds":60,"deviceToken":"nxbdev_rotated-token-abcdefghijklmnopqrstuvwxyz"}`))
 	}))
 	defer server.Close()
 
@@ -36,6 +36,25 @@ func TestAPIClientUsesBearerAndDeviceReportShape(t *testing.T) {
 	}
 	if !seen || response.Device.ID != "device-1" {
 		t.Fatalf("response = %#v", response)
+	}
+	if response.DeviceToken != "nxbdev_rotated-token-abcdefghijklmnopqrstuvwxyz" {
+		t.Fatalf("device token = %q", response.DeviceToken)
+	}
+}
+
+func TestAPIClientCanRotateBearerToken(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer nxbdev_rotated-token-abcdefghijklmnopqrstuvwxyz" {
+			t.Fatalf("authorization = %q", got)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := newAPIClient(server.URL, "nxbdev_bootstrap-token-1234567890")
+	client.setToken("nxbdev_rotated-token-abcdefghijklmnopqrstuvwxyz")
+	if err := client.reportWorkstationStatus(workstationStatus{RepositoryConfigured: false, AgentState: "needs-storage"}); err != nil {
+		t.Fatal(err)
 	}
 }
 
