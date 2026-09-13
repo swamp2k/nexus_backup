@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func recoveryTestConfig(t *testing.T, scriptBody string) (config, string) {
@@ -66,7 +68,7 @@ func TestListRecoverySnapshotsUsesPlanTagAndBoundsMetadata(t *testing.T) {
 [{"id":"abcdef1234567890","short_id":"abcdef12","time":"2026-09-13T08:00:00Z","hostname":"BALDER-PC","paths":["C:\\\\Users\\\\Balder"],"tags":["nexus-workstation:device-1"]}]
 JSON`)
 
-	snapshots, err := listRecoverySnapshots(cfg, "device-1")
+	snapshots, err := listRecoverySnapshots(t.Context(), cfg, "device-1")
 	if err != nil { t.Fatalf("list snapshots: %v", err) }
 	if len(snapshots) != 1 || snapshots[0].ID != "abcdef1234567890" || snapshots[0].Hostname != "BALDER-PC" {
 		t.Fatalf("unexpected snapshots: %#v", snapshots)
@@ -88,7 +90,7 @@ func TestBrowseRecoverySnapshotIsNonRecursiveAndSortsDirectoriesFirst(t *testing
 {"struct_type":"node","path":"/C/Users/Balder/Documents","name":"Documents","type":"dir","mtime":"2026-09-13T07:00:00Z"}
 JSON`)
 
-	result, err := browseRecoverySnapshot(cfg, "ABCDEF1234567890", "/C/Users/Balder")
+	result, err := browseRecoverySnapshot(t.Context(), cfg, "ABCDEF1234567890", "/C/Users/Balder")
 	if err != nil { t.Fatalf("browse: %v", err) }
 	if result.SnapshotID != "abcdef1234567890" || len(result.Entries) != 2 {
 		t.Fatalf("unexpected browse result: %#v", result)
@@ -108,7 +110,7 @@ func TestPreviewRecoveryRestoreHardCodesDryRunAndVerbatimInclude(t *testing.T) {
 	cfg, logPath := recoveryTestConfig(t, `printf '%s\n' 'restored /C/Users/Balder/[draft].txt' 'updated /C/Users/Balder/file.txt' 'unchanged /C/Users/Balder/old.txt'`)
 	root := filepath.Join(t.TempDir(), "restores")
 	include := "/C/Users/Balder/[draft].txt"
-	result := previewRecoveryRestore(cfg, root, "restore-1", "abcdef1234567890", include)
+	result := previewRecoveryRestore(t.Context(), cfg, root, "restore-1", "abcdef1234567890", include)
 	if result.Err != nil { t.Fatalf("preview: %v", result.Err) }
 	if !result.DryRun || result.Restored != 1 || result.Updated != 1 || result.Unchanged != 1 {
 		t.Fatalf("unexpected preview: %#v", result)
@@ -124,7 +126,7 @@ func TestPreviewRecoveryRestoreHardCodesDryRunAndVerbatimInclude(t *testing.T) {
 func TestExecuteRecoveryRestoreIsStagingOnlyAndNeverDelete(t *testing.T) {
 	cfg, logPath := recoveryTestConfig(t, `printf '%s\n' 'restored /C/Users/Balder/file.txt'`)
 	root := filepath.Join(t.TempDir(), "restores")
-	result := executeRecoveryRestore(cfg, root, "restore-2", "abcdef1234567890", "")
+	result := executeRecoveryRestore(t.Context(), cfg, root, "restore-2", "abcdef1234567890", "")
 	if result.Err != nil { t.Fatalf("restore: %v", result.Err) }
 	if result.DryRun { t.Fatal("write restore unexpectedly marked dry-run") }
 	args := readRecoveryArgs(t, logPath)
@@ -141,12 +143,36 @@ func TestExecuteRecoveryRestoreRefusesExistingTarget(t *testing.T) {
 	if err := os.MkdirAll(target, 0o700); err != nil { t.Fatal(err) }
 	_ = os.Remove(logPath)
 
-	result := executeRecoveryRestore(cfg, root, "restore-3", "abcdef1234567890", "")
+	result := executeRecoveryRestore(t.Context(), cfg, root, "restore-3", "abcdef1234567890", "")
 	if result.Err == nil || !strings.Contains(result.Err.Error(), "already exists") {
 		t.Fatalf("expected existing-target refusal, got %#v", result)
 	}
 	if _, err := os.Stat(logPath); !os.IsNotExist(err) {
 		t.Fatalf("restore command should not have run, stat err=%v", err)
+	}
+}
+
+func TestRunRestoreCommandKillsResticAndReportsCancelledOnContextCancellation(t *testing.T) {
+	resticPath, env, args := helperProcessArgs("sleep")
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan restoreResult, 1)
+	started := time.Now()
+	go func() { done <- runRestoreCommand(ctx, resticPath, env, args, t.TempDir(), false) }()
+
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+
+	select {
+	case result := <-done:
+		if !result.Cancelled || result.Err == nil {
+			t.Fatalf("expected a cancelled restore result, got %#v", result)
+		}
+		if elapsed := time.Since(started); elapsed >= 5*time.Second {
+			t.Fatalf("runRestoreCommand took %v; restic does not appear to have been killed on cancellation", elapsed)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("runRestoreCommand did not return after its context was cancelled")
 	}
 }
 

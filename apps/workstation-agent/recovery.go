@@ -82,10 +82,11 @@ type restoreResult struct {
 	Unchanged            int64    `json:"unchanged"`
 	ChangedLogs          []string `json:"changedLogs,omitempty"`
 	ChangedLogsTruncated bool     `json:"changedLogsTruncated"`
+	Cancelled            bool     `json:"-"`
 	Err                  error    `json:"-"`
 }
 
-func listRecoverySnapshots(cfg config, deviceID string) ([]recoverySnapshot, error) {
+func listRecoverySnapshots(parent context.Context, cfg config, deviceID string) ([]recoverySnapshot, error) {
 	deviceID = strings.TrimSpace(deviceID)
 	if deviceID == "" || strings.ContainsAny(deviceID, "\r\n\x00") {
 		return nil, errors.New("device id is invalid")
@@ -98,7 +99,7 @@ func listRecoverySnapshots(cfg config, deviceID string) ([]recoverySnapshot, err
 		return nil, redactBackupError(cfg, err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(parent, 2*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, cfg.ResticPath,
 		"snapshots", "--json", "--latest", fmt.Sprint(maxRecoverySnapshots), "--group-by", "", "--tag", "nexus-workstation:"+deviceID,
@@ -153,7 +154,7 @@ func listRecoverySnapshots(cfg config, deviceID string) ([]recoverySnapshot, err
 	return result, nil
 }
 
-func browseRecoverySnapshot(cfg config, snapshotID, snapshotPath string) (browseResult, error) {
+func browseRecoverySnapshot(parent context.Context, cfg config, snapshotID, snapshotPath string) (browseResult, error) {
 	id, err := validateSnapshotID(snapshotID)
 	if err != nil {
 		return browseResult{}, err
@@ -170,7 +171,7 @@ func browseRecoverySnapshot(cfg config, snapshotID, snapshotPath string) (browse
 		return browseResult{}, redactBackupError(cfg, err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(parent, 2*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, cfg.ResticPath, "ls", "--json", id, selectedPath)
 	cmd.Env = env
@@ -240,15 +241,15 @@ func browseRecoverySnapshot(cfg config, snapshotID, snapshotPath string) (browse
 	return result, nil
 }
 
-func previewRecoveryRestore(cfg config, restoreRoot, runID, snapshotID, includePath string) restoreResult {
-	return runRecoveryRestore(cfg, restoreRoot, runID, snapshotID, includePath, true)
+func previewRecoveryRestore(ctx context.Context, cfg config, restoreRoot, runID, snapshotID, includePath string) restoreResult {
+	return runRecoveryRestore(ctx, cfg, restoreRoot, runID, snapshotID, includePath, true)
 }
 
-func executeRecoveryRestore(cfg config, restoreRoot, runID, snapshotID, includePath string) restoreResult {
-	return runRecoveryRestore(cfg, restoreRoot, runID, snapshotID, includePath, false)
+func executeRecoveryRestore(ctx context.Context, cfg config, restoreRoot, runID, snapshotID, includePath string) restoreResult {
+	return runRecoveryRestore(ctx, cfg, restoreRoot, runID, snapshotID, includePath, false)
 }
 
-func runRecoveryRestore(cfg config, restoreRoot, runID, snapshotID, includePath string, dryRun bool) restoreResult {
+func runRecoveryRestore(ctx context.Context, cfg config, restoreRoot, runID, snapshotID, includePath string, dryRun bool) restoreResult {
 	started := restoreResult{DryRun: dryRun}
 	id, err := validateSnapshotID(snapshotID)
 	if err != nil {
@@ -300,16 +301,16 @@ func runRecoveryRestore(cfg config, restoreRoot, runID, snapshotID, includePath 
 	if selectedPath != "" {
 		args = append(args, "--include", selectedPath)
 	}
-	result := runRestoreCommand(cfg.ResticPath, env, args, target, dryRun)
+	result := runRestoreCommand(ctx, cfg.ResticPath, env, args, target, dryRun)
 	if result.Err != nil {
 		result.Err = redactBackupError(cfg, result.Err)
 	}
 	return result
 }
 
-func runRestoreCommand(resticPath string, env, args []string, target string, dryRun bool) restoreResult {
+func runRestoreCommand(ctx context.Context, resticPath string, env, args []string, target string, dryRun bool) restoreResult {
 	result := restoreResult{Target: target, DryRun: dryRun, ChangedLogs: make([]string, 0)}
-	cmd := exec.Command(resticPath, args...)
+	cmd := exec.CommandContext(ctx, resticPath, args...)
 	cmd.Env = env
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -373,6 +374,15 @@ func runRestoreCommand(resticPath string, env, args []string, target string, dry
 		}
 	}
 	waitErr := cmd.Wait()
+	if ctx.Err() != nil {
+		// Killed intentionally on an explicit stale-lease rejection. Whatever
+		// restic wrote under target is an orphaned staging directory, not a
+		// tracked restore: the controller has already failed this run and it
+		// is never auto-retried, so it can only be resumed as a fresh request.
+		result.Cancelled = true
+		result.Err = fmt.Errorf("restic restore cancelled: %w", ctx.Err())
+		return result
+	}
 	if waitErr != nil {
 		result.Err = fmt.Errorf("restic restore: %s", commandErrorText(stderrText.String(), waitErr))
 	}

@@ -24,6 +24,7 @@ type backupResult struct {
 	DataAdded       int64
 	Duration        time.Duration
 	Partial         bool
+	Cancelled       bool
 	Err             error
 }
 
@@ -43,7 +44,7 @@ type resticJSON struct {
 	Error           string   `json:"error"`
 }
 
-func executeResticBackup(cfg config, run workstationRun, report func(backupProgress)) backupResult {
+func executeResticBackup(ctx context.Context, cfg config, run workstationRun, report func(backupProgress)) backupResult {
 	started := time.Now()
 	if err := validateRun(run); err != nil {
 		return backupResult{Duration: time.Since(started), Err: err}
@@ -70,10 +71,20 @@ func executeResticBackup(cfg config, run workstationRun, report func(backupProgr
 	}
 	args = append(args, run.SourcePaths...)
 
-	result := runBackupCommand(cfg.ResticPath, env, args, report)
+	result := runBackupCommand(ctx, cfg.ResticPath, env, args, report)
 	result.Duration = time.Since(started)
+	if result.Cancelled {
+		return result
+	}
 	if result.Err != nil {
 		result.Err = redactBackupError(cfg, result.Err)
+		return result
+	}
+	// A stale lease can still arrive between the backup finishing and retention
+	// running; skip retention rather than risk pruning under a revoked lease.
+	if ctx.Err() != nil {
+		result.Cancelled = true
+		result.Err = fmt.Errorf("run cancelled: %w", ctx.Err())
 		return result
 	}
 	if err := applyRetention(cfg.ResticPath, env, tag, run.Retention); err != nil {
@@ -82,9 +93,7 @@ func executeResticBackup(cfg config, run workstationRun, report func(backupProgr
 	return result
 }
 
-func runBackupCommand(resticPath string, env, args []string, report func(backupProgress)) backupResult {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+func runBackupCommand(ctx context.Context, resticPath string, env, args []string, report func(backupProgress)) backupResult {
 	cmd := exec.CommandContext(ctx, resticPath, args...)
 	cmd.Env = env
 	stdout, err := cmd.StdoutPipe()
@@ -151,6 +160,13 @@ func runBackupCommand(resticPath string, env, args []string, report func(backupP
 	}
 	waitErr := cmd.Wait()
 	stderrText := <-stderrDone
+	if ctx.Err() != nil {
+		// The context was cancelled (an explicit stale-lease rejection, not a
+		// timeout we set ourselves), so restic was killed intentionally.
+		// Restic guarantees the repository stays consistent when killed
+		// mid-backup; it simply never wrote the missing snapshot.
+		return backupResult{Cancelled: true, Err: fmt.Errorf("restic backup cancelled: %w", ctx.Err())}
+	}
 	if parseErr != nil {
 		return backupResult{Err: fmt.Errorf("read restic output: %w", parseErr)}
 	}

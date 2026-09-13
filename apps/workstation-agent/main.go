@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -210,6 +211,23 @@ func (a *agent) pollOnce() error {
 
 func (a *agent) executeBackup(run workstationRun) {
 	log.Printf("workstation backup run %s starting with %d source path(s)", run.ID, len(run.SourcePaths))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// A heartbeat failure alone must never stop local work: it may just be a
+	// transient network blip. Only an explicit stale-lease rejection (409)
+	// means the controller has moved on and this run must stop, so it cannot
+	// keep producing a backup/snapshot the controller no longer tracks.
+	onLeaseResponse := func(err error) {
+		if err == nil {
+			return
+		}
+		if isStaleLease(err) {
+			log.Printf("run %s lease rejected as stale; cancelling local restic process", run.ID)
+			cancel()
+		}
+	}
+
 	heartbeatStop := make(chan struct{})
 	heartbeatDone := make(chan struct{})
 	go func() {
@@ -221,17 +239,21 @@ func (a *agent) executeBackup(run workstationRun) {
 			case <-heartbeatStop:
 				return
 			case <-ticker.C:
-				if err := a.client.reportProgress(run.ID, run.LeaseToken, backupProgress{Phase: "running"}); err != nil {
+				err := a.client.reportProgress(run.ID, run.LeaseToken, backupProgress{Phase: "running"})
+				if err != nil {
 					log.Printf("run %s lease heartbeat failed: %v", run.ID, err)
 				}
+				onLeaseResponse(err)
 			}
 		}
 	}()
 
-	result := executeResticBackup(a.cfg, run, func(progress backupProgress) {
-		if err := a.client.reportProgress(run.ID, run.LeaseToken, progress); err != nil {
+	result := executeResticBackup(ctx, a.cfg, run, func(progress backupProgress) {
+		err := a.client.reportProgress(run.ID, run.LeaseToken, progress)
+		if err != nil {
 			log.Printf("run %s progress report failed: %v", run.ID, err)
 		}
+		onLeaseResponse(err)
 	})
 	close(heartbeatStop)
 	<-heartbeatDone
@@ -241,7 +263,9 @@ func (a *agent) executeBackup(run workstationRun) {
 	if result.Partial {
 		status = "partial"
 	}
-	if result.Err != nil && !result.Partial {
+	if result.Cancelled {
+		status = "failure"
+	} else if result.Err != nil && !result.Partial {
 		status = "failure"
 	}
 	payload := map[string]any{

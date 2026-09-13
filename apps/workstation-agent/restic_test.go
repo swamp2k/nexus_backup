@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 )
 
 func TestValidateRunRejectsRelativeSource(t *testing.T) {
@@ -40,7 +42,7 @@ exit 0
 		t.Fatal(err)
 	}
 	var reports []backupProgress
-	result := runBackupCommand(script, os.Environ(), []string{"backup"}, func(progress backupProgress) { reports = append(reports, progress) })
+	result := runBackupCommand(t.Context(), script, os.Environ(), []string{"backup"}, func(progress backupProgress) { reports = append(reports, progress) })
 	if result.Err != nil {
 		t.Fatalf("unexpected error: %v", result.Err)
 	}
@@ -49,6 +51,30 @@ exit 0
 	}
 	if len(reports) == 0 || reports[0].Percent != 50 || reports[0].BytesDone != 50 {
 		t.Fatalf("unexpected progress: %#v", reports)
+	}
+}
+
+func TestRunBackupCommandKillsResticAndReportsCancelledOnContextCancellation(t *testing.T) {
+	resticPath, env, args := helperProcessArgs("sleep")
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan backupResult, 1)
+	started := time.Now()
+	go func() { done <- runBackupCommand(ctx, resticPath, env, args, nil) }()
+
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+
+	select {
+	case result := <-done:
+		if !result.Cancelled || result.Err == nil {
+			t.Fatalf("expected a cancelled result, got %#v", result)
+		}
+		if elapsed := time.Since(started); elapsed >= 5*time.Second {
+			t.Fatalf("runBackupCommand took %v; restic does not appear to have been killed on cancellation", elapsed)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("runBackupCommand did not return after its context was cancelled")
 	}
 }
 
@@ -61,7 +87,7 @@ func TestRunBackupCommandMapsExitThreeToPartial(t *testing.T) {
 	if err := os.WriteFile(script, []byte("#!/bin/sh\necho 'some files unreadable' >&2\nexit 3\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	result := runBackupCommand(script, os.Environ(), []string{"backup"}, nil)
+	result := runBackupCommand(t.Context(), script, os.Environ(), []string{"backup"}, nil)
 	if !result.Partial || result.Err == nil {
 		t.Fatalf("expected partial result, got %#v", result)
 	}

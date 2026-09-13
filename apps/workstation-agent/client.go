@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -164,11 +165,33 @@ func (c *apiClient) doJSON(method, path string, body any, out any) error {
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
-		return fmt.Errorf("%s %s returned %d: %s", method, path, resp.StatusCode, strings.TrimSpace(string(data)))
+		return &apiError{Method: method, Path: path, StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(data))}
 	}
 	if out == nil {
 		_, _ = io.Copy(io.Discard, resp.Body)
 		return nil
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+// apiError carries the HTTP status code of a rejected control-plane request so
+// callers can distinguish an explicit rejection (e.g. a stale lease) from a
+// transient network failure, which arrives as a plain non-apiError error.
+type apiError struct {
+	Method     string
+	Path       string
+	StatusCode int
+	Body       string
+}
+
+func (e *apiError) Error() string {
+	return fmt.Sprintf("%s %s returned %d: %s", e.Method, e.Path, e.StatusCode, e.Body)
+}
+
+// isStaleLease reports whether err is the control plane explicitly rejecting a
+// run's lease token (HTTP 409) rather than a transient communication failure.
+// Only an explicit rejection should stop local work; network errors must not.
+func isStaleLease(err error) bool {
+	var apiErr *apiError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusConflict
 }
