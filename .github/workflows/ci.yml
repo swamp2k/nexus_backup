@@ -43,9 +43,14 @@ jobs:
           grep -F '$serverUrl/workstation/restic.exe' "$installer"
           grep -F 'NEXUS_BACKUP_REST_USERNAME' "$installer"
           grep -F 'NEXUS_BACKUP_REST_PASSWORD' "$installer"
+          grep -F 'NEXUS_BACKUP_REPOSITORY_CA_B64' "$installer"
           grep -F 'NEXUS_BACKUP_REPOSITORY_CA_SHA256' "$installer"
-          grep -F 'Pinned asset checksum mismatch' "$installer"
+          grep -F 'Pinned Repository CA checksum mismatch' "$installer"
           grep -F 'Invoke-PinnedRepositoryProvision' "$installer"
+          if grep -Fq 'NEXUS_BACKUP_REPOSITORY_CA_URL' "$installer"; then
+            echo 'installer must not depend on a Repository HTTP CA bootstrap URL' >&2
+            exit 1
+          fi
           if grep -Fq 'api.github.com/repos/swamp2k/nexus_backup/releases/latest' "$installer"; then
             echo 'installer must not depend on GitHub Releases' >&2
             exit 1
@@ -66,7 +71,6 @@ jobs:
         shell: bash
         run: |
           python - <<'PY'
-          import os
           import xml.etree.ElementTree as ET
           from pathlib import Path, PurePosixPath
 
@@ -122,7 +126,7 @@ jobs:
           assert agent_vars["NEXUS_BACKUP_AGENT_TOKEN_FILE"]["Default"] == "/run/nexus-backup/agent-token"
           assert repository_vars["NEXUS_BACKUP_REPOSITORY_HOST"]["Required"] == "true"
           assert repository_vars["NEXUS_BACKUP_REPOSITORY_PORT"]["Default"] == "8000"
-          assert repository_vars["NEXUS_BACKUP_REPOSITORY_PUBLIC_PORT"]["Default"] == "8001"
+          assert "NEXUS_BACKUP_REPOSITORY_PUBLIC_PORT" not in repository_vars
 
           print("Unraid templates are well-formed and shared-path/security contracts match")
           PY
@@ -200,19 +204,20 @@ jobs:
           cleanup() {
             docker rm -f nexus-repository-ci >/dev/null 2>&1 || true
             docker volume rm nexus-repository-config-ci nexus-repository-data-ci >/dev/null 2>&1 || true
+            rm -f /tmp/repository-ca.pem /tmp/restic-password
           }
           trap cleanup EXIT
           docker run -d --name nexus-repository-ci \
             -e NEXUS_BACKUP_REPOSITORY_HOST=127.0.0.1 \
             -e NEXUS_BACKUP_REPOSITORY_INITIAL_USER=ci-user \
-            -p 18000:8000 -p 18001:8001 \
+            -p 18000:8000 \
             -v nexus-repository-config-ci:/config \
             -v nexus-repository-data-ci:/data \
             nexus-backup-repository:ci >/dev/null
 
           ready=0
           for _ in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:18001/repository-ca.pem -o /tmp/repository-ca.pem; then
+            if curl -ksS -o /dev/null https://127.0.0.1:18000/; then
               ready=1
               break
             fi
@@ -231,12 +236,21 @@ jobs:
             exit 1
           fi
 
-          test -s /tmp/repository-ca.pem
-          actual_ca_sha="$(sha256sum /tmp/repository-ca.pem | awk '{print $1}')"
           helper="$(docker exec nexus-repository-ci nexus-repository-client ci-user main)"
           expected_ca_sha="$(printf '%s\n' "$helper" | sed -n "s/.*NEXUS_BACKUP_REPOSITORY_CA_SHA256='\([^']*\)'.*/\1/p")"
+          ca_b64="$(printf '%s\n' "$helper" | sed -n "s/.*NEXUS_BACKUP_REPOSITORY_CA_B64='\([^']*\)'.*/\1/p")"
           transport_password="$(docker exec nexus-repository-ci cat /config/clients/ci-user.password)"
+          test -n "$ca_b64"
+          test "$expected_ca_sha" != ""
+          if printf '%s\n' "$helper" | grep -Fq 'NEXUS_BACKUP_REPOSITORY_CA_URL'; then
+            echo 'Repository helper must not emit an HTTP CA bootstrap URL' >&2
+            exit 1
+          fi
+          printf '%s' "$ca_b64" | base64 -d > /tmp/repository-ca.pem
+          actual_ca_sha="$(sha256sum /tmp/repository-ca.pem | awk '{print $1}')"
           test "$actual_ca_sha" = "$expected_ca_sha"
+          docker exec nexus-repository-ci sha256sum /config/repository-tls.crt | grep -F "$expected_ca_sha"
+
           printf '%s\n' 'ci-restic-encryption-password' > /tmp/restic-password
           docker run --rm --network host --entrypoint restic \
             -e RESTIC_REPOSITORY=rest:https://127.0.0.1:18000/ci-user/main \
@@ -280,6 +294,10 @@ jobs:
           grep -F "image: ghcr.io/swamp2k/nexus-backup-control:$CI_VERSION" /tmp/compose.yml
           grep -F "image: ghcr.io/swamp2k/nexus-backup-agent:$CI_VERSION" /tmp/compose.yml
           grep -F "image: ghcr.io/swamp2k/nexus-backup-repository:$CI_VERSION" /tmp/compose.yml
+          if grep -Fq '8001' /tmp/compose.yml; then
+            echo 'default compose must expose only the Repository TLS port, not a CA bootstrap port' >&2
+            exit 1
+          fi
           if grep -Eq 'SYS_ADMIN|/dev/fuse' /tmp/compose.yml; then
             echo 'default compose must not grant FUSE/SYS_ADMIN' >&2
             exit 1
