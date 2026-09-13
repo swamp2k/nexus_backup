@@ -4,19 +4,28 @@ import { noopExecutionEventSink } from "./execution-events.js";
 import type { JobExecutionResult, JobExecutor } from "./executor.js";
 import type { CommandRunner } from "./process-runner.js";
 import { ToolExitError } from "./process-runner.js";
+import { prepareRestoreStagingTarget } from "./restore-staging.js";
 import type { AgentRuntimeConfig, LocalResticRepository } from "./runtime-config.js";
 
 const MAX_CHANGED_LOGS = 500;
+type PrepareStagingTarget = (root: string, jobId: string, attempt: number) => Promise<string>;
 
 export class ResticRestoreExecutor implements JobExecutor {
   readonly #config: AgentRuntimeConfig;
   readonly #runner: CommandRunner;
   readonly #events: ExecutionEventSink;
+  readonly #prepareStagingTarget: PrepareStagingTarget;
 
-  constructor(config: AgentRuntimeConfig, runner: CommandRunner, events: ExecutionEventSink = noopExecutionEventSink) {
+  constructor(
+    config: AgentRuntimeConfig,
+    runner: CommandRunner,
+    events: ExecutionEventSink = noopExecutionEventSink,
+    prepareStagingTarget: PrepareStagingTarget = prepareRestoreStagingTarget,
+  ) {
     this.#config = config;
     this.#runner = runner;
     this.#events = events;
+    this.#prepareStagingTarget = prepareStagingTarget;
   }
 
   async execute(job: BackupJob, signal: AbortSignal): Promise<JobExecutionResult> {
@@ -24,8 +33,8 @@ export class ResticRestoreExecutor implements JobExecutor {
     const repository = this.#config.resticRepository(payload.repositoryId);
     const target = this.#config.restoreTarget(payload.targetId);
     if (target.allowWrite !== true) throw new Error(`Restore target is not write-enabled: ${payload.targetId}`);
-    const overwrite = target.overwrite ?? "never";
-    const args = ["restore", payload.snapshotId, "--target", target.path, "--verbose=2", "--overwrite", overwrite];
+    const stagingTarget = await this.#prepareStagingTarget(target.path, job.id, job.attempt);
+    const args = ["restore", payload.snapshotId, "--target", stagingTarget, "--verbose=2", "--overwrite", "never"];
     if (payload.path && payload.path !== "/") args.push("--include", payload.path);
 
     let restored = 0;
@@ -33,7 +42,7 @@ export class ResticRestoreExecutor implements JobExecutor {
     let unchanged = 0;
     let changedLogs = 0;
     let changedLogsTruncated = false;
-    this.#events.emit({ type: "log", tool: "restic", stream: "stdout", message: `Restore started: snapshot ${payload.snapshotId.slice(0, 8)} → target ${payload.targetId}` });
+    this.#events.emit({ type: "log", tool: "restic", stream: "stdout", message: `Restore started: snapshot ${payload.snapshotId.slice(0, 8)} → fresh staging target ${payload.targetId}` });
 
     const result = await this.#runner.run({
       executable: this.#config.tools.resticBinary ?? "restic",
@@ -70,7 +79,8 @@ export class ResticRestoreExecutor implements JobExecutor {
         snapshotId: payload.snapshotId,
         targetId: payload.targetId,
         ...(payload.path ? { path: payload.path } : {}),
-        overwrite,
+        overwrite: "never",
+        staging: true,
         dryRun: false,
         restored,
         updated,
