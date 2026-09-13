@@ -297,8 +297,11 @@ Start **Run now** and wait until Nexus shows active backup progress. Then, from 
 $controlIp = '<Unraid/Nexus Control IP>'
 New-NetFirewallRule -DisplayName 'NexusBackup-Acceptance-Block-Control' `
     -Direction Outbound -Action Block -Protocol TCP -RemoteAddress $controlIp -RemotePort 8787
-Start-Sleep -Seconds 15
-Remove-NetFirewallRule -DisplayName 'NexusBackup-Acceptance-Block-Control'
+try {
+    Start-Sleep -Seconds 15
+} finally {
+    Remove-NetFirewallRule -DisplayName 'NexusBackup-Acceptance-Block-Control' -ErrorAction SilentlyContinue
+}
 ```
 
 Pass conditions:
@@ -307,7 +310,7 @@ Pass conditions:
 - after connectivity returns, the run either completes/ACKs correctly or reports a truthful failure — never a fabricated success;
 - the previously known good success remains available if this run fails.
 
-Remove the firewall rule even if the test itself errors. Confirm with:
+Confirm cleanup with:
 
 ```powershell
 Get-NetFirewallRule -DisplayName 'NexusBackup-Acceptance-Block-Control' -ErrorAction SilentlyContinue
@@ -365,12 +368,12 @@ Never manually copy the interrupted staging tree into live data.
 After repository/service connectivity is restored and all agents are online:
 
 1. run repository integrity again and require **Integrity OK**;
-2. run one final normal backup of the current `NexusBackup-Test` source;
-3. perform a final staging restore;
-4. regenerate/update the reference manifest if the source changed during resilience testing;
-5. repeat the byte/hash verification.
+2. if `NexusBackup-Test` changed during resilience testing, regenerate/update the independent reference manifest **before** the final backup;
+3. run one final normal backup of that exact current `NexusBackup-Test` source;
+4. perform a final staging restore from that final snapshot;
+5. repeat the byte/hash verification against the pre-backup reference manifest.
 
-Acceptance ends on a known-good restore, not merely on successful failure injection.
+Do not edit the source or reference manifest between the final backup and hash comparison. Acceptance ends on a known-good restore, not merely on successful failure injection.
 
 ## 18. Evidence to retain
 
