@@ -32,7 +32,7 @@ jobs:
         env:
           INPUT_VERSION: ${{ inputs.version }}
           INPUT_EXPECTED_SHA: ${{ inputs.expected_sha }}
-        run: .github/scripts/resolve-release-version.sh
+        run: bash .github/scripts/resolve-release-version.sh
 
   publish:
     needs: version
