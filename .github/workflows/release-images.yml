@@ -4,6 +4,16 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Prerelease image version, e.g. 0.7.0-rc.1"
+        required: true
+        type: string
+      expected_sha:
+        description: "Exact 40-character main commit SHA to publish"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -18,17 +28,48 @@ jobs:
     steps:
       - id: version
         shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_EXPECTED_SHA: ${{ inputs.expected_sha }}
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
+
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            version="$INPUT_VERSION"
+            expected_sha="${INPUT_EXPECTED_SHA,,}"
+            actual_sha="${GITHUB_SHA,,}"
+
+            if [[ "$GITHUB_REF_NAME" != "main" ]]; then
+              echo "Manual acceptance publishing is allowed only from main; selected ref is $GITHUB_REF_NAME" >&2
+              exit 1
+            fi
+            if [[ ! "$expected_sha" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "expected_sha must be exactly 40 hexadecimal characters" >&2
+              exit 1
+            fi
+            if [[ "$actual_sha" != "$expected_sha" ]]; then
+              echo "Selected main SHA $actual_sha does not match expected_sha $expected_sha" >&2
+              exit 1
+            fi
+            if [[ "$version" != *-* ]]; then
+              echo "Manual publishing is acceptance-only and requires a prerelease version such as 0.7.0-rc.1" >&2
+              exit 1
+            fi
+            stable=false
+          else
+            version="${GITHUB_REF_NAME#v}"
+            stable=true
+            if [[ "$version" == *-* ]]; then stable=false; fi
+          fi
+
           if [[ ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ ]]; then
-            echo "Tag must be SemVer, for example v0.7.0 or v0.7.0-rc.1" >&2
+            echo "Version must be SemVer, for example 0.7.0 or 0.7.0-rc.1" >&2
             exit 1
           fi
-          stable=true
-          if [[ "$version" == *-* ]]; then stable=false; fi
+
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "stable=$stable" >> "$GITHUB_OUTPUT"
+          echo "Publishing Nexus Backup $version from $GITHUB_SHA (stable=$stable)"
 
   publish:
     needs: version
@@ -70,6 +111,7 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
 
       - name: Build and push ${{ matrix.name }}
+        id: build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
@@ -81,7 +123,18 @@ jobs:
             NEXUS_BACKUP_VERSION=${{ needs.version.outputs.version }}
             NEXUS_BACKUP_REVISION=${{ github.sha }}
 
+      - name: Record immutable acceptance identity
+        shell: bash
+        run: |
+          {
+            echo "### ${{ matrix.name }}"
+            echo "- tag: \`${{ needs.version.outputs.version }}\`"
+            echo "- source: \`${GITHUB_SHA}\`"
+            echo "- digest: \`${{ steps.build.outputs.digest }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   workstation:
+    if: github.event_name == 'push'
     needs: version
     runs-on: ubuntu-latest
     steps:
