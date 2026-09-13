@@ -55,7 +55,7 @@ test("snapshot browser uses non-recursive read-only restic ls",async()=>{
   assert.equal(browse.truncated,false);
 });
 
-test("restore preview is hard-coded dry-run and resolves target path locally",async()=>{
+test("restore preview is hard-coded dry-run against a run-specific staging path",async()=>{
   const runner=new SequenceRunner([{stdout:[
     "restored  /data/new.txt with size 10 B",
     "updated   /data/changed.txt with size 20 B",
@@ -76,7 +76,7 @@ test("restore preview is hard-coded dry-run and resolves target path locally",as
   assert.equal(args[0],"restore");
   assert.ok(args.includes("--dry-run"));
   assert.ok(args.includes("--verbose=2"));
-  assert.deepEqual(args.slice(args.indexOf("--target"),args.indexOf("--target")+2),["--target","/restore"]);
+  assert.deepEqual(args.slice(args.indexOf("--target"),args.indexOf("--target")+2),["--target","/restore/.nexus-backup-preview-job-restic-restore-preview-a1"]);
   assert.deepEqual(args.slice(args.indexOf("--overwrite"),args.indexOf("--overwrite")+2),["--overwrite","never"]);
   assert.deepEqual(args.slice(args.indexOf("--include"),args.indexOf("--include")+2),["--include","/data"]);
   assert.equal(args.includes("--delete"),false);
@@ -84,6 +84,8 @@ test("restore preview is hard-coded dry-run and resolves target path locally",as
   assert.ok(summary);
   assert.deepEqual({restored:summary.data.restored,updated:summary.data.updated,unchanged:summary.data.unchanged,dryRun:summary.data.dryRun},{restored:1,updated:1,unchanged:1,dryRun:true});
   assert.equal(summary.data.targetId,"restore-staging");
+  assert.equal(summary.data.overwrite,"never");
+  assert.equal(summary.data.staging,true);
   assert.equal(JSON.stringify(summary.data).includes("/restore"),false);
 });
 
