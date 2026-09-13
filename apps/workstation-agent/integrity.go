@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
 )
 
 func checkWorkstationRepository(ctx context.Context, cfg config) error {
@@ -25,7 +24,3 @@ func checkWorkstationRepository(ctx context.Context, cfg config) error {
 	}
 	return nil
 }
-
-// Keep os referenced by this file's package-level environment contract explicit
-// for gofmt/go vet when platform-specific builds prune other helpers.
-var _ = os.PathSeparator
