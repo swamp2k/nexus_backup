@@ -15,7 +15,7 @@ func checkWorkstationRepository(ctx context.Context, cfg config) error {
 	}
 	cmd := commandContextWithTree(ctx, cfg.ResticPath, "check")
 	cmd.Env = env
-	output, err := cmd.CombinedOutput()
+	output, err := combinedOutputTree(cmd)
 	if ctx.Err() != nil {
 		return redactBackupError(cfg, fmt.Errorf("restic check cancelled: %w", ctx.Err()))
 	}
