@@ -281,7 +281,13 @@ func (a *agent) executeBackup(run workstationRun) {
 		errText = result.Err.Error()
 	}
 	if err := a.client.finishRun(run.ID, run.LeaseToken, status, payload, errText); err != nil {
-		log.Printf("run %s result report failed: %v", run.ID, err)
+		// The repository already contains enough durable run metadata to
+		// reconcile a clean completed snapshot if this run is re-leased later.
+		// Do not advance local last-success/history before the controller has
+		// accepted the terminal transition, otherwise reportStatus could make
+		// Nexus advertise success for a run it still considers active/queued.
+		log.Printf("run %s result report failed; local outcome remains unacknowledged: %v", run.ID, err)
+		return
 	}
 
 	a.mu.Lock()
