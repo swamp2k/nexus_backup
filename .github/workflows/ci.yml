@@ -33,6 +33,30 @@ jobs:
       - name: Parse workstation installer
         shell: pwsh
         run: '[scriptblock]::Create((Get-Content -Raw apps/local-server/web/install.ps1)) | Out-Null'
+      - name: Validate self-contained installer contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          installer=apps/local-server/web/install.ps1
+          gateway=apps/local-server/bin/gateway.mjs
+          grep -F '$serverUrl/workstation/nexus-backup-workstation-windows-amd64.exe' "$installer"
+          grep -F '$serverUrl/workstation/restic.exe' "$installer"
+          if grep -Fq 'api.github.com/repos/swamp2k/nexus_backup/releases/latest' "$installer"; then
+            echo 'installer must not depend on GitHub Releases' >&2
+            exit 1
+          fi
+          if grep -Fq 'github.com/restic/restic/releases/download' "$installer"; then
+            echo 'installer must not download Restic from the Internet' >&2
+            exit 1
+          fi
+          for route in \
+            /workstation/nexus-backup-workstation-windows-amd64.exe \
+            /workstation/nexus-backup-workstation-windows-amd64.exe.sha256 \
+            /workstation/restic.exe \
+            /workstation/restic.exe.sha256; do
+            grep -F "[\"$route\"" "$gateway"
+          done
+          grep -F 'path.startsWith("/workstation/")' "$gateway"
       - name: Validate Unraid templates
         shell: bash
         run: |
@@ -87,6 +111,17 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build control image
         run: docker build -f Dockerfile.local --build-arg NEXUS_BACKUP_VERSION="$CI_VERSION" --build-arg NEXUS_BACKUP_REVISION="$GITHUB_SHA" -t nexus-backup-local:ci .
+      - name: Verify bundled workstation assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint sh nexus-backup-local:ci -ec '
+            cd /app/apps/local-server/web/workstation
+            test -s nexus-backup-workstation-windows-amd64.exe
+            test -s restic.exe
+            sha256sum -c nexus-backup-workstation-windows-amd64.exe.sha256
+            sha256sum -c restic.exe.sha256
+          '
       - name: Build agent image
         run: docker build -f Dockerfile.agent --build-arg NEXUS_BACKUP_VERSION="$CI_VERSION" --build-arg NEXUS_BACKUP_REVISION="$GITHUB_SHA" -t nexus-backup-agent:ci .
       - name: Verify image version metadata
