@@ -6,13 +6,13 @@ This file is the durable handoff for future ChatGPT/Codex/Claude sessions. Read 
 
 ## Product goal
 
-Nexus Backup is a self-contained, local-first backup/recovery system intended to run primarily from Docker on Unraid. Remote control may be added as an option, but the primary system must remain usable without a cloud control plane.
+Nexus Backup is a self-contained, local-first backup/recovery and transfer system intended to run primarily from Docker on Unraid. Remote control may be added as an option, but the primary system must remain usable without a cloud control plane.
 
 Existing PCWatch-backup and standalone Copyarr are fallbacks. Do not remove or modify them until their real workloads have been migrated to Nexus Backup and successfully proven, including restore/verification where relevant.
 
 ## Current milestone
 
-**M8 – workstation resilience / torture testing**
+**M8 – recovery/failure torture testing**
 
 M7 workstation recovery is merged on `main` at `05310c07ba38c35728c7f6621087754ad09a11e9`.
 
@@ -20,7 +20,7 @@ Active branch: `m8-recovery-torture`
 
 Active PR: **#18 – M8: begin workstation recovery torture testing**
 
-PR #18 remains draft until the first coherent M8 batch is green and reviewed.
+PR #18 is M8 batch 1. It should merge once the final full CI run is green. Do not grow it with the next failure-matrix batch.
 
 ## Completed through M7
 
@@ -47,12 +47,14 @@ These are not negotiable unless the architecture is explicitly redesigned and re
 - one active operation per workstation
 - interrupted/expired write restore is not automatically requeued; manual retry only
 - stale lease tokens cannot mutate a newly leased run
+- explicit stale-lease rejection cancels local leased work; transient communication/5xx failures do not
 - recovery must not overwrite successful backup-history fields
 - repository credentials stay local to the workstation/agent
+- backup payloads never pass through Nexus control plane, Cloudflare or PCWatch
 
-## M8 batch 1 findings
+## M8 batch 1 completed work
 
-Initial deterministic torture tests cover:
+Deterministic torture coverage now includes:
 
 - controller/service recreation during an active lease
 - expired workstation leases and re-leasing
@@ -60,55 +62,54 @@ Initial deterministic torture tests cover:
 - offline workstation recovery rejection
 - due backup deferral while recovery owns the workstation
 - workstation status consistency after lease recovery
+- explicit HTTP 409 lease rejection vs transient 5xx/network-like errors
+- local Restic cancellation for backup and recovery
+- descendant process-tree termination so wrapper/child processes cannot keep inherited pipes alive
+- cancellation of repository probes and retention/prune after explicit lease loss
+- recovery write cancellation remains failure/manual-retry-only
 
-Confirmed bug found and fixed on PR #18:
+Confirmed bugs found and fixed:
 
-- `recoverExpired()` requeued/failed a run but left `workstation_status.current_run_id` pointing at the dead lease. The fix clears status only if it still references the exact recovered run, so a newer run cannot be clobbered.
+1. `recoverExpired()` requeued/failed a run but left `workstation_status.current_run_id` pointing at the dead lease. It now clears status only if it still references the exact recovered run, so a newer run cannot be clobbered.
+2. `exec.CommandContext()` killed the immediate process but could leave descendants alive with inherited pipes. Cancellable Restic commands now use a process-tree abstraction: Unix process groups are killed as a unit; Windows uses `taskkill /T /F` with direct-kill fallback and bounded wait.
+3. Repository probe and `forget --prune` were outside the cancellable lease context. They are now lease-cancellable as well.
 
-The agent was also changed to distinguish an explicit stale-lease rejection (HTTP 409) from a transient communication/5xx failure. Only explicit lease loss should cancel local Restic execution.
+CI was expanded with a real `windows-latest` workstation-agent test/vet job. Windows is no longer only cross-built.
 
-## Current blocker on PR #18
+## Immediate next steps after PR #18 merge
 
-Latest known CI before the current fix attempt: run #103 failed in the Go workstation-agent tests while Node tests were 134/134 green and typecheck was green.
+Start a fresh M8 batch 2 branch/PR. Focus on state reconciliation and failure injection rather than new product features:
 
-Failure:
-
-`TestExecuteBackupCancelsResticOnExplicitStaleLease`
-
-Root cause discovered by Linux CI: cancelling `exec.CommandContext()` killed the immediate shell process, but a descendant (`sleep`) retained inherited stdout/stderr pipes. The operation therefore did not terminate promptly even though lease loss was correctly detected.
-
-Current fix in progress on PR #18:
-
-- added a small process-tree command abstraction
-- Unix commands run in their own process group and cancellation kills the whole group
-- Windows cancellation uses `taskkill /T /F` with direct process-kill fallback
-- workstation backup now uses the process-tree-aware cancellable command
-
-Do not weaken the stale-lease cancellation test to make CI green.
-
-## Immediate next steps
-
-1. Get PR #18 fully green on GitHub CI.
-2. Apply the same process-tree cancellation semantics to cancellable recovery commands, especially write restore, and add/retain regression coverage.
-3. Review the PR diff for race/state regressions and recovery-safety violations.
-4. Merge M8 batch 1 as a small coherent unit.
-5. Start M8 batch 2 rather than growing PR #18 indefinitely.
-
-Suggested M8 batch 2 focus:
-
-- agent process restart during backup/recovery
-- controller unavailable shorter/longer than lease duration
-- repository unavailable/authentication failure/lock
-- controller unreachable during finish
+- agent process restart during backup
+- agent process restart during inventory/browse/preview/write restore
+- controller unavailable shorter than lease duration
+- controller unavailable longer than lease duration
+- controller unreachable during finish after Restic completed locally
+- repository unavailable
+- repository authentication failure
+- repository locked
+- repository disappears mid-backup
+- local repository disk-full behavior where practical to simulate
 - write restore interruption/orphaned staging behavior
 - scheduler interactions with inventory/browse/preview/restore
-- last-known-success state preservation under failures
+- last-known-success state preservation under all failure cases
 
-## Real-machine acceptance still required
+Do not fix tests by weakening safety invariants or by extending leases/timeouts to hide races.
 
-Automated tests do not make workstation backup/recovery proven.
+## Product gaps to close before asking for a real acceptance test
 
-Use a disposable `NexusBackup-Test` dataset and preferably an isolated test repository. Required real-world proof includes:
+The aim is not merely green M8 tests. Before telling the user the product is ready for a real end-to-end test, also close/review these known gaps:
+
+- M8 failure matrix at a reasonable production-focused depth
+- repository integrity operation (`restic check`) distinct from read-only inventory
+- storage/repository health presentation sufficient to surface unavailable/locked/full/auth failures clearly
+- emergency recovery runbook: how to restore data if Nexus Backup itself is unavailable
+- M9 architecture/security review with high-severity findings resolved
+- deployment/install docs accurate enough to perform a fresh Unraid + Windows workstation install without chat history
+
+## Real-machine acceptance once code is ready
+
+Use a disposable `NexusBackup-Test` dataset and preferably an isolated test repository first. Required real-world proof includes:
 
 - normal backup
 - snapshot inventory and browse
@@ -121,18 +122,16 @@ Use a disposable `NexusBackup-Test` dataset and preferably an isolated test repo
 - repository unavailable
 - interrupted write restore
 
-Do not retire PCWatch-backup before an actual restored workstation file has been inspected and verified successfully.
+Only after that proof should a real workstation be cut over from PCWatch-backup. Cut over one workstation at a time; never run PCWatch and Nexus writes against the same Restic repository concurrently.
 
 ## Remaining product roadmap after workstation proof
 
 - migrate and prove Martin-PC -> Unraid workload
 - migrate and prove Unraid -> Google Drive backup workload
 - migrate and prove Seedbox -> Unraid workload, then retire standalone Copyarr only after comparison
-- add repository integrity checking (`restic check`) and stronger storage-health reporting
-- complete global telemetry/activity/health gaps
-- emergency/self-recovery runbook so Nexus Backup can be recovered without relying on Nexus Backup itself
-- Nexus/PCWatch integration as appropriate
-- M9 architecture/security review before calling the first release stable
+- complete global telemetry/activity/health gaps as needed from real testing
+- Nexus/PCWatch status integration as appropriate
+- first stable release only after real restore proof and M9 sign-off
 
 ## Working rule for future sessions
 
