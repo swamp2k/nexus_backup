@@ -1,3 +1,31 @@
+ARG NEXUS_BACKUP_VERSION=dev
+
+FROM golang:1.24-alpine AS workstation
+ARG NEXUS_BACKUP_VERSION
+WORKDIR /src/apps/workstation-agent
+COPY apps/workstation-agent/go.mod ./go.mod
+COPY apps/workstation-agent/*.go ./
+RUN mkdir -p /out \
+    && CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-X main.version=${NEXUS_BACKUP_VERSION} -s -w" -o /out/nexus-backup-workstation-windows-amd64.exe . \
+    && cd /out \
+    && sha256sum nexus-backup-workstation-windows-amd64.exe > nexus-backup-workstation-windows-amd64.exe.sha256
+
+FROM alpine:3.22 AS restic-windows
+ARG RESTIC_VERSION=0.19.1
+ARG RESTIC_ZIP_SHA256=da948ad707ed690426473aaba2046cd61f8f90f6f0e7dab6be0d5796531de67d
+RUN apk add --no-cache ca-certificates curl unzip \
+    && mkdir -p /out /tmp/restic \
+    && curl -fL --retry 3 --retry-delay 2 \
+      "https://github.com/restic/restic/releases/download/v${RESTIC_VERSION}/restic_${RESTIC_VERSION}_windows_amd64.zip" \
+      -o /tmp/restic.zip \
+    && echo "${RESTIC_ZIP_SHA256}  /tmp/restic.zip" | sha256sum -c - \
+    && unzip -q /tmp/restic.zip -d /tmp/restic \
+    && RESTIC_EXE="$(find /tmp/restic -maxdepth 1 -type f -name 'restic*.exe' -print -quit)" \
+    && test -n "$RESTIC_EXE" \
+    && mv "$RESTIC_EXE" /out/restic.exe \
+    && cd /out \
+    && sha256sum restic.exe > restic.exe.sha256
+
 FROM node:22-alpine AS build
 WORKDIR /src
 
@@ -27,6 +55,10 @@ COPY --from=build /src/apps/control-plane/package.json ./apps/control-plane/pack
 COPY --from=build /src/apps/control-plane/dist ./apps/control-plane/dist
 COPY apps/local-server ./apps/local-server
 COPY migrations ./migrations
+COPY --from=workstation /out/nexus-backup-workstation-windows-amd64.exe ./workstation-assets/nexus-backup-workstation-windows-amd64.exe
+COPY --from=workstation /out/nexus-backup-workstation-windows-amd64.exe.sha256 ./workstation-assets/nexus-backup-workstation-windows-amd64.exe.sha256
+COPY --from=restic-windows /out/restic.exe ./workstation-assets/restic.exe
+COPY --from=restic-windows /out/restic.exe.sha256 ./workstation-assets/restic.exe.sha256
 
 RUN mkdir -p /app/node_modules/@nexus-backup /config /run/nexus-backup \
     && ln -s /app/packages/core /app/node_modules/@nexus-backup/core
@@ -35,6 +67,7 @@ ENV NEXUS_BACKUP_VERSION=$NEXUS_BACKUP_VERSION \
     NEXUS_BACKUP_REVISION=$NEXUS_BACKUP_REVISION \
     NEXUS_BACKUP_CONFIG_DIR=/config \
     NEXUS_BACKUP_RUNTIME_DIR=/run/nexus-backup \
+    NEXUS_BACKUP_WORKSTATION_ASSETS=/app/workstation-assets \
     NEXUS_BACKUP_HOST=0.0.0.0 \
     NEXUS_BACKUP_PORT=8787 \
     NEXUS_BACKUP_INTERNAL_PORT=8788
