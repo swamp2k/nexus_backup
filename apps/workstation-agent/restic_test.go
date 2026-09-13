@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -151,5 +152,43 @@ func TestRunBackupCommandMapsExitThreeToPartial(t *testing.T) {
 	result := runBackupCommand(t.Context(), script, os.Environ(), []string{"backup"}, nil)
 	if !result.Partial || result.Err == nil {
 		t.Fatalf("expected partial result, got %#v", result)
+	}
+}
+
+func TestRepositoryFailuresAreFatalAndRedacted(t *testing.T) {
+	cases := []struct {
+		name string
+		mode string
+		want string
+	}{
+		{name: "authentication", mode: "repo-auth-fail", want: "wrong password"},
+		{name: "unavailable", mode: "repo-unavailable", want: "connection refused"},
+		{name: "locked", mode: "backup-locked", want: "locked"},
+		{name: "disk-full", mode: "backup-disk-full", want: "no space left"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := helperBackupTestConfig(t, tc.mode)
+			run := workstationRun{
+				ID: "repo-failure-" + tc.name,
+				DeviceID: "device-1",
+				LeaseToken: "nxbws_abcdefghijklmnopqrstuvwxyz",
+				SourcePaths: []string{t.TempDir()},
+			}
+			result := executeResticBackup(t.Context(), cfg, run, nil)
+			if result.Err == nil {
+				t.Fatalf("expected repository failure for %s", tc.name)
+			}
+			if result.Cancelled || result.Partial {
+				t.Fatalf("repository failure misclassified: %#v", result)
+			}
+			text := strings.ToLower(result.Err.Error())
+			if !strings.Contains(text, tc.want) {
+				t.Fatalf("error %q does not contain %q", text, tc.want)
+			}
+			if strings.Contains(text, strings.ToLower(cfg.Repository)) || strings.Contains(text, strings.ToLower(cfg.PasswordFile)) {
+				t.Fatalf("repository error leaked local storage configuration: %q", result.Err)
+			}
+		})
 	}
 }

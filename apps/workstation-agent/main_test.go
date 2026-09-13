@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -30,6 +31,22 @@ func backupTestConfig(t *testing.T, scriptBody string) config {
 		Repository:   "sftp:user@example:/repo",
 		PasswordFile: password,
 		ResticPath:   script,
+		AutoInit:     false,
+	}
+}
+
+func helperBackupTestConfig(t *testing.T, mode string) config {
+	t.Helper()
+	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
+	t.Setenv("HELPER_MODE", mode)
+	password := filepath.Join(t.TempDir(), "restic-password")
+	if err := os.WriteFile(password, []byte("secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return config{
+		Repository:   "sftp:user@example:/repo",
+		PasswordFile: password,
+		ResticPath:   os.Args[0],
 		AutoInit:     false,
 	}
 }
@@ -148,5 +165,60 @@ exit 0`)
 		}
 	default:
 		t.Fatal("expected finishRun to report success")
+	}
+}
+
+func TestUnacknowledgedFinishDoesNotAdvanceLastSuccessfulBackup(t *testing.T) {
+	cfg := helperBackupTestConfig(t, "backup-success")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPatch:
+			w.WriteHeader(http.StatusOK)
+		case http.MethodPost:
+			// Simulate a controller that becomes unavailable exactly when the
+			// completed Restic result is submitted.
+			w.WriteHeader(http.StatusServiceUnavailable)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer server.Close()
+
+	statePath := filepath.Join(t.TempDir(), "workstation-state.json")
+	a := &agent{
+		cfg:       cfg,
+		statePath: statePath,
+		client:    newAPIClient(server.URL, "nxbdev_test-token-1234567890"),
+		state: localState{
+			LastBackupAt:   "2026-09-12T08:00:00Z",
+			LastSuccessAt:  "2026-09-12T08:00:00Z",
+			LastSnapshotID: "cafebabe00001111",
+		},
+	}
+	run := workstationRun{
+		ID: "run-finish-unavailable", DeviceID: "device-1", LeaseToken: "nxbws_abcdefghijklmnopqrstuvwxyz",
+		SourcePaths: []string{t.TempDir()},
+	}
+
+	a.executeBackup(run)
+
+	if a.state.LastSuccessAt != "2026-09-12T08:00:00Z" {
+		t.Fatalf("unacknowledged result advanced last success: %q", a.state.LastSuccessAt)
+	}
+	if a.state.LastSnapshotID != "cafebabe00001111" {
+		t.Fatalf("unacknowledged result replaced last successful snapshot: %q", a.state.LastSnapshotID)
+	}
+	if a.state.LastBackupAt == "" || a.state.LastBackupAt == "2026-09-12T08:00:00Z" {
+		t.Fatalf("attempt timestamp was not updated: %q", a.state.LastBackupAt)
+	}
+	if !strings.Contains(a.state.LastError, "not acknowledged") {
+		t.Fatalf("expected unacknowledged result error, got %q", a.state.LastError)
+	}
+	persisted, err := loadState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.LastSuccessAt != "2026-09-12T08:00:00Z" || persisted.LastSnapshotID != "cafebabe00001111" {
+		t.Fatalf("persisted state lost last known success: %#v", persisted)
 	}
 }

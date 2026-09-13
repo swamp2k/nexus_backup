@@ -57,6 +57,9 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	if err := initializeAgentProcessTree(); err != nil {
+		log.Fatalf("initialize child process containment: %v", err)
+	}
 	statePath := filepath.Join(filepath.Dir(cfgPath), "workstation-state.json")
 	a := &agent{
 		cfg:        cfg,
@@ -129,8 +132,6 @@ func (a *agent) report() error {
 		if !strings.HasPrefix(response.DeviceToken, "nxbdev_") || len(response.DeviceToken) < 24 {
 			return errors.New("server returned an invalid rotated device token")
 		}
-		// The enrollment token is intentionally one-shot. Persist the replacement
-		// before the agent depends on it for status/poll requests and future restarts.
 		a.cfg.DeviceToken = response.DeviceToken
 		a.client.setToken(response.DeviceToken)
 		if err := saveConfig(a.configPath, a.cfg); err != nil {
@@ -214,10 +215,6 @@ func (a *agent) executeBackup(run workstationRun) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// A heartbeat failure alone must never stop local work: it may just be a
-	// transient network blip. Only an explicit stale-lease rejection (409)
-	// means the controller has moved on and this run must stop, so it cannot
-	// keep producing a backup/snapshot the controller no longer tracks.
 	onLeaseResponse := func(err error) {
 		if err == nil {
 			return
@@ -280,18 +277,21 @@ func (a *agent) executeBackup(run workstationRun) {
 	if result.Err != nil {
 		errText = result.Err.Error()
 	}
-	if err := a.client.finishRun(run.ID, run.LeaseToken, status, payload, errText); err != nil {
-		log.Printf("run %s result report failed: %v", run.ID, err)
+	finishErr := a.client.finishRun(run.ID, run.LeaseToken, status, payload, errText)
+	if finishErr != nil {
+		log.Printf("run %s result report failed: %v", run.ID, finishErr)
 	}
 
 	a.mu.Lock()
 	a.state.LastBackupAt = finished
-	if status == "success" {
+	if status == "success" && finishErr == nil {
 		a.state.LastSuccessAt = finished
 		a.state.LastError = ""
 		if result.SnapshotID != "" {
 			a.state.LastSnapshotID = result.SnapshotID
 		}
+	} else if finishErr != nil {
+		a.state.LastError = fmt.Sprintf("backup result was not acknowledged by controller: %v", finishErr)
 	} else {
 		a.state.LastError = errText
 	}
@@ -300,7 +300,7 @@ func (a *agent) executeBackup(run workstationRun) {
 	if err := saveState(a.statePath, state); err != nil {
 		log.Printf("run %s state save failed: %v", run.ID, err)
 	}
-	log.Printf("workstation backup run %s finished status=%s snapshot=%s", run.ID, status, shortID(result.SnapshotID))
+	log.Printf("workstation backup run %s finished status=%s snapshot=%s acknowledged=%t", run.ID, status, shortID(result.SnapshotID), finishErr == nil)
 }
 
 func (a *agent) repositoryReady() bool {

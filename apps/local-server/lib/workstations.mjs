@@ -266,7 +266,7 @@ export function createWorkstationService({
     if (Number(result.meta?.changes ?? 0) === 0) throw statusError(409, "Workstation run lease is stale or invalid");
 
     if (operation === "backup") {
-      const snapshotId = resultValue && typeof resultValue.snapshotId === "string" ? resultValue.snapshotId.slice(0, 128) : null;
+      const snapshotId = state === "completed" && resultValue && typeof resultValue.snapshotId === "string" ? resultValue.snapshotId.slice(0, 128) : null;
       const successAt = state === "completed" ? at.toISOString() : null;
       await db.prepare(`
         INSERT INTO workstation_status(device_id,repository_configured,agent_state,current_run_id,last_backup_at,last_success_at,last_snapshot_id,last_error,updated_at)
@@ -329,8 +329,6 @@ export function createWorkstationService({
 
     const recoveredRuns = [...failed.results, ...requeued.results];
     for (const run of recoveredRuns) {
-      // Only clear status when it still points at the run being recovered, so a
-      // newer run's status (e.g. one already re-leased) is never clobbered.
       await db.prepare(`
         UPDATE workstation_status SET agent_state='idle',current_run_id=NULL,updated_at=?
         WHERE device_id=? AND current_run_id=?
