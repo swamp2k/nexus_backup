@@ -176,6 +176,31 @@ func TestRunRestoreCommandKillsResticAndReportsCancelledOnContextCancellation(t 
 	}
 }
 
+func TestRunRestoreCommandKillsDescendantProcessTreeOnCancellation(t *testing.T) {
+	cfg, _ := recoveryTestConfig(t, `sleep 5`)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan restoreResult, 1)
+	started := time.Now()
+	go func() {
+		done <- runRestoreCommand(ctx, cfg.ResticPath, recoveryEnvironment(cfg), []string{"restore", "abcdef1234567890", "--target", t.TempDir()}, t.TempDir(), false)
+	}()
+
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+
+	select {
+	case result := <-done:
+		if !result.Cancelled || result.Err == nil {
+			t.Fatalf("expected cancelled descendant-tree restore, got %#v", result)
+		}
+		if elapsed := time.Since(started); elapsed >= 3*time.Second {
+			t.Fatalf("restore cancellation took %v; descendant process appears to have kept pipes open", elapsed)
+		}
+	case <-time.After(8 * time.Second):
+		t.Fatal("restore process tree did not terminate after cancellation")
+	}
+}
+
 func TestRecoveryRestoreTargetRejectsUnsafeRunID(t *testing.T) {
 	if _, err := recoveryRestoreTarget(t.TempDir(), "../escape"); err == nil {
 		t.Fatal("expected traversal run id to be rejected")
