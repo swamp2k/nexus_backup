@@ -280,18 +280,25 @@ func (a *agent) executeBackup(run workstationRun) {
 	if result.Err != nil {
 		errText = result.Err.Error()
 	}
-	if err := a.client.finishRun(run.ID, run.LeaseToken, status, payload, errText); err != nil {
-		log.Printf("run %s result report failed: %v", run.ID, err)
+	finishErr := a.client.finishRun(run.ID, run.LeaseToken, status, payload, errText)
+	if finishErr != nil {
+		log.Printf("run %s result report failed: %v", run.ID, finishErr)
 	}
 
 	a.mu.Lock()
 	a.state.LastBackupAt = finished
-	if status == "success" {
+	// Successful local Restic completion is not authoritative until the
+	// controller accepts the exact leased run result. Otherwise a transient
+	// finish failure followed by status reporting could falsely advance
+	// last-success/snapshot state while the controller later requeues the run.
+	if status == "success" && finishErr == nil {
 		a.state.LastSuccessAt = finished
 		a.state.LastError = ""
 		if result.SnapshotID != "" {
 			a.state.LastSnapshotID = result.SnapshotID
 		}
+	} else if finishErr != nil {
+		a.state.LastError = fmt.Sprintf("backup result was not acknowledged by controller: %v", finishErr)
 	} else {
 		a.state.LastError = errText
 	}
@@ -300,7 +307,7 @@ func (a *agent) executeBackup(run workstationRun) {
 	if err := saveState(a.statePath, state); err != nil {
 		log.Printf("run %s state save failed: %v", run.ID, err)
 	}
-	log.Printf("workstation backup run %s finished status=%s snapshot=%s", run.ID, status, shortID(result.SnapshotID))
+	log.Printf("workstation backup run %s finished status=%s snapshot=%s acknowledged=%t", run.ID, status, shortID(result.SnapshotID), finishErr == nil)
 }
 
 func (a *agent) repositoryReady() bool {
