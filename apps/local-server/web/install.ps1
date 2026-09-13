@@ -32,6 +32,58 @@ function Write-WorkstationConfig([string]$Path, [System.Collections.IDictionary]
   [IO.File]::WriteAllText($Path, $json, (New-Object Text.UTF8Encoding($false)))
 }
 
+function Short-NativeOutput($Value) {
+  $text = (($Value | Out-String).Trim())
+  if ($text.Length -gt 1200) { return $text.Substring(0, 1200) + ' [truncated]' }
+  return $text
+}
+
+function Invoke-PinnedRepositoryProvision([string]$ResticExe, [System.Collections.IDictionary]$Config) {
+  $repository = ([string]$Config['repository']).Trim()
+  $username = ([string]$Config['restUsername']).Trim()
+  $transportPassword = ([string]$Config['restPassword']).Trim()
+  $passwordFile = ([string]$Config['passwordFile']).Trim()
+  $caFile = ([string]$Config['caCertPath']).Trim()
+  if ($repository -notmatch '^rest:https://' -or [string]::IsNullOrWhiteSpace($username) -or [string]::IsNullOrWhiteSpace($transportPassword) -or [string]::IsNullOrWhiteSpace($caFile)) {
+    return
+  }
+  if (-not (Test-Path -LiteralPath $passwordFile -PathType Leaf)) { Fail 'Pinned Repository provisioning requires the local Restic encryption password file.' }
+  if (-not (Test-Path -LiteralPath $caFile -PathType Leaf)) { Fail 'Pinned Repository provisioning requires the verified local CA certificate.' }
+
+  $names = @('RESTIC_REPOSITORY','RESTIC_PASSWORD_FILE','RESTIC_REST_USERNAME','RESTIC_REST_PASSWORD','RESTIC_CACERT')
+  $previous = @{}
+  foreach ($name in $names) { $previous[$name] = [Environment]::GetEnvironmentVariable($name, 'Process') }
+  try {
+    $env:RESTIC_REPOSITORY = $repository
+    $env:RESTIC_PASSWORD_FILE = $passwordFile
+    $env:RESTIC_REST_USERNAME = $username
+    $env:RESTIC_REST_PASSWORD = $transportPassword
+    $env:RESTIC_CACERT = $caFile
+
+    Write-Host 'Nexus Backup: provisioning pinned Repository endpoint...'
+    $initOutput = & $ResticExe init 2>&1
+    $initExit = $LASTEXITCODE
+    if ($initExit -ne 0) {
+      # An already initialized repository is expected on reinstall. Prove that the
+      # exact pinned endpoint can be opened with this encryption key. Auth/TLS/network
+      # failures fail installation here and are never converted into runtime init.
+      $probeOutput = & $ResticExe cat config 2>&1
+      if ($LASTEXITCODE -ne 0) {
+        Fail "Pinned Repository could neither be initialized nor opened. init: $(Short-NativeOutput $initOutput); probe: $(Short-NativeOutput $probeOutput)"
+      }
+      Write-Host 'Nexus Backup: existing pinned Repository verified.'
+    } else {
+      $probeOutput = & $ResticExe cat config 2>&1
+      if ($LASTEXITCODE -ne 0) {
+        Fail "Pinned Repository was initialized but could not be reopened: $(Short-NativeOutput $probeOutput)"
+      }
+      Write-Host 'Nexus Backup: new pinned Repository initialized and verified.'
+    }
+  } finally {
+    foreach ($name in $names) { [Environment]::SetEnvironmentVariable($name, $previous[$name], 'Process') }
+  }
+}
+
 $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
   Fail 'Administrator/System rights are required. Run the command elevated or through PCWatch.'
@@ -165,6 +217,14 @@ try {
 
   if (-not [string]::IsNullOrWhiteSpace([string]$env:NEXUS_BACKUP_RESTIC_PASSWORD)) {
     [IO.File]::WriteAllText($passwordPath, [string]$env:NEXUS_BACKUP_RESTIC_PASSWORD, (New-Object Text.UTF8Encoding($false)))
+  }
+
+  # A Nexus-managed REST repository is initialized/verified only during this explicit
+  # local provisioning step. Normal Agent runtime never initializes a remote repository
+  # after a failed auth/TLS/network probe.
+  if ([string]$config['repository'] -match '^rest:https://' -and -not [string]::IsNullOrWhiteSpace([string]$config['restUsername']) -and -not [string]::IsNullOrWhiteSpace([string]$config['caCertPath'])) {
+    Invoke-PinnedRepositoryProvision $tmpRestic $config
+    $config['autoInit'] = $false
   }
 
   # Persist the permanent token and local repository credentials before touching the
