@@ -23,7 +23,7 @@ Merged on `main`:
 
 Active branch: `emergency-recovery-kit`
 
-Active PR: not opened yet; open after status/runbook review and then require full CI before merge.
+Active PR: **#23 – Emergency recovery kit for Nexus Backup**. Keep it draft until the final branch head has passed the full Node/typecheck, Linux/native-Windows workstation, installer/template and Docker-image CI gates.
 
 Do not call the product ready for real-machine acceptance until the remaining pre-acceptance gates below are closed.
 
@@ -66,7 +66,7 @@ Deterministic torture coverage includes controller recreation during a lease, ex
 
 CI runs workstation-agent test/vet on both Linux and native Windows, plus Windows cross-build and full Docker/release validation.
 
-## Emergency recovery – current branch
+## Emergency recovery – PR #23
 
 `emergency-recovery-kit` adds a recovery path for losing Nexus Backup itself while repositories/persistent state survive.
 
@@ -78,21 +78,26 @@ Implemented on the branch:
 - complete generic-agent config/secrets tree copied into the bundle
 - SHA-256 + size manifest for every bundled file
 - Nexus version/revision and applied migration list in the manifest
-- verification command rejects changed/missing/extra files and bad SQLite integrity
-- symlinks are rejected so the bundle cannot silently depend on another host path
-- output may not overlap source config trees and existing bundle directories are not overwritten
-- tests cover live WAL state, preserved secrets, tamper detection, overlap/existing-directory refusal and symlink refusal
+- verification rejects changed/missing/extra files and bad SQLite integrity
+- manifest database paths must be safe relative paths inside the hash-verified bundle inventory
+- database snapshot names cannot escape control config
+- source/output overlap checks resolve real filesystem paths, including symlinked ancestors, before creating directories
+- nested symlink-parent overlap is rejected without leaving directories inside source config
+- bundle content symlinks are rejected so a bundle cannot silently depend on another host path
+- existing bundle directories are never overwritten
+- emergency exporter CLI/library are included in the normal JS syntax gate
+- tests cover live WAL state, preserved secrets, corruption/tamper detection, manifest path traversal, database-name traversal, direct/symlinked/prospective overlap, existing-output refusal and symlink refusal
 - `docs/emergency-recovery.md` describes healthy export, stopped-stack export, immutable off-host storage, isolated disaster inspection, rollback and direct repository recovery
 
 Important recovery design decision: the first restored controller boot uses **disposable inspection volumes** on a loopback-only alternate port with no workers connected. Normal schedulers are not given a special recovery mode; if they mutate scheduler/job state during inspection, that state is thrown away. Production recovery volumes are recreated a second time from the unchanged verified emergency bundle before any worker reconnects.
 
-The emergency bundle intentionally excludes backup payloads/source data/restore staging/disposable caches and workstation-local repository secrets. It contains privileged secrets and must be stored encrypted off-host.
+The emergency bundle intentionally excludes backup payloads/source data/restore staging/disposable caches and workstation-local repository secrets. It contains privileged secrets and must be stored encrypted off-host. Its SHA-256 manifest detects corruption/inventory changes relative to the manifest; it is not a cryptographic signature against an attacker able to replace both bundle contents and manifest.
 
 The runbook is not considered proven until the disposable recovery drill in the document has actually been performed.
 
 ## Product gaps before a real workstation acceptance test
 
-- finish PR/CI/review and merge `emergency-recovery-kit`
+- finish final CI/review and merge PR #23
 - fresh deployment/install/acceptance docs for Unraid + Windows without relying on chat history
 - M9 architecture/security review with all high-severity findings resolved
 - final preflight review of the exact isolated acceptance procedure
