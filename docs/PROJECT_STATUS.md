@@ -48,7 +48,9 @@ Windows Restic -> TLS -> NexusBackup-Repository -> dedicated Unraid repository s
 
 Control is not in this path.
 
-Repository uses official `rest-server` v0.14.0 pinned to the Linux-amd64 release SHA-256 at image build. It generates a self-signed TLS certificate, requires TLS 1.3, bcrypt htpasswd authentication and private per-user repository namespaces. A CA-only bootstrap port exposes no secrets; the workstation installer pins the downloaded certificate to the SHA-256 copied from the local Repository helper.
+Repository uses official `rest-server` v0.14.0 pinned to the Linux-amd64 release SHA-256 at image build. It generates a self-signed TLS certificate, requires TLS 1.3, bcrypt htpasswd authentication and private per-user repository namespaces.
+
+Repository exposes only the TLS Restic service on port 8000 by default. There is deliberately **no HTTP CA/bootstrap service**. The local `nexus-repository-client` helper carries the public CA certificate as base64 plus its SHA-256 into the same elevated PowerShell session used for workstation onboarding. The installer decodes the CA, verifies the hash locally and only then allows Restic to connect.
 
 REST transport credentials remain local to Repository + workstation. The separate Restic encryption password remains workstation-local. Control receives neither.
 
@@ -59,8 +61,9 @@ REST transport credentials remain local to Repository + workstation. The separat
 - CI requires those roots to be distinct and neither may contain the other.
 - Repository container has no Control DB, generic source, generic restore or FUSE access.
 - Repository is non-privileged and receives no `SYS_ADMIN`/`/dev/fuse`.
+- Repository exposes only its TLS data port by default; no unauthenticated HTTP CA endpoint exists.
 - workstation REST credentials require `rest:https://`.
-- workstation CA must be a local pinned certificate file.
+- authenticated Nexus Repository onboarding requires a locally supplied SHA-256-verified CA file.
 - REST username/password + CA + repository URL are local workstation config only.
 - Restic child processes receive authoritative local REST/TLS env; stale process `RESTIC_*` values are removed.
 - normal workstation runtime **never auto-initializes a remote repository after a failed probe**.
@@ -70,11 +73,21 @@ REST transport credentials remain local to Repository + workstation. The separat
 
 ## Current CI state for PR #26
 
-Node/typecheck, Linux Go, native Windows Go, PowerShell installer parse, Unraid template validation and all three image builds have passed on recent PR heads.
+Earlier PR heads proved Node/typecheck, Linux Go, native Windows Go, PowerShell installer parse, Unraid template validation and all three image builds.
 
-The remaining active failure is isolated to the live Repository integration test: the Repository container exits during startup before the CA bootstrap endpoint remains available. Current head adds explicit CI diagnostics (`docker inspect`, Repository logs and `rest-server --help`) so the next run identifies the exact runtime failure rather than only showing curl connection resets.
+The first live Repository integration attempt exposed a narrow startup defect: Alpine's BusyBox build did not include the `httpd` applet used by the original CA bootstrap design (`httpd: applet not found`, exit 127). Rather than adding another web server, #26 removed that entire service and reduced Repository to one TLS port.
 
-Do not treat the Repository path as implemented until CI performs a real authenticated TLS `restic init` + `restic cat config` against the built Repository image and rejects invalid credentials.
+The current CI contract now requires:
+
+- Repository image build with pinned rest-server 0.14.0;
+- one-port Repository startup on TLS/8000;
+- CA certificate obtained only from the local helper's base64 output;
+- SHA-256 equality between helper CA, decoded CI CA and Repository's actual TLS certificate;
+- real authenticated `restic init` followed by `restic cat config` over TLS using that CA;
+- rejection of invalid credentials;
+- no CA bootstrap URL/port in installer, Unraid template or generated Compose config.
+
+Do not treat the Repository path as implemented until this contract is green on the final PR head.
 
 ## Completed M9 security review
 
@@ -107,9 +120,9 @@ There were no known open HIGH findings when #25 merged. Re-evaluate if #26 creat
 
 ## Fresh install and acceptance docs
 
-`docs/fresh-install.md` now documents Control + Agent + Repository deployment and per-workstation Repository onboarding.
+`docs/fresh-install.md` documents Control + Agent + Repository deployment and per-workstation Repository onboarding through local CA base64/hash transfer, with no HTTP bootstrap service.
 
-`docs/acceptance-test.md` now tests the actual intended path:
+`docs/acceptance-test.md` tests the actual intended path:
 
 ```text
 Balder-PC -> TLS -> NexusBackup-Repository -> isolated Unraid storage
@@ -123,7 +136,7 @@ CI is only a prerequisite; it does not replace this real restore proof.
 
 These are not silently treated as solved:
 
-- plain-HTTP Control-hosted workstation installation assumes a trusted LAN/host; HTTPS + explicit `NEXUS_BACKUP_PUBLIC_URL` is stronger. Repository traffic itself is TLS/CA-pinned.
+- plain-HTTP Control-hosted workstation installation assumes a trusted LAN/host; HTTPS + explicit `NEXUS_BACKUP_PUBLIC_URL` is stronger. Repository traffic itself is TLS/CA-pinned from local helper output.
 - first-run Control setup token is visible to privileged container logs until setup, then removed.
 - Control/Agent/Repository run as root inside non-privileged containers; default mounts/capabilities are constrained. Non-root runtime remains later Unraid-compatibility hardening.
 - base/build image tags are not all digest-pinned; acceptance must record exact built image digests.
@@ -143,13 +156,11 @@ The isolated acceptance test may use disposable secrets/repositories, but passin
 
 ## Remaining gates before “Nu tester vi”
 
-1. diagnose/fix the Repository container startup failure in PR #26;
-2. require final-head CI green, including real TLS/authenticated Restic init/open against NexusBackup-Repository;
-3. finish Unraid/package/status documentation and release-image wiring;
-4. review sensitive #26 patches and clear review threads;
-5. merge #26;
-6. rerun the complete acceptance-preflight against merged `main` and exact coordinated image set;
-7. only then invite the isolated real-machine acceptance drill.
+1. require #26 final-head CI green, including real TLS/authenticated Restic init/open against the single-port NexusBackup-Repository;
+2. complete stale-reference/sensitive-diff review and clear review threads;
+3. merge #26;
+4. rerun the complete acceptance-preflight against merged `main` and the exact coordinated image set;
+5. only then invite the isolated real-machine acceptance drill.
 
 ## Roadmap after isolated workstation proof
 
