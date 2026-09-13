@@ -4,6 +4,8 @@ Nexus Backup is a self-contained backup and transfer platform for Nexus. The pri
 
 Cloudflare is optional remote control, never a requirement for normal operation and never part of the backup data path.
 
+For the current milestone, active PR and exact next steps, read `docs/PROJECT_STATUS.md`. That file is the durable handoff between development sessions; the roadmap below is intentionally higher level.
+
 ## Current capabilities
 
 ### Core engine
@@ -25,9 +27,9 @@ Cloudflare is optional remote control, never a requirement for normal operation 
 - restore preview plus guarded write restore to locally configured targets
 - live progress and bounded logs in the dashboard
 
-### Workstation backups
+### Workstation backups and recovery
 
-M6 adds Nexus-owned Windows workstation backup without routing backup bytes or repository credentials through the control plane:
+M6/M7 add Nexus-owned Windows workstation backup and recovery without routing backup bytes or repository credentials through the control plane:
 
 - Windows x64 workstation agent with a direct one-line PowerShell `irm` installer
 - self-contained install/repair/update flow served by the local Nexus control container
@@ -38,10 +40,12 @@ M6 adds Nexus-owned Windows workstation backup without routing backup bytes or r
 - Restic executes on the workstation and uses VSS filesystem snapshots on Windows
 - repository location and Restic password remain only in `C:\ProgramData\NexusBackup`
 - endpoint jobs use device authentication plus expiring per-run lease tokens
-- expired leases are safely requeued; completed leases cannot be replayed
+- expired backup leases are safely requeued; interrupted write restores require manual retry
 - Restic exit code 3 is reported as a partial backup rather than success
 - repository initialization is automatic only for missing local filesystem repositories; remote repository errors are never treated as permission to initialize
 - live workstation progress, last successful backup, snapshot ID, next run and storage readiness appear in the Workstations dashboard
+- snapshot inventory, non-recursive browse and dry-run restore preview
+- write restore is staging-only, uses `--overwrite never`, never uses `--delete`, and requires a recent exact preview
 - workstation repository URLs and passwords are never persisted in Nexus or PCWatch
 
 See `docs/workstations.md` for installation, storage setup and trust boundaries.
@@ -132,7 +136,7 @@ npm run typecheck
 cd apps/workstation-agent && go test ./...
 ```
 
-CI validates Node tests/typecheck, the Windows workstation cross-build, the PowerShell installer, bundled workstation payload checksums, both Docker images, release metadata and the beta Unraid template contracts.
+CI validates Node tests/typecheck, workstation-agent tests and vet on Linux and Windows, the Windows cross-build, the PowerShell installer, bundled workstation payload checksums, both Docker images, release metadata and the beta Unraid template contracts.
 
 ## Remote control
 
@@ -146,9 +150,9 @@ Remote control is an optional capability layered on top of the local installatio
 4. Local-first Docker runtime ✅
 5. M4 - dashboard, plans, telemetry, repository browsing and guarded restore ✅
 6. M5 - persistent Transfer/Copyarr engine ✅
-7. M6 - managed devices + workstation backup 🚧
-8. M7 - richer restore workflows, including workstation restore
-9. M8 - recovery torture testing
+7. M6 - managed devices + workstation backup ✅
+8. M7 - workstation recovery workflow ✅
+9. M8 - recovery/failure torture testing 🚧
 10. M9 - architecture/security review
 
-See `docs/local-first.md`, `docs/architecture.md`, `docs/control-plane.md`, `docs/dashboard.md`, `docs/transfers.md`, `docs/devices.md`, `docs/workstations.md`, `docs/releases.md`, `unraid/README.md` and `docs/unraid-agent.md` for the invariants later milestones must preserve.
+See `docs/PROJECT_STATUS.md` for the live handoff and `docs/local-first.md`, `docs/architecture.md`, `docs/control-plane.md`, `docs/dashboard.md`, `docs/transfers.md`, `docs/devices.md`, `docs/workstations.md`, `docs/releases.md`, `unraid/README.md` and `docs/unraid-agent.md` for the invariants later milestones must preserve.

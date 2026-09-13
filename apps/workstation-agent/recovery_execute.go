@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -23,6 +24,20 @@ func (a *agent) execute(run workstationRun) {
 
 func (a *agent) executeRecovery(run workstationRun, operation string) {
 	logPrefix := fmt.Sprintf("workstation %s run %s", operation, run.ID)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Same rule as backup: only an explicit stale-lease rejection (409) stops
+	// local work. A restore in particular must never be left to finish
+	// unobserved after the controller has moved on, even though it is never
+	// auto-retried either way (write restore is always manual-retry-only).
+	onLeaseResponse := func(err error) {
+		if err != nil && isStaleLease(err) {
+			fmt.Printf("%s lease rejected as stale; cancelling local operation\n", logPrefix)
+			cancel()
+		}
+	}
+
 	heartbeatStop := make(chan struct{})
 	heartbeatDone := make(chan struct{})
 	go func() {
@@ -34,15 +49,17 @@ func (a *agent) executeRecovery(run workstationRun, operation string) {
 			case <-heartbeatStop:
 				return
 			case <-ticker.C:
-				if err := a.client.reportProgress(run.ID, run.LeaseToken, backupProgress{Phase: operation}); err != nil {
+				err := a.client.reportProgress(run.ID, run.LeaseToken, backupProgress{Phase: operation})
+				if err != nil {
 					fmt.Printf("%s lease heartbeat failed: %v\n", logPrefix, err)
 				}
+				onLeaseResponse(err)
 			}
 		}
 	}()
 
-	_ = a.client.reportProgress(run.ID, run.LeaseToken, backupProgress{Phase: operation})
-	result, err := a.runRecoveryOperation(run, operation)
+	onLeaseResponse(a.client.reportProgress(run.ID, run.LeaseToken, backupProgress{Phase: operation}))
+	result, err := a.runRecoveryOperation(ctx, run, operation)
 	close(heartbeatStop)
 	<-heartbeatDone
 
@@ -57,10 +74,10 @@ func (a *agent) executeRecovery(run workstationRun, operation string) {
 	}
 }
 
-func (a *agent) runRecoveryOperation(run workstationRun, operation string) (map[string]any, error) {
+func (a *agent) runRecoveryOperation(ctx context.Context, run workstationRun, operation string) (map[string]any, error) {
 	switch operation {
 	case "inventory":
-		snapshots, err := listRecoverySnapshots(a.cfg, run.DeviceID)
+		snapshots, err := listRecoverySnapshots(ctx, a.cfg, run.DeviceID)
 		if err != nil { return map[string]any{"operation": operation}, err }
 		compact := make([]map[string]any, 0, len(snapshots))
 		for _, snapshot := range snapshots {
@@ -77,7 +94,7 @@ func (a *agent) runRecoveryOperation(run workstationRun, operation string) (map[
 		}, nil
 
 	case "browse":
-		result, err := browseRecoverySnapshot(a.cfg, run.Request.SnapshotID, run.Request.Path)
+		result, err := browseRecoverySnapshot(ctx, a.cfg, run.Request.SnapshotID, run.Request.Path)
 		if err != nil { return map[string]any{"operation": operation}, err }
 		entries := result.Entries
 		truncated := result.Truncated
@@ -98,9 +115,9 @@ func (a *agent) runRecoveryOperation(run workstationRun, operation string) (map[
 		restoreRoot := filepath.Join(filepath.Dir(a.configPath), "restores")
 		var result restoreResult
 		if operation == "restore-preview" {
-			result = previewRecoveryRestore(a.cfg, restoreRoot, run.ID, run.Request.SnapshotID, run.Request.Path)
+			result = previewRecoveryRestore(ctx, a.cfg, restoreRoot, run.ID, run.Request.SnapshotID, run.Request.Path)
 		} else {
-			result = executeRecoveryRestore(a.cfg, restoreRoot, run.ID, run.Request.SnapshotID, run.Request.Path)
+			result = executeRecoveryRestore(ctx, a.cfg, restoreRoot, run.ID, run.Request.SnapshotID, run.Request.Path)
 		}
 		logs := result.ChangedLogs
 		logsTruncated := result.ChangedLogsTruncated

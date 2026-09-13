@@ -2,12 +2,13 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { createTransferGroupService, persistTransferGroups } from "../lib/transfer-groups.mjs";
 import { createTransferRuleService, persistTransferDiscovery } from "../lib/transfer-rules.mjs";
 import { openSqliteD1 } from "../lib/sqlite-d1.mjs";
 
-const migrationsDir=new URL("../../../migrations/",import.meta.url).pathname;
+const migrationsDir=fileURLToPath(new URL("../../../migrations/",import.meta.url));
 const TORRENT_HASH="a".repeat(40);
 const config={
   available:true,

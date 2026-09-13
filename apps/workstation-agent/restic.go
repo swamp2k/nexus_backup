@@ -24,6 +24,7 @@ type backupResult struct {
 	DataAdded       int64
 	Duration        time.Duration
 	Partial         bool
+	Cancelled       bool
 	Err             error
 }
 
@@ -43,7 +44,7 @@ type resticJSON struct {
 	Error           string   `json:"error"`
 }
 
-func executeResticBackup(cfg config, run workstationRun, report func(backupProgress)) backupResult {
+func executeResticBackup(ctx context.Context, cfg config, run workstationRun, report func(backupProgress)) backupResult {
 	started := time.Now()
 	if err := validateRun(run); err != nil {
 		return backupResult{Duration: time.Since(started), Err: err}
@@ -55,8 +56,12 @@ func executeResticBackup(cfg config, run workstationRun, report func(backupProgr
 		"RESTIC_REPOSITORY="+cfg.Repository,
 		"RESTIC_PASSWORD_FILE="+cfg.PasswordFile,
 	)
-	if err := ensureRepository(cfg.ResticPath, env, cfg.Repository, cfg.AutoInit); err != nil {
-		return backupResult{Duration: time.Since(started), Err: redactBackupError(cfg, err)}
+	if err := ensureRepositoryContext(ctx, cfg.ResticPath, env, cfg.Repository, cfg.AutoInit); err != nil {
+		result := backupResult{Duration: time.Since(started), Err: redactBackupError(cfg, err)}
+		if ctx.Err() != nil {
+			result.Cancelled = true
+		}
+		return result
 	}
 
 	hostname, _ := os.Hostname()
@@ -70,22 +75,35 @@ func executeResticBackup(cfg config, run workstationRun, report func(backupProgr
 	}
 	args = append(args, run.SourcePaths...)
 
-	result := runBackupCommand(cfg.ResticPath, env, args, report)
+	result := runBackupCommand(ctx, cfg.ResticPath, env, args, report)
 	result.Duration = time.Since(started)
+	if result.Cancelled {
+		return result
+	}
 	if result.Err != nil {
 		result.Err = redactBackupError(cfg, result.Err)
 		return result
 	}
-	if err := applyRetention(cfg.ResticPath, env, tag, run.Retention); err != nil {
+	// A stale lease can still arrive between the backup finishing and retention
+	// starting; skip retention rather than risk pruning under a revoked lease.
+	if ctx.Err() != nil {
+		result.Cancelled = true
+		result.Err = fmt.Errorf("run cancelled: %w", ctx.Err())
+		return result
+	}
+	if err := applyRetentionContext(ctx, cfg.ResticPath, env, tag, run.Retention); err != nil {
+		if ctx.Err() != nil {
+			result.Cancelled = true
+			result.Err = fmt.Errorf("retention cancelled: %w", ctx.Err())
+			return result
+		}
 		result.Err = redactBackupError(cfg, fmt.Errorf("retention: %w", err))
 	}
 	return result
 }
 
-func runBackupCommand(resticPath string, env, args []string, report func(backupProgress)) backupResult {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	cmd := exec.CommandContext(ctx, resticPath, args...)
+func runBackupCommand(ctx context.Context, resticPath string, env, args []string, report func(backupProgress)) backupResult {
+	cmd := commandContextWithTree(ctx, resticPath, args...)
 	cmd.Env = env
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -151,6 +169,13 @@ func runBackupCommand(resticPath string, env, args []string, report func(backupP
 	}
 	waitErr := cmd.Wait()
 	stderrText := <-stderrDone
+	if ctx.Err() != nil {
+		// The context was cancelled (an explicit stale-lease rejection, not a
+		// timeout we set ourselves), so restic was killed intentionally.
+		// Restic guarantees the repository stays consistent when killed
+		// mid-backup; it simply never wrote the missing snapshot.
+		return backupResult{Cancelled: true, Err: fmt.Errorf("restic backup cancelled: %w", ctx.Err())}
+	}
 	if parseErr != nil {
 		return backupResult{Err: fmt.Errorf("read restic output: %w", parseErr)}
 	}
@@ -184,7 +209,14 @@ func runBackupCommand(resticPath string, env, args []string, report func(backupP
 	return result
 }
 
+// ensureRepository is retained for non-leased callers. Workstation leased work
+// must use ensureRepositoryContext so an explicit lease revocation can stop a
+// slow repository probe or initialization command as well as the backup itself.
 func ensureRepository(resticPath string, env []string, repository string, autoInit bool) error {
+	return ensureRepositoryContext(context.Background(), resticPath, env, repository, autoInit)
+}
+
+func ensureRepositoryContext(ctx context.Context, resticPath string, env []string, repository string, autoInit bool) error {
 	if local := localRepositoryPath(repository); local != "" {
 		configPath := filepath.Join(local, "config")
 		_, statErr := os.Stat(configPath)
@@ -192,9 +224,12 @@ func ensureRepository(resticPath string, env []string, repository string, autoIn
 			if !autoInit {
 				return errors.New("local restic repository does not exist and autoInit is disabled")
 			}
-			initCmd := exec.Command(resticPath, "init")
+			initCmd := commandContextWithTree(ctx, resticPath, "init")
 			initCmd.Env = env
 			output, err := initCmd.CombinedOutput()
+			if ctx.Err() != nil {
+				return fmt.Errorf("initialize local restic repository cancelled: %w", ctx.Err())
+			}
 			if err != nil {
 				return fmt.Errorf("initialize local restic repository: %s", boundedText(output, 4000))
 			}
@@ -205,9 +240,12 @@ func ensureRepository(resticPath string, env []string, repository string, autoIn
 		}
 	}
 
-	check := exec.Command(resticPath, "cat", "config")
+	check := commandContextWithTree(ctx, resticPath, "cat", "config")
 	check.Env = env
 	output, err := check.CombinedOutput()
+	if ctx.Err() != nil {
+		return fmt.Errorf("open restic repository cancelled: %w", ctx.Err())
+	}
 	if err != nil {
 		return fmt.Errorf("open restic repository: %s", boundedText(output, 4000))
 	}
@@ -225,7 +263,13 @@ func localRepositoryPath(repository string) string {
 	return ""
 }
 
+// applyRetention is retained for non-leased callers. Workstation backup uses
+// applyRetentionContext so stale-lease cancellation also stops forget/prune.
 func applyRetention(resticPath string, env []string, tag string, retention retentionPolicy) error {
+	return applyRetentionContext(context.Background(), resticPath, env, tag, retention)
+}
+
+func applyRetentionContext(ctx context.Context, resticPath string, env []string, tag string, retention retentionPolicy) error {
 	if retention.KeepDaily == 0 && retention.KeepWeekly == 0 && retention.KeepMonthly == 0 {
 		return nil
 	}
@@ -239,9 +283,12 @@ func applyRetention(resticPath string, env []string, tag string, retention reten
 	if retention.KeepMonthly > 0 {
 		args = append(args, "--keep-monthly", strconv.Itoa(retention.KeepMonthly))
 	}
-	cmd := exec.Command(resticPath, args...)
+	cmd := commandContextWithTree(ctx, resticPath, args...)
 	cmd.Env = env
 	output, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		return fmt.Errorf("restic forget/prune cancelled: %w", ctx.Err())
+	}
 	if err != nil {
 		return fmt.Errorf("restic forget/prune: %s", boundedText(output, 4000))
 	}
