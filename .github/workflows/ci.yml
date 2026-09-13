@@ -37,16 +37,26 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          grep -F '$serverUrl/workstation/nexus-backup-workstation-windows-amd64.exe' apps/local-server/web/install.ps1
-          grep -F '$serverUrl/workstation/restic.exe' apps/local-server/web/install.ps1
-          if grep -Fq 'api.github.com/repos/swamp2k/nexus_backup/releases/latest' apps/local-server/web/install.ps1; then
+          installer=apps/local-server/web/install.ps1
+          gateway=apps/local-server/bin/gateway.mjs
+          grep -F '$serverUrl/workstation/nexus-backup-workstation-windows-amd64.exe' "$installer"
+          grep -F '$serverUrl/workstation/restic.exe' "$installer"
+          if grep -Fq 'api.github.com/repos/swamp2k/nexus_backup/releases/latest' "$installer"; then
             echo 'installer must not depend on GitHub Releases' >&2
             exit 1
           fi
-          if grep -Fq 'github.com/restic/restic/releases/download' apps/local-server/web/install.ps1; then
+          if grep -Fq 'github.com/restic/restic/releases/download' "$installer"; then
             echo 'installer must not download Restic from the Internet' >&2
             exit 1
           fi
+          for route in \
+            /workstation/nexus-backup-workstation-windows-amd64.exe \
+            /workstation/nexus-backup-workstation-windows-amd64.exe.sha256 \
+            /workstation/restic.exe \
+            /workstation/restic.exe.sha256; do
+            grep -F "[\"$route\"" "$gateway"
+          done
+          grep -F 'path.startsWith("/workstation/")' "$gateway"
       - name: Validate Unraid templates
         shell: bash
         run: |
