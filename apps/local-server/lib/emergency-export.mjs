@@ -30,13 +30,11 @@ export async function createEmergencyBundle({
   await requireRegularFile(databasePath, "control database");
   for (const name of REQUIRED_CONTROL_FILES) await requireRegularFile(join(controlSource, name), name);
 
-  const outputRequested = resolve(outputDir);
-  await mkdir(dirname(outputRequested), { recursive: true });
-  const outputParent = await realpath(dirname(outputRequested));
-  const output = join(outputParent, basename(outputRequested));
+  const output = await resolveProspectivePath(resolve(outputDir));
   assertNoPathOverlap(output, controlSource, "control config");
   assertNoPathOverlap(output, agentSource, "agent config");
 
+  await mkdir(dirname(output), { recursive: true });
   await mkdir(output, { mode: 0o700 });
   await chmod(output, 0o700);
 
@@ -207,6 +205,23 @@ async function requireDirectory(path, label) {
 async function exists(path) {
   try { await lstat(path); return true; }
   catch (error) { if (error?.code === "ENOENT") return false; throw error; }
+}
+
+async function resolveProspectivePath(path) {
+  let current = resolve(path);
+  const missing = [];
+  for (;;) {
+    try {
+      const existing = await realpath(current);
+      return resolve(existing, ...missing.reverse());
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+      const parent = dirname(current);
+      if (parent === current) throw error;
+      missing.push(basename(current));
+      current = parent;
+    }
+  }
 }
 
 function assertNoPathOverlap(output, source, label) {
