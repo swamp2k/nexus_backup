@@ -76,24 +76,26 @@ Implemented on the branch:
 - consistent live SQLite snapshot using `quick_check` + `VACUUM INTO` + snapshot `integrity_check`
 - control identity/auth files copied into the bundle
 - complete generic-agent config/secrets tree copied into the bundle
+- full `EMERGENCY-RECOVERY.md` runbook copied into every bundle and covered by the manifest, so recovery instructions do not depend on GitHub access
 - SHA-256 + size manifest for every bundled file
 - Nexus version/revision and applied migration list in the manifest
 - verification rejects changed/missing/extra files and bad SQLite integrity
-- manifest database paths must be safe relative paths inside the hash-verified bundle inventory
+- manifest database/runbook paths must be safe relative paths inside the hash-verified bundle inventory
 - database snapshot names cannot escape control config
-- source/output overlap checks resolve real filesystem paths, including symlinked ancestors, before creating directories
+- source/output overlap checks resolve prospective real filesystem paths, including missing descendants under symlinked ancestors, before creating directories
 - nested symlink-parent overlap is rejected without leaving directories inside source config
 - bundle content symlinks are rejected so a bundle cannot silently depend on another host path
 - existing bundle directories are never overwritten
 - emergency exporter CLI/library are included in the normal JS syntax gate
-- tests cover live WAL state, preserved secrets, corruption/tamper detection, manifest path traversal, database-name traversal, direct/symlinked/prospective overlap, existing-output refusal and symlink refusal
-- `docs/emergency-recovery.md` describes healthy export, stopped-stack export, immutable off-host storage, isolated disaster inspection, rollback and direct repository recovery
+- control-image CI verifies exporter CLI/library and bundled recovery runbook are physically present in the built image
+- tests cover live WAL state, preserved secrets, bundled runbook, corruption/tamper detection, manifest path traversal, database-name traversal, direct/symlinked/prospective overlap, existing-output refusal and symlink refusal
+- runbook documents a separate offline `docker image save` archive containing exact pinned control + generic-agent images so disaster recovery need not depend on GHCR or a separate utility image
 
 Important recovery design decision: the first restored controller boot uses **disposable inspection volumes** on a loopback-only alternate port with no workers connected. Normal schedulers are not given a special recovery mode; if they mutate scheduler/job state during inspection, that state is thrown away. Production recovery volumes are recreated a second time from the unchanged verified emergency bundle before any worker reconnects.
 
-The emergency bundle intentionally excludes backup payloads/source data/restore staging/disposable caches and workstation-local repository secrets. It contains privileged secrets and must be stored encrypted off-host. Its SHA-256 manifest detects corruption/inventory changes relative to the manifest; it is not a cryptographic signature against an attacker able to replace both bundle contents and manifest.
+The emergency bundle intentionally excludes backup payloads/source data/restore staging/disposable caches, workstation-local repository secrets and container image archives. It contains privileged secrets and must be stored encrypted off-host. Its SHA-256 manifest detects corruption/inventory changes relative to the manifest; it is not a cryptographic signature against an attacker able to replace both bundle contents and manifest.
 
-The runbook is not considered proven until the disposable recovery drill in the document has actually been performed.
+The runbook is not considered proven until the disposable recovery drill in the document has actually been performed, including offline image archive verification/load or equivalent proof that the exact images are independently available.
 
 ## Product gaps before a real workstation acceptance test
 
