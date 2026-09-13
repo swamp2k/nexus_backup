@@ -23,17 +23,36 @@ This makes the generated command suitable for a launcher such as PCWatch: the la
 
 Repair/update is different from first enrollment. Once installed, the machine keeps its durable device token in the protected local configuration, so rerunning `install.ps1` uses that local token rather than requiring or consuming another bootstrap credential.
 
+## Self-contained installer payload
+
+The workstation installer is served by the local Nexus control container. The control image carries the exact Windows agent built from the same Nexus source/version plus the pinned Restic Windows binary and SHA-256 files:
+
+```text
+/workstation/nexus-backup-workstation-windows-amd64.exe
+/workstation/nexus-backup-workstation-windows-amd64.exe.sha256
+/workstation/restic.exe
+/workstation/restic.exe.sha256
+```
+
+A target workstation therefore needs network access to its local Nexus server, but does **not** need GitHub or general Internet access for install/repair/update.
+
+The installer deliberately downloads and verifies both local payloads **before** it consumes a fresh one-shot enrollment credential. After successful bootstrap, it persists the durable token/config before replacing binaries or touching the scheduled task. This gives repair/update a safe retry path if a later filesystem/task operation fails.
+
 The installer:
 
 - requires Administrator/System rights and Windows x64;
-- exchanges a fresh bootstrap credential directly with Nexus before storing the durable device token;
-- downloads the latest stable Nexus workstation executable and verifies its published SHA-256 checksum;
-- installs pinned Restic 0.19.1 and verifies its pinned checksum;
+- downloads the matching agent and pinned Restic payload from the local Nexus control container;
+- verifies both downloads against checksums shipped in that same control image;
+- exchanges a fresh bootstrap credential directly with Nexus only after the payload is available;
+- immediately persists the durable rotated device token under `%ProgramData%`;
 - stores binaries below `%ProgramFiles%\Nexus Backup Workstation`;
 - stores local configuration/state below `%ProgramData%\NexusBackup`;
 - restricts the local data directory to SYSTEM and local Administrators;
+- validates new binaries before stopping an existing workstation task;
 - registers an AtStartup scheduled task running as SYSTEM;
 - preserves the local repository/password configuration on repair/update.
+
+The checksum protects against corruption/mismatched payload files. Under the current trusted-LAN model, HTTP transport is only as trustworthy as the local network; deployments that require protection from an on-path LAN attacker should put Nexus behind HTTPS.
 
 A later native Windows service wrapper may replace Task Scheduler without changing the Nexus API contract.
 
@@ -104,14 +123,16 @@ The Workstations page shows:
 
 ## Release/versioning
 
-A Nexus SemVer tag publishes all coordinated components:
+The control image is sufficient for local workstation enrollment because it carries the matching workstation payload itself.
+
+A Nexus SemVer tag may additionally publish all coordinated components for distribution/rollback:
 
 - `nexus-backup-control` Docker image;
 - `nexus-backup-agent` Docker image;
 - `nexus-backup-workstation-windows-amd64.exe` GitHub Release asset;
 - SHA-256 checksum file for the workstation executable.
 
-Stable releases become the source for the `irm` install/update flow. Prereleases do not replace the stable GitHub `latest` release.
+Those GitHub Release assets are a distribution convenience; the normal local `irm` installer does not depend on a GitHub Release existing.
 
 ## Current boundary
 
