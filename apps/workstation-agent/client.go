@@ -45,10 +45,17 @@ type workstationStatus struct {
 	LastError            string `json:"lastError,omitempty"`
 }
 
+type recoveryRequest struct {
+	SnapshotID string `json:"snapshotId,omitempty"`
+	Path       string `json:"path,omitempty"`
+}
+
 type workstationRun struct {
 	ID              string          `json:"id"`
 	DeviceID        string          `json:"deviceId"`
 	State           string          `json:"state"`
+	Operation       string          `json:"operation"`
+	Request         recoveryRequest `json:"request,omitempty"`
 	LeaseToken      string          `json:"leaseToken"`
 	LeaseExpiresAt  string          `json:"leaseExpiresAt"`
 	SourcePaths     []string        `json:"sourcePaths"`

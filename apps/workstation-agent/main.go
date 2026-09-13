@@ -118,7 +118,7 @@ func (a *agent) report() error {
 		Version:      version,
 		Hostname:     hostname,
 		Platform:     runtime.GOOS + "/" + runtime.GOARCH,
-		Capabilities: []string{"workstation.backup.v1", "restic.v1", "windows-vss.v1"},
+		Capabilities: []string{"workstation.backup.v1", "workstation.recovery.v1", "workstation.restore-staging.v1", "restic.v1", "windows-vss.v1"},
 	})
 	if err != nil {
 		return err
@@ -208,8 +208,8 @@ func (a *agent) pollOnce() error {
 	return nil
 }
 
-func (a *agent) execute(run workstationRun) {
-	log.Printf("workstation run %s starting with %d source path(s)", run.ID, len(run.SourcePaths))
+func (a *agent) executeBackup(run workstationRun) {
+	log.Printf("workstation backup run %s starting with %d source path(s)", run.ID, len(run.SourcePaths))
 	heartbeatStop := make(chan struct{})
 	heartbeatDone := make(chan struct{})
 	go func() {
@@ -276,7 +276,7 @@ func (a *agent) execute(run workstationRun) {
 	if err := saveState(a.statePath, state); err != nil {
 		log.Printf("run %s state save failed: %v", run.ID, err)
 	}
-	log.Printf("workstation run %s finished status=%s snapshot=%s", run.ID, status, shortID(result.SnapshotID))
+	log.Printf("workstation backup run %s finished status=%s snapshot=%s", run.ID, status, shortID(result.SnapshotID))
 }
 
 func (a *agent) repositoryReady() bool {

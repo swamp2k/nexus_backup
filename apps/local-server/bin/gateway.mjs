@@ -11,6 +11,7 @@ import { openSqliteD1 } from "../lib/sqlite-d1.mjs";
 import { createTransferCleanupService } from "../lib/transfer-cleanup.mjs";
 import { createTransferGroupService } from "../lib/transfer-groups.mjs";
 import { createTransferRuleService } from "../lib/transfer-rules.mjs";
+import { createWorkstationRecoveryHttp } from "../lib/workstation-recovery-http.mjs";
 import { createWorkstationService, workstationInstallCommand } from "../lib/workstations.mjs";
 
 const publicHost = process.env.NEXUS_BACKUP_HOST?.trim() || "0.0.0.0";
@@ -33,6 +34,7 @@ const db = await openSqliteD1({ filename: databasePath, migrationsDir });
 const auth = await createLocalAuth({ configDir, log });
 const deviceService = createManagedDeviceService({ db });
 const workstationService = createWorkstationService({ db, deviceService });
+const workstationRecoveryHttp = createWorkstationRecoveryHttp({ workstationService });
 const transferService = createTransferRuleService({
   db,
   enqueueJob,
@@ -168,7 +170,7 @@ const gateway = createServer(async (request, response) => {
       const upstream = await fetch(`${internalBase}/v1/local/info`, { headers: { accept: "application/json" } });
       const data = await upstream.json().catch(() => ({}));
       if (!upstream.ok) throw statusError(upstream.status, data.message || `Local info failed with ${upstream.status}`);
-      sendJson(response, 200, { ...data, localAuth: true, restoreExecution: true, transferRules: true, transferCleanup: true, transferTorrentGroups: true, deviceIntegration: true, workstationBackups: true, transferSchedulerIntervalMs, workstationSchedulerIntervalMs });
+      sendJson(response, 200, { ...data, localAuth: true, restoreExecution: true, transferRules: true, transferCleanup: true, transferTorrentGroups: true, deviceIntegration: true, workstationBackups: true, workstationRecovery: true, transferSchedulerIntervalMs, workstationSchedulerIntervalMs });
       return;
     }
 
@@ -210,6 +212,15 @@ const gateway = createServer(async (request, response) => {
     const workstationRunMatch = path.match(/^\/v1\/local\/workstations\/([^/]+)\/run$/);
     if (workstationRunMatch && request.method === "POST") {
       sendJson(response, 202, { run: await workstationService.runNow(decodePathPart(workstationRunMatch[1])) });
+      return;
+    }
+    const workstationRecoveryRoute = workstationRecoveryHttp.match(request.method, path);
+    if (workstationRecoveryRoute) {
+      const body = workstationRecoveryRoute.method === "POST" && workstationRecoveryRoute.kind !== "inventory"
+        ? await readJsonBody(request)
+        : undefined;
+      const result = await workstationRecoveryHttp.execute(workstationRecoveryRoute, { searchParams: url.searchParams, body });
+      sendJson(response, result.status, result.body);
       return;
     }
 
