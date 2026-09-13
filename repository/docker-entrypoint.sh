@@ -4,11 +4,9 @@ set -eu
 umask 077
 
 CONFIG_DIR=${NEXUS_BACKUP_REPOSITORY_CONFIG_DIR:-/config}
-PUBLIC_DIR=${NEXUS_BACKUP_REPOSITORY_PUBLIC_DIR:-/public}
 DATA_DIR=${NEXUS_BACKUP_REPOSITORY_DATA_DIR:-/data}
 HOST=${NEXUS_BACKUP_REPOSITORY_HOST:-}
 PORT=${NEXUS_BACKUP_REPOSITORY_PORT:-8000}
-PUBLIC_PORT=${NEXUS_BACKUP_REPOSITORY_PUBLIC_PORT:-8001}
 INITIAL_USER=${NEXUS_BACKUP_REPOSITORY_INITIAL_USER:-}
 
 fail() {
@@ -20,22 +18,18 @@ fail() {
 case "$HOST" in
   *[!A-Za-z0-9.-]*) fail "NEXUS_BACKUP_REPOSITORY_HOST contains unsupported characters" ;;
 esac
-for value in "$PORT" "$PUBLIC_PORT"; do
-  case "$value" in
-    ''|*[!0-9]*) fail "repository ports must be numeric" ;;
-  esac
-  [ "$value" -ge 1 ] 2>/dev/null && [ "$value" -le 65535 ] 2>/dev/null || fail "repository ports must be between 1 and 65535"
-done
-[ "$PORT" != "$PUBLIC_PORT" ] || fail "TLS repository port and public CA bootstrap port must differ"
+case "$PORT" in
+  ''|*[!0-9]*) fail "repository port must be numeric" ;;
+esac
+[ "$PORT" -ge 1 ] 2>/dev/null && [ "$PORT" -le 65535 ] 2>/dev/null || fail "repository port must be between 1 and 65535"
 
-mkdir -p "$CONFIG_DIR/clients" "$PUBLIC_DIR" "$DATA_DIR"
+mkdir -p "$CONFIG_DIR/clients" "$DATA_DIR"
 chmod 0700 "$CONFIG_DIR" "$CONFIG_DIR/clients"
 
 HTPASSWD="$CONFIG_DIR/.htpasswd"
 TLS_KEY="$CONFIG_DIR/repository-tls.key"
 TLS_CERT="$CONFIG_DIR/repository-tls.crt"
 TLS_HOST="$CONFIG_DIR/repository-tls.host"
-PUBLIC_CERT="$PUBLIC_DIR/repository-ca.pem"
 
 if [ ! -f "$HTPASSWD" ]; then
   : > "$HTPASSWD"
@@ -65,26 +59,11 @@ if [ ! -s "$TLS_KEY" ] || [ ! -s "$TLS_CERT" ] || [ "$current_host" != "$HOST" ]
   echo "Nexus Backup Repository: generated TLS certificate for $HOST"
 fi
 
-rm -rf "$PUBLIC_DIR"/*
-cp "$TLS_CERT" "$PUBLIC_CERT"
-chmod 0644 "$PUBLIC_CERT"
-sha256sum "$PUBLIC_CERT" | sed 's#  .*/#  #' > "$PUBLIC_DIR/repository-ca.pem.sha256"
-chmod 0644 "$PUBLIC_DIR/repository-ca.pem.sha256"
-printf '%s\n' "$HOST" > "$PUBLIC_DIR/repository-host"
-printf '%s\n' "$PORT" > "$PUBLIC_DIR/repository-port"
-chmod 0644 "$PUBLIC_DIR/repository-host" "$PUBLIC_DIR/repository-port"
-
 if [ -n "$INITIAL_USER" ]; then
   NEXUS_REPOSITORY_QUIET=1 /usr/local/bin/nexus-repository-client "$INITIAL_USER" main >/dev/null
   echo "Nexus Backup Repository: initial client '$INITIAL_USER' is ready; retrieve its local setup values with: nexus-repository-client $INITIAL_USER main"
 fi
 
-# Only non-secret certificate/bootstrap metadata is exposed here. The workstation
-# installer pins repository-ca.pem to the SHA-256 printed by nexus-repository-client.
-# Invoke the BusyBox applet explicitly because Alpine does not guarantee a standalone
-# /usr/sbin/httpd symlink in every image build.
-busybox httpd -p "$PUBLIC_PORT" -h "$PUBLIC_DIR"
-echo "Nexus Backup Repository: CA bootstrap available on http://$HOST:$PUBLIC_PORT/; installer must verify the locally supplied SHA-256"
 echo "Nexus Backup Repository: listening on TLS port $PORT; private authenticated repositories are enabled"
 exec /usr/local/bin/rest-server \
   --path "$DATA_DIR" \
