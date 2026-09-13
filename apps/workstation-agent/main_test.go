@@ -161,3 +161,64 @@ exit 0`)
 		t.Fatal("expected finishRun to report success")
 	}
 }
+
+func TestFinishOutageDoesNotAdvanceLocalSuccessState(t *testing.T) {
+	cfg := backupTestConfig(t, `STATE="$0.confirmed"
+if [ "$1" = "cat" ]; then exit 0; fi
+if [ "$1" = "snapshots" ]; then
+  if [ -f "$STATE" ]; then
+    printf '%s\n' '[{"id":"feedface33334444","tags":["nexus-workstation:device-1","nexus-run:run-finish-outage","nexus-run-complete:run-finish-outage"]}]'
+  else
+    printf '%s\n' '[]'
+  fi
+  exit 0
+fi
+if [ "$1" = "tag" ]; then touch "$STATE"; exit 0; fi
+printf '%s\n' '{"message_type":"summary","snapshot_id":"deadbeef33334444","files_new":1,"files_changed":0,"files_unmodified":0,"data_added":10}'
+exit 0`)
+
+	finishSeen := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPatch:
+			w.WriteHeader(http.StatusOK)
+		case http.MethodPost:
+			finishSeen <- struct{}{}
+			w.WriteHeader(http.StatusServiceUnavailable)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer server.Close()
+
+	previous := localState{
+		LastBackupAt:   "2026-09-10T10:00:00Z",
+		LastSuccessAt:  "2026-09-10T10:00:00Z",
+		LastSnapshotID: "aaaaaaaa11111111",
+		LastError:      "",
+	}
+	a := &agent{
+		cfg:       cfg,
+		statePath: filepath.Join(t.TempDir(), "workstation-state.json"),
+		client:    newAPIClient(server.URL, "nxbdev_test-token-1234567890"),
+		state:     previous,
+	}
+	run := workstationRun{
+		ID: "run-finish-outage", DeviceID: "device-1", LeaseToken: "nxbws_abcdefghijklmnopqrstuvwxyz",
+		SourcePaths: []string{t.TempDir()},
+	}
+
+	a.executeBackup(run)
+
+	select {
+	case <-finishSeen:
+	default:
+		t.Fatal("expected the agent to attempt finish delivery")
+	}
+	if a.state.LastBackupAt != previous.LastBackupAt || a.state.LastSuccessAt != previous.LastSuccessAt || a.state.LastSnapshotID != previous.LastSnapshotID {
+		t.Fatalf("unacknowledged finish mutated local success state: %#v", a.state)
+	}
+	if _, err := os.Stat(a.statePath); !os.IsNotExist(err) {
+		t.Fatalf("unacknowledged finish should not persist new state; stat err=%v", err)
+	}
+}
