@@ -12,15 +12,18 @@ Existing PCWatch-backup and standalone Copyarr are fallbacks. Do not remove or m
 
 ## Current milestone
 
-**M8 – recovery/failure torture testing**
+**Pre-acceptance hardening – repository integrity and health**
 
-M7 workstation recovery is merged. M8 batch 1 is merged on `main` as `941d138bde505181c3fd36af2e4bcf6e5b0b8736`.
+M7 workstation recovery is merged. M8 resilience/failure batches are merged on `main`:
 
-Active branch: `m8-failure-matrix`
+- M8 batch 1: `941d138bde505181c3fd36af2e4bcf6e5b0b8736`
+- M8 batch 2: `527909f3385b41c33b46cb421aabdc8b61cadf0e`
 
-Active PR: **#19 – M8: state reconciliation and repository failure matrix**
+Active branch: `repository-integrity-health`
 
-Keep this batch focused on resilience/state correctness; do not expand product scope here.
+Active PR: **#21 – Repository integrity checks and health**
+
+Do not call the product ready for real-machine acceptance until the remaining pre-acceptance gates below are closed.
 
 ## Completed through M7
 
@@ -53,7 +56,7 @@ These are not negotiable unless the architecture is explicitly redesigned and re
 - repository credentials stay local to the workstation/agent
 - backup payloads never pass through Nexus control plane, Cloudflare or PCWatch
 
-## M8 batch 1 – merged
+## M8 resilience/failure work – merged
 
 Deterministic torture coverage includes:
 
@@ -68,41 +71,38 @@ Deterministic torture coverage includes:
 - descendant process-tree termination so wrapper/child processes cannot keep inherited pipes alive
 - cancellation of repository probes and retention/prune after explicit lease loss
 - recovery write cancellation remains failure/manual-retry-only
-
-Confirmed bugs fixed in batch 1:
-
-1. `recoverExpired()` requeued/failed a run but left `workstation_status.current_run_id` pointing at the dead lease.
-2. `exec.CommandContext()` could kill only the immediate process while descendants retained stdout/stderr pipes.
-3. Repository probe and `forget --prune` were outside the cancellable lease context.
+- controller-unreachable finish does not create local ghost success
+- repository authentication/unavailable/locked/disk-full failures remain failures
+- interrupted write restore leaves staging output but never auto-retries or reuses the same target
+- hard Windows Scheduled Task/agent death cannot leave inherited Restic children running; Windows Job Object uses kill-on-close containment
+- partial/failed backup results cannot replace the controller's last successful snapshot
 
 CI runs workstation-agent test/vet on both Linux and native Windows, plus Windows cross-build and full Docker/release validation.
 
-## M8 batch 2 – current work
+## Repository integrity/health – current work
 
-Completed/covered so far:
+Current PR #21 adds a first-class `restic-check` job:
 
-- **Unacknowledged finish / ghost success:** a Restic backup that completes locally but cannot submit `finish` to the controller no longer advances local `LastSuccessAt` or `LastSnapshotID`. The previous known-good success is preserved and the failed ACK becomes visible in `LastError`.
-- **Repository failure matrix:** authentication failure, unavailable repository, repository lock and disk-full style failures are fatal (not success/partial), and local repository/password configuration is redacted from surfaced errors.
-- **Interrupted write restore:** cancellation leaves any partial staging output in place as an orphan for inspection; the same run/staging target cannot be reused. Retry requires a fresh manual restore/run id.
-- **Hard Windows agent loss:** the workstation agent initializes a Windows Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`; Restic descendants inherit containment, so killing/restarting the Scheduled Task/agent cannot leave an orphan `restic.exe` continuing against the repository. Native Windows CI includes a real parent-death/child-survival regression test.
-- Unix explicit cancellation still uses isolated process groups; platform-independent command wrappers retain bounded wait behavior.
+- standard read-only `restic check`
+- repository-local credentials only
+- same per-repository Restic lock as backup/prune/inventory/restore
+- normal lease cancellation and telemetry
+- explicit tool failure on non-zero Restic exit
+- repository UI derives health from authoritative `restic-check` jobs, separate from inventory state
+- UI states distinguish not checked, checking, check OK and check failed
+- failed integrity remains visible even if snapshot inventory is still readable
 
-Remaining M8 batch 2 review points:
-
-- verify final CI for latest Job Object implementation and image build
-- review controller-side last-success/last-snapshot semantics for failed/partial results
-- confirm no high-severity state-reconciliation gaps remain
+A standard `restic check` is repository consistency evidence, not a substitute for reading every data byte. Real acceptance still requires an actual staging restore plus byte/content/hash verification.
 
 ## Product gaps to close before asking for a real acceptance test
 
-The aim is not merely green M8 tests. Before telling the user the product is ready for a real end-to-end test, also close/review these known gaps:
+The aim is not merely green automated tests. Before telling the user the product is ready for a real end-to-end test, close/review these gates:
 
-- finish M8 production-focused failure matrix
-- repository integrity operation (`restic check`) distinct from read-only inventory
-- storage/repository health presentation sufficient to surface unavailable/locked/full/auth failures clearly
-- emergency recovery runbook: how to restore data if Nexus Backup itself is unavailable
-- M9 architecture/security review with high-severity findings resolved
-- deployment/install/acceptance docs accurate enough to perform a fresh Unraid + Windows workstation install without chat history
+- finish and merge repository integrity/health PR #21
+- emergency recovery runbook: restore data when Nexus Backup itself is unavailable
+- fresh deployment/install/acceptance docs for Unraid + Windows without relying on chat history
+- M9 architecture/security review with all high-severity findings resolved
+- final preflight review of the exact isolated acceptance procedure
 
 ## Real-machine acceptance once code is ready
 
@@ -110,9 +110,10 @@ Use a disposable `NexusBackup-Test` dataset and preferably an isolated test repo
 
 - normal backup
 - snapshot inventory and browse
+- standard repository integrity check
 - dry-run preview
 - real staging restore
-- byte/content verification of restored data
+- byte/hash/content verification of restored data
 - controller restart
 - agent restart
 - temporary network loss
