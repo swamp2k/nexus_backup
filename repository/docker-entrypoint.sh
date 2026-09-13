@@ -81,7 +81,9 @@ fi
 
 # Only non-secret certificate/bootstrap metadata is exposed here. The workstation
 # installer pins repository-ca.pem to the SHA-256 printed by nexus-repository-client.
-httpd -p "$PUBLIC_PORT" -h "$PUBLIC_DIR"
+# Invoke the BusyBox applet explicitly because Alpine does not guarantee a standalone
+# /usr/sbin/httpd symlink in every image build.
+busybox httpd -p "$PUBLIC_PORT" -h "$PUBLIC_DIR"
 echo "Nexus Backup Repository: CA bootstrap available on http://$HOST:$PUBLIC_PORT/; installer must verify the locally supplied SHA-256"
 echo "Nexus Backup Repository: listening on TLS port $PORT; private authenticated repositories are enabled"
 exec /usr/local/bin/rest-server \
