@@ -12,7 +12,7 @@ Existing PCWatch-backup and standalone Copyarr are fallbacks. Do not remove or m
 
 ## Current milestone
 
-**Pre-acceptance hardening – fresh install + isolated acceptance documentation**
+**Pre-acceptance hardening – fresh install + isolated acceptance procedure**
 
 Merged on `main`:
 
@@ -24,9 +24,9 @@ Merged on `main`:
 
 Active branch: `fresh-install-acceptance-docs`
 
-Active PR: not opened yet. Build/review the documentation from the actual current templates, installer and runtime contracts before opening it.
+Active PR: **#24 – Fresh install safety and isolated acceptance runbook**. Keep draft until the final head passes full CI and the safety/runbook diff has been reviewed.
 
-Do not call the product ready for real-machine acceptance until the remaining pre-acceptance gates below are closed.
+Do not call the product ready for real-machine acceptance until M9/final preflight are closed.
 
 ## Completed platform/recovery capability
 
@@ -42,7 +42,7 @@ Do not call the product ready for real-machine acceptance until the remaining pr
 - explicit UI health states for integrity not checked / checking / OK / failed
 - emergency bundle for Nexus state/config with live-WAL SQLite snapshot, SHA-256 inventory, bundled recovery runbook and offline pinned-image guidance
 
-A standard `restic check` is repository consistency evidence, not proof that selected files can be recovered byte-for-byte. Acceptance still requires an actual staging restore plus byte/hash/content verification.
+A standard `restic check` is repository consistency evidence, not proof that selected files can be recovered byte-for-byte. Acceptance still requires an actual staging restore plus independent byte/hash/content verification.
 
 ## Recovery safety invariants
 
@@ -61,6 +61,14 @@ These are not negotiable unless the architecture is explicitly redesigned and re
 - a locally completed backup is not authoritative success until the controller ACKs the exact leased result
 - repository credentials stay local to the workstation/agent
 - backup payloads never pass through Nexus control plane, Cloudflare or PCWatch
+- generic-agent source paths must not be able to descend into their own backup repository or restore staging tree
+- a fresh generic Agent must start inert; it must not acquire a source/repository/restore/remote definition from an example config automatically
+
+## M8 resilience/failure work – merged
+
+Deterministic torture coverage includes controller recreation during a lease, expired leases/re-leasing, stale-token rejection, offline recovery rejection, backup deferral while recovery owns a workstation, explicit 409 vs transient 5xx/network handling, full descendant process-tree cancellation, repository auth/unavailable/lock/disk-full failures, interrupted write-restore behavior, Windows Job Object kill-on-close containment, and protection of previous successful backup history.
+
+CI runs workstation-agent test/vet on both Linux and native Windows, plus Windows cross-build and full Docker/release validation.
 
 ## Emergency recovery – merged
 
@@ -72,46 +80,49 @@ The first restored controller boot uses disposable inspection volumes on a loopb
 
 The recovery runbook is still not field-proven until its disposable drill is executed.
 
-## Fresh install + acceptance docs – current work
+## Fresh install / acceptance – PR #24
 
-The current branch must make a clean deployment reproducible without chat history. Documentation must be derived from current code/templates, not memory or guessed production paths.
+Reviewing the real beta Unraid mappings found a safety hazard before documentation was finalized: the Agent template may expose `/data -> /mnt/user` while `/backup` maps a path beneath `/mnt/user`, and the old worked example was also the auto-created starter config with `paths: ["/data"]`. That combination could let a backup source see its own repository through another container path.
 
-Required coverage:
+PR #24 fixes this rather than relying only on warnings:
 
-- fresh Unraid control + generic-agent deployment and persistent path contract
-- first local-admin bootstrap and control/agent token behavior
-- creation/validation of generic-agent `agent.json`, Restic password files and rclone config without exposing secrets to the controller
-- Windows workstation enrollment through the self-contained direct PowerShell installer
-- workstation-local repository/password/config ownership and expected Windows service/task lifecycle
-- creation of an emergency bundle immediately after trusted bootstrap/configuration
-- isolated `NexusBackup-Test` acceptance dataset and isolated Restic repository
-- exact acceptance sequence: backup -> inventory/browse -> integrity -> dry-run -> staging restore -> byte/hash/content verification -> restart/network/repository/interrupted-restore cases
-- explicit stop conditions and rollback rules
-- PCWatch-backup and Copyarr remain untouched; no cutover or retirement during the acceptance drill
+- new `config/agent.default.json` has empty sources/repositories/restore targets/rclone endpoints/rTorrent gates and empty tools
+- `Dockerfile.agent` uses the inert file for `/app/defaults/agent.json`
+- `config/agent.example.json` remains a worked example but narrows its example source to `/data/example-source`
+- regression tests require the starter config to stay inert and prohibit the worked example from using the whole `/data` mount as a source
+- Docker image CI verifies the built Agent contains the inert starter config
+- `unraid/README.md` documents source/repository/restore containment and the deliberate inert first start
+- `docs/fresh-install.md` defines a clean Unraid + Windows deployment without chat-history assumptions
+- `docs/acceptance-test.md` defines an isolated `C:\NexusBackup-Test` proof with an independent SHA-256 reference manifest, dedicated test repository, backup/inventory/integrity/dry-run/staging restore, byte/hash verification, restart/control-outage/repository-outage/interrupted-restore tests and a final post-fault restore verification
+- top-level README roadmap is refreshed; M8, integrity and emergency recovery are no longer shown as unfinished
 
-Do not invent Martin's production Unraid host paths in the generic docs. Where host mappings are deployment-specific, show safe placeholders and explain what property the chosen path must have.
+Important acceptance prerequisite: NexusBackup-Agent's `/backup` mount is **not** a Windows-facing repository service. Final Windows -> Unraid proof requires a dedicated test-only Restic endpoint on Unraid that the Windows SYSTEM task can actually reach through the intended transport. If that endpoint is not provisioned, a local workstation-repository smoke test does not count as final acceptance.
+
+PCWatch-backup and standalone Copyarr remain untouched throughout the acceptance drill, and the Nexus acceptance repository must never be shared with PCWatch.
 
 ## Product gaps before a real workstation acceptance test
 
-- finish/review/merge fresh install + acceptance documentation
+- finish final CI/review and merge PR #24
 - M9 architecture/security review with all high-severity findings resolved
 - final preflight review of the exact isolated acceptance procedure
 
 ## Real-machine acceptance once code is ready
 
-Use a disposable `NexusBackup-Test` dataset and an isolated test repository first. Required real-world proof includes:
+Use the disposable `NexusBackup-Test` dataset and an isolated test repository defined by `docs/acceptance-test.md`. Required real-world proof includes:
 
 - normal backup
 - snapshot inventory and browse
 - standard repository integrity check
 - dry-run preview
 - real staging restore
-- byte/hash/content verification of restored data
+- independent byte/hash/content verification of restored data
 - controller restart
-- agent restart
-- temporary network loss
+- generic-agent restart
+- workstation-agent restart
+- temporary Control-path loss
 - repository unavailable
 - interrupted write restore
+- final post-fault integrity + staging restore + byte/hash PASS
 
 Only after that proof should a real workstation be cut over from PCWatch-backup. Cut over one workstation at a time; never run PCWatch and Nexus writes against the same Restic repository concurrently.
 
