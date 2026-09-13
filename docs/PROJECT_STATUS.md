@@ -8,7 +8,7 @@ This file is the durable handoff for future ChatGPT/Codex/Claude sessions. Read 
 
 Nexus Backup is a self-contained, local-first backup/recovery and transfer system intended to run primarily from Docker on Unraid. Remote control may be added as an option, but the primary system must remain usable without a cloud control plane.
 
-Existing PCWatch-backup and standalone Copyarr are fallbacks. Do not remove or modify them until their real workloads have been migrated to Nexus Backup and successfully proven, including restore/verification where relevant.
+Existing PCWatch-backup and standalone Copyarr are fallbacks. Do not remove their underlying working implementations until their real workloads have been migrated to Nexus Backup and successfully proven, including restore/verification where relevant. PCWatch's top-level legacy Backup/Destinations routes now point users toward the Nexus Software installer flow, but the old engine remains available as a rollback path during acceptance testing.
 
 ## Current milestone
 
@@ -16,11 +16,9 @@ Existing PCWatch-backup and standalone Copyarr are fallbacks. Do not remove or m
 
 M7 workstation recovery is merged on `main` at `05310c07ba38c35728c7f6621087754ad09a11e9`.
 
-Active branch: `m8-recovery-torture`
+M8 batch 1 is merged on `main` at `941d138bde505181c3fd36af2e4bcf6e5b0b8736`.
 
-Active PR: **#18 – M8: begin workstation recovery torture testing**
-
-PR #18 is M8 batch 1. It should merge once the final full CI run is green. Do not grow it with the next failure-matrix batch.
+M8 batch 2 is focused on state reconciliation and failure injection. The first active slice is controller/finish outage reconciliation for workstation backups.
 
 ## Completed through M7
 
@@ -51,10 +49,12 @@ These are not negotiable unless the architecture is explicitly redesigned and re
 - recovery must not overwrite successful backup-history fields
 - repository credentials stay local to the workstation/agent
 - backup payloads never pass through Nexus control plane, Cloudflare or PCWatch
+- a locally completed backup is not advertised as the latest Nexus success until the controller has accepted its terminal `finish` transition
+- a re-leased backup must not create a second snapshot if the same run already has a durably confirmed Restic snapshot
 
 ## M8 batch 1 completed work
 
-Deterministic torture coverage now includes:
+Deterministic torture coverage includes:
 
 - controller/service recreation during an active lease
 - expired workstation leases and re-leasing
@@ -74,17 +74,38 @@ Confirmed bugs found and fixed:
 2. `exec.CommandContext()` killed the immediate process but could leave descendants alive with inherited pipes. Cancellable Restic commands now use a process-tree abstraction: Unix process groups are killed as a unit; Windows uses `taskkill /T /F` with direct-kill fallback and bounded wait.
 3. Repository probe and `forget --prune` were outside the cancellable lease context. They are now lease-cancellable as well.
 
-CI was expanded with a real `windows-latest` workstation-agent test/vet job. Windows is no longer only cross-built.
+CI includes a real `windows-latest` workstation-agent test/vet job. Windows is not only cross-built.
 
-## Immediate next steps after PR #18 merge
+## M8 batch 2: finish-outage reconciliation
 
-Start a fresh M8 batch 2 branch/PR. Focus on state reconciliation and failure injection rather than new product features:
+The first batch 2 slice addresses this failure mode:
 
-- agent process restart during backup
+1. Restic commits a workstation snapshot locally.
+2. The controller is unavailable while the agent sends `finish`.
+3. The lease later expires and the same run is requeued/re-leased.
+4. The agent must not blindly create a duplicate snapshot or advertise an unacknowledged success.
+
+The reconciliation contract is:
+
+- every workstation backup snapshot carries `nexus-run:<runId>` in addition to the workstation/device tag
+- after a clean Restic success, the agent adds `nexus-run-complete:<runId>` as a second durable marker
+- Restic changes a snapshot ID when tags are modified, so Nexus re-resolves and reports the current post-tag snapshot ID
+- a re-leased run with exactly one snapshot carrying both run + completion markers is reconciled instead of backed up again
+- a run-tagged snapshot without the completion marker is ambiguous (partial backup or crash window) and automatic duplicate backup is refused; manual reconciliation is required
+- multiple snapshots matching one run tag are also an ambiguity/failure, never guessed
+- if controller `finish` delivery fails, agent-local `LastBackupAt` / `LastSuccessAt` / `LastSnapshotID` are not advanced; the previous last-known-success remains authoritative until a later lease successfully reconciles and the controller accepts finish
+- write restore does not use this reconciliation path; expired/interrupted write restore stays failed/manual-retry-only
+
+Regression coverage includes successful second-lease reconciliation with no second `restic backup`, refusal of unconfirmed snapshots, and preservation of last-known-success when finish delivery is unavailable.
+
+## Immediate next M8 batch 2 work
+
+Continue failure injection rather than new product features:
+
+- agent process restart during backup, including crash before/after snapshot completion marker
 - agent process restart during inventory/browse/preview/write restore
 - controller unavailable shorter than lease duration
-- controller unavailable longer than lease duration
-- controller unreachable during finish after Restic completed locally
+- controller unavailable longer than lease duration (now expected to reconcile confirmed backup snapshots)
 - repository unavailable
 - repository authentication failure
 - repository locked
@@ -92,7 +113,7 @@ Start a fresh M8 batch 2 branch/PR. Focus on state reconciliation and failure in
 - local repository disk-full behavior where practical to simulate
 - write restore interruption/orphaned staging behavior
 - scheduler interactions with inventory/browse/preview/restore
-- last-known-success state preservation under all failure cases
+- last-known-success state preservation under all remaining failure cases
 
 Do not fix tests by weakening safety invariants or by extending leases/timeouts to hide races.
 
