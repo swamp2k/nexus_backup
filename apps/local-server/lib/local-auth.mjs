@@ -223,7 +223,12 @@ function noteFailure(map, key, now) {
 }
 function sessionCookie(id, ttl, request) { return `nb_session=${id}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${Math.floor(ttl / 1000)}${isSecure(request) ? "; Secure" : ""}`; }
 function expiredSessionCookie(request) { return `nb_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${isSecure(request) ? "; Secure" : ""}`; }
-function isSecure(request) { return request.socket?.encrypted === true || String(request.headers["x-forwarded-proto"] || "").toLowerCase() === "https"; }
+function isSecure(request) {
+  if (request.socket?.encrypted === true) return true;
+  const configured = typeof process.env.NEXUS_BACKUP_PUBLIC_URL === "string" ? process.env.NEXUS_BACKUP_PUBLIC_URL.trim() : "";
+  if (!configured) return false;
+  try { return new URL(configured).protocol === "https:"; } catch { return false; }
+}
 function cookieValue(header, name) { if (typeof header !== "string") return null; for (const part of header.split(";")) { const [key, ...rest] = part.trim().split("="); if (key === name) return rest.join("=") || null; } return null; }
 function safeEqual(left, right) { if (typeof left !== "string" || typeof right !== "string") return false; const a = Buffer.from(left); const b = Buffer.from(right); return a.length === b.length && timingSafeEqual(a, b); }
 function nowMs(now) { const value = now(); const date = value instanceof Date ? value : new Date(value); if (!Number.isFinite(date.getTime())) throw new TypeError("now() must return a valid date"); return date.getTime(); }
