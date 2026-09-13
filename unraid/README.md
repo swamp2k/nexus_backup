@@ -20,17 +20,16 @@ These templates remain beta/manual until the full real-machine acceptance drill 
 
 ## Networking
 
-The Unraid templates use host networking for simple local endpoints:
+The Unraid templates use host networking for two local endpoints:
 
 ```text
 8787  NexusBackup-Control
-8000  NexusBackup-Repository Restic REST over TLS
-8001  NexusBackup-Repository CA/bootstrap files only
+8000  NexusBackup-Repository Restic REST over TLS 1.3
 ```
 
-Repository port 8001 exposes only the public self-signed CA certificate and non-secret endpoint metadata. The workstation installer trusts that certificate only after verifying the SHA-256 copied from the local `nexus-repository-client` helper.
+Repository exposes no HTTP CA/bootstrap port. The local `nexus-repository-client` helper carries the public Repository CA certificate as base64 plus its SHA-256 into the elevated workstation onboarding session. The installer decodes the CA and refuses it unless the hash matches before Restic is allowed to connect.
 
-Repository Basic Auth is never intended to travel over plain HTTP. Backup traffic uses TLS 1.3 by default.
+Repository Basic Auth therefore travels only over the TLS endpoint.
 
 ## Persistent path contract
 
@@ -52,7 +51,7 @@ Host                                                   Repository
 /mnt/user/backups/nexus-backup/workstations            /data
 ```
 
-Repository `/config` is secret material: TLS private key, bcrypt htpasswd and local transport-password copies. Repository `/data` contains encrypted Restic repository payloads.
+Repository `/config` is secret material: TLS private key/certificate, bcrypt htpasswd and local transport-password copies. Repository `/data` contains encrypted Restic repository payloads.
 
 Do not point Control `/agent-config` and Agent `/config` at different host directories. Control gets only the read-only Agent config view used for sanitized UI metadata.
 
@@ -145,7 +144,7 @@ The helper prints secret PowerShell environment values for:
 NEXUS_BACKUP_REPOSITORY
 NEXUS_BACKUP_REST_USERNAME
 NEXUS_BACKUP_REST_PASSWORD
-NEXUS_BACKUP_REPOSITORY_CA_URL
+NEXUS_BACKUP_REPOSITORY_CA_B64
 NEXUS_BACKUP_REPOSITORY_CA_SHA256
 ```
 
@@ -155,7 +154,7 @@ Paste them only into the elevated PowerShell session that will run the Nexus wor
 $env:NEXUS_BACKUP_RESTIC_PASSWORD='<encryption password>'
 ```
 
-The installer verifies the Repository CA hash, stores secrets only under the SYSTEM/Admin-protected workstation ProgramData directory and explicitly initializes/verifies that pinned Repository namespace. Normal workstation runtime never auto-initializes a remote repository after an auth/TLS/network failure.
+The installer decodes and hash-verifies the Repository CA locally, stores secrets only under the SYSTEM/Admin-protected workstation ProgramData directory and explicitly initializes/verifies that pinned Repository namespace. Normal workstation runtime never auto-initializes a remote repository after an auth/TLS/network failure.
 
 To deliberately rotate the REST transport password:
 
