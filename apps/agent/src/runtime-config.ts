@@ -71,6 +71,8 @@ export interface AgentRuntimeConfig {
   rcloneEndpoint(id: string): LocalRcloneEndpoint;
   rtorrentGate(id: string): LocalRtorrentGate;
   tools: AgentToolConfig;
+  /** Local-only values that must be scrubbed before tool telemetry leaves the agent. */
+  telemetryRedactionValues?: readonly string[];
 }
 
 export interface StaticAgentRuntimeConfigInput {
@@ -89,6 +91,7 @@ export class StaticAgentRuntimeConfig implements AgentRuntimeConfig {
   readonly #rcloneEndpoints: Map<string, LocalRcloneEndpoint>;
   readonly #rtorrentGates: Map<string, LocalRtorrentGate>;
   readonly tools: AgentToolConfig;
+  readonly telemetryRedactionValues: readonly string[];
 
   constructor(input: StaticAgentRuntimeConfigInput = {}) {
     this.#sources = indexById(
@@ -130,6 +133,7 @@ export class StaticAgentRuntimeConfig implements AgentRuntimeConfig {
       (item) => normalizeRtorrentGate(item),
     );
     this.tools = normalizeTools(input.tools ?? {});
+    this.telemetryRedactionValues = Object.freeze(collectTelemetryRedactionValues(input));
   }
 
   source(id: string): LocalBackupSource {
@@ -234,6 +238,44 @@ function normalizeTools(input: AgentToolConfig): AgentToolConfig {
     }),
     ...(input.unmountTimeoutMs === undefined ? {} : { unmountTimeoutMs: input.unmountTimeoutMs }),
   });
+}
+
+function collectTelemetryRedactionValues(input: StaticAgentRuntimeConfigInput): string[] {
+  const values = new Set<string>();
+  const add = (value: unknown) => {
+    if (typeof value !== "string") return;
+    const normalized = value.trim();
+    if (normalized.length >= 4) values.add(normalized);
+  };
+  const addUrlParts = (value: unknown) => {
+    if (typeof value !== "string") return;
+    const marker = value.indexOf("://");
+    if (marker < 0) return;
+    const schemeStart = value.lastIndexOf(":", marker - 1) + 1;
+    const candidate = value.slice(schemeStart);
+    try {
+      const parsed = new URL(candidate);
+      add(candidate);
+      add(parsed.username);
+      add(parsed.password);
+      if (parsed.username && parsed.password) add(`${parsed.username}:${parsed.password}`);
+    } catch {}
+  };
+
+  for (const repository of input.resticRepositories ?? []) {
+    add(repository.repository);
+    addUrlParts(repository.repository);
+    add(repository.passwordFile);
+    for (const [name, value] of Object.entries(repository.environment ?? {})) {
+      if (/(?:pass(?:word|wd)?|secret|token|credential|api[_-]?key|access[_-]?key|private[_-]?key|account[_-]?key)/i.test(name)) add(value);
+    }
+  }
+  for (const gate of input.rtorrentGates ?? []) {
+    add(gate.url);
+    addUrlParts(gate.url);
+    add(gate.password);
+  }
+  return [...values].sort((left, right) => right.length - left.length || left.localeCompare(right));
 }
 
 function requireNonEmpty(value: string, name: string): string {
