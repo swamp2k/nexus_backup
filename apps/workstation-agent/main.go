@@ -307,15 +307,7 @@ func (a *agent) executeBackup(run workstationRun) {
 }
 
 func (a *agent) repositoryReady() bool {
-	if strings.TrimSpace(a.cfg.Repository) == "" || strings.TrimSpace(a.cfg.PasswordFile) == "" {
-		return false
-	}
-	info, err := os.Stat(a.cfg.PasswordFile)
-	if err != nil || info.IsDir() {
-		return false
-	}
-	content, err := os.ReadFile(a.cfg.PasswordFile)
-	return err == nil && strings.TrimSpace(string(content)) != ""
+	return validateRepositoryConfig(a.cfg) == nil
 }
 
 func configPathFromArgs(args []string) string {
