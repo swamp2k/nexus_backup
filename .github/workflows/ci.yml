@@ -94,8 +94,9 @@ jobs:
           control_extra = control.findtext("ExtraParams") or ""
           agent_extra = agent.findtext("ExtraParams") or ""
           assert "SYS_ADMIN" not in control_extra and "/dev/fuse" not in control_extra
-          assert "--cap-add=SYS_ADMIN" in agent_extra
-          assert "--device=/dev/fuse" in agent_extra
+          assert "SYS_ADMIN" not in agent_extra and "/dev/fuse" not in agent_extra
+          requires = agent.findtext("Requires") or ""
+          assert "Only add SYS_ADMIN and /dev/fuse manually" in requires
 
           agent_vars = {item.attrib["Target"]: item.attrib for item in agent.findall("Config") if item.attrib.get("Type") == "Variable"}
           assert agent_vars["NEXUS_BACKUP_URL"]["Default"] == "http://127.0.0.1:8787"
@@ -177,10 +178,14 @@ jobs:
             docker image inspect "$image" --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -Fx "NEXUS_BACKUP_REVISION=$GITHUB_SHA"
           done
           docker image inspect nexus-backup-agent:ci --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -Fx "NEXUS_BACKUP_AGENT_VERSION=$CI_VERSION"
-      - name: Validate compose release tag wiring
+      - name: Validate compose release tag and privilege wiring
         shell: bash
         run: |
           set -euo pipefail
           NEXUS_BACKUP_IMAGE_TAG="$CI_VERSION" NEXUS_BACKUP_VERSION="$CI_VERSION" NEXUS_BACKUP_REVISION="$GITHUB_SHA" docker compose -f compose.yaml config > /tmp/compose.yml
           grep -F "image: ghcr.io/swamp2k/nexus-backup-control:$CI_VERSION" /tmp/compose.yml
           grep -F "image: ghcr.io/swamp2k/nexus-backup-agent:$CI_VERSION" /tmp/compose.yml
+          if grep -Eq 'SYS_ADMIN|/dev/fuse' /tmp/compose.yml; then
+            echo 'default compose must not grant FUSE/SYS_ADMIN' >&2
+            exit 1
+          fi
