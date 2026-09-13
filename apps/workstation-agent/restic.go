@@ -52,11 +52,12 @@ func executeResticBackup(ctx context.Context, cfg config, run workstationRun, re
 	if err := validateRepositoryConfig(cfg); err != nil {
 		return backupResult{Duration: time.Since(started), Err: redactBackupError(cfg, err)}
 	}
-	env := append(os.Environ(),
-		"RESTIC_REPOSITORY="+cfg.Repository,
-		"RESTIC_PASSWORD_FILE="+cfg.PasswordFile,
-	)
-	allowInit := cfg.AutoInit && (localRepositoryPath(cfg.Repository) != "" || isPinnedManagedRestRepository(cfg))
+	env := resticEnvironment(cfg)
+	// Runtime auto-initialization is deliberately local-only. A failed remote
+	// probe may mean auth, TLS or network failure and must never be treated as
+	// permission to create/initialize a remote repository. Managed Nexus REST
+	// repositories are provisioned explicitly by the workstation installer.
+	allowInit := cfg.AutoInit && localRepositoryPath(cfg.Repository) != ""
 	if err := ensureRepositoryContext(ctx, cfg.ResticPath, env, cfg.Repository, allowInit); err != nil {
 		result := backupResult{Duration: time.Since(started), Err: redactBackupError(cfg, err)}
 		if ctx.Err() != nil {
@@ -240,21 +241,8 @@ func ensureRepositoryContext(ctx context.Context, resticPath string, env []strin
 	if ctx.Err() != nil {
 		return fmt.Errorf("open restic repository cancelled: %w", ctx.Err())
 	}
-	if err == nil {
-		return nil
-	}
-	if !autoInit {
+	if err != nil {
 		return fmt.Errorf("open restic repository: %s", boundedText(output, 4000))
-	}
-
-	initCmd := commandContextWithTree(ctx, resticPath, "init")
-	initCmd.Env = env
-	initOutput, initErr := combinedOutputTree(initCmd)
-	if ctx.Err() != nil {
-		return fmt.Errorf("initialize remote restic repository cancelled: %w", ctx.Err())
-	}
-	if initErr != nil {
-		return fmt.Errorf("initialize remote restic repository: %s", boundedText(initOutput, 4000))
 	}
 	return nil
 }
@@ -352,28 +340,39 @@ func validateRepositoryConfig(cfg config) error {
 			return errors.New("repository CA certificate must be a non-empty regular file")
 		}
 	}
-	return applyResticTransportEnvironment(cfg)
-}
-
-func applyResticTransportEnvironment(cfg config) error {
-	pairs := map[string]string{
-		"RESTIC_REST_USERNAME": cfg.RestUsername,
-		"RESTIC_REST_PASSWORD": cfg.RestPassword,
-		"RESTIC_CACERT":        cfg.CACertPath,
-	}
-	for name, value := range pairs {
-		if value == "" {
-			if err := os.Unsetenv(name); err != nil { return fmt.Errorf("clear %s: %w", name, err) }
-			continue
-		}
-		if err := os.Setenv(name, value); err != nil { return fmt.Errorf("set %s: %w", name, err) }
-	}
 	return nil
 }
 
-func isPinnedManagedRestRepository(cfg config) bool {
-	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(cfg.Repository)), "rest:https://") &&
-		strings.TrimSpace(cfg.RestUsername) != "" && strings.TrimSpace(cfg.RestPassword) != "" && strings.TrimSpace(cfg.CACertPath) != ""
+func resticEnvironment(cfg config) []string {
+	blocked := map[string]struct{}{
+		"RESTIC_REPOSITORY":    {},
+		"RESTIC_PASSWORD_FILE": {},
+		"RESTIC_REST_USERNAME": {},
+		"RESTIC_REST_PASSWORD": {},
+		"RESTIC_CACERT":        {},
+	}
+	env := make([]string, 0, len(os.Environ())+5)
+	for _, entry := range os.Environ() {
+		name, _, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		if _, skip := blocked[strings.ToUpper(name)]; skip {
+			continue
+		}
+		env = append(env, entry)
+	}
+	env = append(env,
+		"RESTIC_REPOSITORY="+cfg.Repository,
+		"RESTIC_PASSWORD_FILE="+cfg.PasswordFile,
+	)
+	if cfg.RestUsername != "" {
+		env = append(env, "RESTIC_REST_USERNAME="+cfg.RestUsername, "RESTIC_REST_PASSWORD="+cfg.RestPassword)
+	}
+	if cfg.CACertPath != "" {
+		env = append(env, "RESTIC_CACERT="+cfg.CACertPath)
+	}
+	return env
 }
 
 func redactBackupError(cfg config, err error) error {
