@@ -1,4 +1,4 @@
-const RECOVERY_OPERATIONS = new Set(["inventory", "browse", "restore-preview", "restore"]);
+const RECOVERY_OPERATIONS = new Set(["check", "inventory", "browse", "restore-preview", "restore"]);
 const SNAPSHOT_ID_RE = /^[0-9a-f]{8,64}$/i;
 const WRITE_FORBIDDEN_FIELDS = ["targetId", "targetPath", "stagingPath", "destination", "overwrite", "delete"];
 
@@ -9,7 +9,12 @@ export function createWorkstationRecoveryHttp({ workstationService } = {}) {
     const normalizedMethod = typeof method === "string" ? method.toUpperCase() : "GET";
     if (typeof path !== "string" || !path.startsWith("/v1/local/workstations/")) return null;
 
-    let route = path.match(/^\/v1\/local\/workstations\/([^/]+)\/recovery\/inventory$/);
+    let route = path.match(/^\/v1\/local\/workstations\/([^/]+)\/recovery\/check$/);
+    if (route && (normalizedMethod === "GET" || normalizedMethod === "POST")) {
+      return { kind: "check", method: normalizedMethod, deviceId: decodePathPart(route[1]) };
+    }
+
+    route = path.match(/^\/v1\/local\/workstations\/([^/]+)\/recovery\/inventory$/);
     if (route && (normalizedMethod === "GET" || normalizedMethod === "POST")) {
       return { kind: "inventory", method: normalizedMethod, deviceId: decodePathPart(route[1]) };
     }
@@ -48,6 +53,13 @@ export function createWorkstationRecoveryHttp({ workstationService } = {}) {
 
   async function execute(route, { searchParams, body } = {}) {
     if (!route || typeof route !== "object") throw new TypeError("matched recovery route is required");
+
+    if (route.kind === "check") {
+      if (route.method === "GET") {
+        return { status: 200, body: { check: await workstationService.getLatestCheck(route.deviceId) } };
+      }
+      return { status: 202, body: { run: await workstationService.queueRecovery(route.deviceId, "check", {}) } };
+    }
 
     if (route.kind === "inventory") {
       if (route.method === "GET") {

@@ -122,7 +122,7 @@ func (a *agent) report() error {
 		Version:      version,
 		Hostname:     hostname,
 		Platform:     runtime.GOOS + "/" + runtime.GOARCH,
-		Capabilities: []string{"workstation.backup.v1", "workstation.recovery.v1", "workstation.restore-staging.v1", "restic.v1", "windows-vss.v1"},
+		Capabilities: []string{"workstation.backup.v1", "workstation.recovery.v1", "workstation.restore-staging.v1", "workstation.integrity.v1", "restic.v1", "windows-vss.v1"},
 	})
 	if err != nil {
 		return err

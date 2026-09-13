@@ -3,7 +3,7 @@ import { nextScheduleAt } from "./backup-plans.mjs";
 
 const ACTIVE_STATES = new Set(["queued", "leased", "running"]);
 const FINAL_STATES = new Set(["completed", "partial", "failed", "cancelled"]);
-const RECOVERY_OPERATIONS = new Set(["inventory", "browse", "restore-preview", "restore"]);
+const RECOVERY_OPERATIONS = new Set(["check", "inventory", "browse", "restore-preview", "restore"]);
 const DEFAULT_LEASE_MS = 5 * 60 * 1000;
 const PREVIEW_MAX_AGE_MS = 30 * 60 * 1000;
 const SNAPSHOT_ID_RE = /^[0-9a-f]{8,64}$/i;
@@ -142,8 +142,11 @@ export function createWorkstationService({
     if (Number(status?.repository_configured ?? 0) !== 1) throw statusError(409, "Workstation storage is not configured");
 
     const normalizedOperation = normalizeRecoveryOperation(operation);
+    if (normalizedOperation === "check" && !device.capabilities.includes("workstation.integrity.v1")) {
+      throw statusError(409, "Workstation agent does not support repository integrity checks; update it first");
+    }
     const request = normalizeRecoveryRequest(normalizedOperation, input);
-    if (normalizedOperation !== "inventory") {
+    if (normalizedOperation !== "inventory" && normalizedOperation !== "check") {
       await assertSnapshotKnown(device.id, request.snapshotId);
     }
     if (normalizedOperation === "browse" && request.path !== "/") {
@@ -206,6 +209,15 @@ export function createWorkstationService({
     return presentRun(await db.prepare("SELECT * FROM workstation_runs WHERE id=?").bind(normalizedRunId).first());
   }
 
+  async function getLatestCheck(deviceId) {
+    const device = await requireWorkstation(deviceId);
+    return presentRun(await db.prepare(`
+      SELECT * FROM workstation_runs
+      WHERE device_id=? AND operation='check'
+      ORDER BY queued_at DESC,id DESC LIMIT 1
+    `).bind(device.id).first());
+  }
+
   async function poll(rawToken) {
     const device = await requireAuthenticatedWorkstation(rawToken);
     await recoverExpired(device.id);
@@ -256,7 +268,7 @@ export function createWorkstationService({
     const operation = normalizeStoredOperation(current.operation);
     const state = normalizeResultState(input?.status, operation);
     const request = parseJson(current.request_json, {});
-    const resultValue = normalizeResult(input?.result, operation, request, normalizedRunId);
+    const resultValue = normalizeResult(input?.result, operation, request, normalizedRunId, state);
     const errorMessage = state === "failed" || state === "partial" ? optionalString(input?.error, "error", 4000) : null;
     const at = nowDate(now);
     const result = await db.prepare(`
@@ -455,7 +467,7 @@ export function createWorkstationService({
   }
 
   return {
-    list, getPolicy, putPolicy, runNow, runDue, queueRecovery, getRecoveryInventory, getRecoveryBrowse, getRun,
+    list, getPolicy, putPolicy, runNow, runDue, queueRecovery, getRecoveryInventory, getRecoveryBrowse, getRun, getLatestCheck,
     poll, progress, finish, reportStatus, recoverExpired,
   };
 }
@@ -538,7 +550,7 @@ function normalizeStoredOperation(value) { return typeof value === "string" && v
 
 function normalizeRecoveryRequest(operation, value) {
   if (!isRecord(value)) value = {};
-  if (operation === "inventory") return {};
+  if (operation === "inventory" || operation === "check") return {};
   const snapshotId = normalizeSnapshotId(value.snapshotId);
   if (operation === "browse") return { snapshotId, path: normalizeSnapshotPath(value.path ?? "/", { required: true }) };
   const path = value.path === undefined || value.path === null || value.path === "" ? "" : normalizeSnapshotPath(value.path, { required: true });
@@ -554,13 +566,23 @@ function normalizeResultState(value, operation) {
   throw new RangeError(operation === "backup" ? "status must be success, partial, or failure" : "recovery status must be success or failure");
 }
 
-function normalizeResult(value, operation, request, runId) {
-  if (value === undefined || value === null) return null;
+function normalizeResult(value, operation, request, runId, state) {
+  if (value === undefined || value === null) {
+    if (operation === "backup" || state === "failed") return null;
+    throw new RangeError("successful workstation operation must include a result");
+  }
   if (!isRecord(value)) throw new RangeError("result must be an object");
   const max = operation === "backup" ? 64 * 1024 : 900 * 1024;
   if (JSON.stringify(value).length > max) throw new RangeError("result is too large");
   if (operation === "backup") return value;
   if (value.operation !== operation) throw new RangeError("recovery result operation does not match the leased run");
+  if (state === "failed" && (operation === "check" || operation === "inventory" || operation === "browse")) {
+    return { operation };
+  }
+  if (operation === "check") {
+    if (value.integrity !== "ok") throw new RangeError("integrity check result must report ok");
+    return { operation, integrity: "ok" };
+  }
   if (operation === "inventory") {
     if (!Array.isArray(value.snapshots) || value.snapshots.length > 250) throw new RangeError("inventory result is invalid");
     return { operation, snapshots: value.snapshots.map(normalizeSnapshotResult) };
