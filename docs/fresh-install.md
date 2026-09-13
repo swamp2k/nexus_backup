@@ -50,7 +50,7 @@ Record the exact coordinated Nexus release you intend to test. Control, Agent an
 Verify these prerequisites:
 
 - Docker is available on Unraid.
-- TCP 8787, 8000 and 8001 are unused on the Unraid host, unless deliberately changed.
+- TCP 8787 and 8000 are unused on the Unraid host, unless deliberately changed.
 - you have selected persistent host paths for Control config, shared runtime, Agent config/state and Repository config.
 - generic Agent source, generic Agent repository, generic restore staging and workstation Repository storage use deliberate separate roots.
 - PCWatch does not write to the Nexus workstation Repository storage tree.
@@ -164,14 +164,13 @@ or:
 
 That exact name/address is placed in the generated self-signed TLS certificate. If you later change Repository host, Repository generates a new certificate and each workstation must be reprovisioned with the new pinned CA.
 
-Default ports are:
+Repository exposes only one network service by default:
 
 ```text
 8000  Restic REST over TLS 1.3 + Basic Auth
-8001  public CA/bootstrap files only
 ```
 
-Port 8001 contains no password or private key. Its CA certificate is nevertheless trusted only after the installer verifies the SHA-256 supplied out-of-band by the local Repository helper.
+There is deliberately **no HTTP CA/bootstrap port**. The public CA certificate and its SHA-256 are carried out-of-band in the local `nexus-repository-client` output and decoded/verified by the workstation installer before Restic is allowed to connect.
 
 Repository uses Restic's official `rest-server` v0.14.0, pinned and SHA-256 verified during the Nexus image build. It runs with `--private-repos`, bcrypt htpasswd auth and TLS 1.3 minimum.
 
@@ -191,11 +190,11 @@ The helper creates/reuses a random transport password and prints PowerShell line
 $env:NEXUS_BACKUP_REPOSITORY='rest:https://tower.local:8000/balder-pc/acceptance'
 $env:NEXUS_BACKUP_REST_USERNAME='balder-pc'
 $env:NEXUS_BACKUP_REST_PASSWORD='<generated transport password>'
-$env:NEXUS_BACKUP_REPOSITORY_CA_URL='http://tower.local:8001/repository-ca.pem'
-$env:NEXUS_BACKUP_REPOSITORY_CA_SHA256='<sha256 copied from local Repository container>'
+$env:NEXUS_BACKUP_REPOSITORY_CA_B64='<base64 public CA certificate>'
+$env:NEXUS_BACKUP_REPOSITORY_CA_SHA256='<sha256 of that exact certificate>'
 ```
 
-Treat that output as secret because it contains the REST transport password. Do not paste it into Nexus Control, screenshots, issue reports or the acceptance record.
+The CA payload is public material, but treat the helper output as secret as a whole because it also contains the REST transport password. Do not paste it into Nexus Control, screenshots, issue reports or the acceptance record.
 
 To rotate a principal deliberately:
 
@@ -223,8 +222,8 @@ The installer performs the following before starting the Scheduled Task:
 
 1. downloads the workstation agent and Restic bundled with the exact Control image and verifies their SHA-256 files;
 2. exchanges the short-lived enrollment credential for the durable local device token;
-3. downloads `repository-ca.pem` from Repository port 8001;
-4. compares it byte-for-byte by SHA-256 with `NEXUS_BACKUP_REPOSITORY_CA_SHA256` copied from the local Repository container;
+3. decodes the Repository public CA certificate carried in `NEXUS_BACKUP_REPOSITORY_CA_B64`;
+4. verifies that exact certificate against `NEXUS_BACKUP_REPOSITORY_CA_SHA256` before persisting it;
 5. stores REST transport username/password, CA path and Restic password only below `%ProgramData%\NexusBackup`, protected to SYSTEM + local Administrators;
 6. explicitly initializes the exact pinned Repository namespace, or verifies an already-initialized one with `restic cat config`;
 7. sets remote runtime `autoInit=false`;
@@ -259,7 +258,7 @@ NEXUS_BACKUP_PUBLIC_URL=https://backup.example.test
 
 Nexus intentionally ignores forwarded Host/Proto headers for this trust decision.
 
-The **Repository** data path is separately TLS protected and CA pinned as described above.
+The **Repository** data path is separately TLS protected and its CA is pinned from the local Repository console rather than fetched from an unauthenticated bootstrap service.
 
 ## 8. Secret/recovery boundary before production
 
@@ -286,7 +285,7 @@ Do not migrate a production workload. A fresh installation is ready to enter `do
 - local admin login works.
 - generic Agent is online with explicit/inert-safe config.
 - Repository is running on the intended dedicated workstation storage root.
-- Repository host matches the address/name Windows uses and the CA hash was obtained locally.
+- Repository host matches the address/name Windows uses and the CA payload/hash were obtained from the local Repository helper.
 - the workstation was provisioned with a dedicated Repository principal and a disposable acceptance encryption password.
 - workstation is online and storage-ready.
 - generic and workstation repository roots are isolated from each other, PCWatch and production repositories.
