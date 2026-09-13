@@ -26,7 +26,7 @@ COPY --from=build /src/packages/core/dist ./packages/core/dist
 COPY --from=build /src/apps/agent/package.json ./apps/agent/package.json
 COPY --from=build /src/apps/agent/dist ./apps/agent/dist
 COPY --from=build /src/apps/agent/bin ./apps/agent/bin
-COPY config/agent.example.json ./defaults/agent.json
+COPY config/agent.default.json ./defaults/agent.json
 
 RUN mkdir -p /app/node_modules/@nexus-backup /config /state/mounts /state/rclone-vfs /state/restic-cache /data /backup /restore \
     && ln -s /app/packages/core /app/node_modules/@nexus-backup/core

@@ -88,6 +88,8 @@ jobs:
           assert ac["/config"]["Mode"] == "rw"
           assert ac["/run/nexus-backup"]["Mode"] == "ro"
           assert ac["/data"]["Mode"] == "ro"
+          assert ac["/data"]["Default"] == "/mnt/user/nexus-backup-source"
+          assert ac["/data"]["Default"] != "/mnt/user"
 
           control_extra = control.findtext("ExtraParams") or ""
           agent_extra = agent.findtext("ExtraParams") or ""
@@ -152,6 +154,18 @@ jobs:
           '
       - name: Build agent image
         run: docker build -f Dockerfile.agent --build-arg NEXUS_BACKUP_VERSION="$CI_VERSION" --build-arg NEXUS_BACKUP_REVISION="$GITHUB_SHA" -t nexus-backup-agent:ci .
+      - name: Verify inert agent starter config
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint node nexus-backup-agent:ci -e '
+            const fs = require("fs");
+            const c = JSON.parse(fs.readFileSync("/app/defaults/agent.json", "utf8"));
+            for (const k of ["sources", "resticRepositories", "restoreTargets", "rcloneEndpoints", "rtorrentGates"]) {
+              if (!Array.isArray(c[k]) || c[k].length !== 0) throw new Error(`${k} must be empty`);
+            }
+            if (!c.tools || Object.keys(c.tools).length !== 0) throw new Error("tools must be empty");
+          '
       - name: Verify image version metadata
         shell: bash
         run: |

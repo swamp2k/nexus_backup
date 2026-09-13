@@ -2,7 +2,7 @@
   "sources": [
     {
       "id": "local-data",
-      "paths": ["/data"]
+      "paths": ["/data/example-source"]
     }
   ],
   "resticRepositories": [

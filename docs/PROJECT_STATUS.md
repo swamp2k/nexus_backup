@@ -12,7 +12,7 @@ Existing PCWatch-backup and standalone Copyarr are fallbacks. Do not remove or m
 
 ## Current milestone
 
-**Pre-acceptance hardening – recover Nexus Backup itself**
+**Pre-acceptance hardening – fresh install + isolated acceptance procedure**
 
 Merged on `main`:
 
@@ -20,12 +20,13 @@ Merged on `main`:
 - M8 resilience batch 2: `527909f3385b41c33b46cb421aabdc8b61cadf0e`
 - generic/Unraid repository integrity health, PR #21: `5b975e7b761d19a25a9d7a4fbdb6de549cb1f848`
 - workstation-native repository integrity, PR #22: `4e2406ce5f17ed4eae27281f1f6ec2c186aaaceb`
+- self-contained emergency recovery kit, PR #23: `9eb2e5c3fddb801fcfc464eeeb17675b0ecf839f`
 
-Active branch: `emergency-recovery-kit`
+Active branch: `fresh-install-acceptance-docs`
 
-Active PR: **#23 – Emergency recovery kit for Nexus Backup**. Keep it draft until the final branch head has passed the full Node/typecheck, Linux/native-Windows workstation, installer/template and Docker-image CI gates.
+Active PR: **#24 – Fresh install safety and isolated acceptance runbook**. Keep draft until the final head passes full CI and the safety/runbook diff has been reviewed.
 
-Do not call the product ready for real-machine acceptance until the remaining pre-acceptance gates below are closed.
+Do not call the product ready for real-machine acceptance until M9/final preflight are closed.
 
 ## Completed platform/recovery capability
 
@@ -39,8 +40,9 @@ Do not call the product ready for real-machine acceptance until the remaining pr
 - repository integrity checks for generic/Unraid repositories
 - workstation-native repository integrity checks using only workstation-local repository credentials
 - explicit UI health states for integrity not checked / checking / OK / failed
+- emergency bundle for Nexus state/config with live-WAL SQLite snapshot, SHA-256 inventory, bundled recovery runbook and offline pinned-image guidance
 
-A standard `restic check` is repository consistency evidence, not proof that selected files can be recovered byte-for-byte. Acceptance still requires an actual staging restore plus byte/hash/content verification.
+A standard `restic check` is repository consistency evidence, not proof that selected files can be recovered byte-for-byte. Acceptance still requires an actual staging restore plus independent byte/hash/content verification.
 
 ## Recovery safety invariants
 
@@ -59,6 +61,9 @@ These are not negotiable unless the architecture is explicitly redesigned and re
 - a locally completed backup is not authoritative success until the controller ACKs the exact leased result
 - repository credentials stay local to the workstation/agent
 - backup payloads never pass through Nexus control plane, Cloudflare or PCWatch
+- generic-agent source paths must not be able to descend into their own backup repository or restore staging tree
+- a fresh generic Agent must start inert; it must not acquire a source/repository/restore/remote definition from an example config automatically
+- the beta Unraid `/data` mapping must default to a narrow placeholder source root, not the whole `/mnt/user` tree
 
 ## M8 resilience/failure work – merged
 
@@ -66,59 +71,61 @@ Deterministic torture coverage includes controller recreation during a lease, ex
 
 CI runs workstation-agent test/vet on both Linux and native Windows, plus Windows cross-build and full Docker/release validation.
 
-## Emergency recovery – PR #23
+## Emergency recovery – merged
 
-`emergency-recovery-kit` adds a recovery path for losing Nexus Backup itself while repositories/persistent state survive.
+PR #23 / `9eb2e5c3...` provides a self-contained Nexus recovery bundle and `docs/emergency-recovery.md`.
 
-Implemented on the branch:
+The bundle includes controller SQLite/auth/identity, generic-agent config/secrets, a full hash-verified copy of the runbook, version/revision/migrations and SHA-256 file inventory. It excludes backup payloads, source data, restore staging, disposable caches, workstation-local repository secrets and image archives. The runbook documents a separate offline `docker image save` archive for exact pinned control + agent images.
 
-- `apps/local-server/bin/emergency-export.mjs`
-- consistent live SQLite snapshot using `quick_check` + `VACUUM INTO` + snapshot `integrity_check`
-- control identity/auth files copied into the bundle
-- complete generic-agent config/secrets tree copied into the bundle
-- full `EMERGENCY-RECOVERY.md` runbook copied into every bundle and covered by the manifest, so recovery instructions do not depend on GitHub access
-- SHA-256 + size manifest for every bundled file
-- Nexus version/revision and applied migration list in the manifest
-- verification rejects changed/missing/extra files and bad SQLite integrity
-- manifest database/runbook paths must be safe relative paths inside the hash-verified bundle inventory
-- database snapshot names cannot escape control config
-- source/output overlap checks resolve prospective real filesystem paths, including missing descendants under symlinked ancestors, before creating directories
-- nested symlink-parent overlap is rejected without leaving directories inside source config
-- bundle content symlinks are rejected so a bundle cannot silently depend on another host path
-- existing bundle directories are never overwritten
-- emergency exporter CLI/library are included in the normal JS syntax gate
-- control-image CI verifies exporter CLI/library and bundled recovery runbook are physically present in the built image
-- tests cover live WAL state, preserved secrets, bundled runbook, corruption/tamper detection, manifest path traversal, database-name traversal, direct/symlinked/prospective overlap, existing-output refusal and symlink refusal
-- runbook documents a separate offline `docker image save` archive containing exact pinned control + generic-agent images so disaster recovery need not depend on GHCR or a separate utility image
+The first restored controller boot uses disposable inspection volumes on a loopback-only alternate port with no workers connected. Inspection state is discarded; production recovery volumes are recreated from the unchanged verified bundle before reconnecting workers.
 
-Important recovery design decision: the first restored controller boot uses **disposable inspection volumes** on a loopback-only alternate port with no workers connected. Normal schedulers are not given a special recovery mode; if they mutate scheduler/job state during inspection, that state is thrown away. Production recovery volumes are recreated a second time from the unchanged verified emergency bundle before any worker reconnects.
+The recovery runbook is still not field-proven until its disposable drill is executed.
 
-The emergency bundle intentionally excludes backup payloads/source data/restore staging/disposable caches, workstation-local repository secrets and container image archives. It contains privileged secrets and must be stored encrypted off-host. Its SHA-256 manifest detects corruption/inventory changes relative to the manifest; it is not a cryptographic signature against an attacker able to replace both bundle contents and manifest.
+## Fresh install / acceptance – PR #24
 
-The runbook is not considered proven until the disposable recovery drill in the document has actually been performed, including offline image archive verification/load or equivalent proof that the exact images are independently available.
+Reviewing the real beta Unraid mappings found a safety hazard before documentation was finalized: the old Agent template exposed `/data -> /mnt/user`, `/backup` mapped a path beneath `/mnt/user`, and the old worked example was also the auto-created starter config with `paths: ["/data"]`. That combination could let a backup source see its own repository through another container path.
+
+PR #24 fixes this in code, packaging and docs rather than relying only on warnings:
+
+- new `config/agent.default.json` has empty sources/repositories/restore targets/rclone endpoints/rTorrent gates and empty tools
+- `Dockerfile.agent` uses the inert file for `/app/defaults/agent.json`
+- `config/agent.example.json` remains a worked example but narrows its example source to `/data/example-source`
+- the Unraid Agent template now defaults `/data` to `/mnt/user/nexus-backup-source`, not all of `/mnt/user`
+- regression tests require the starter config to stay inert and prohibit the worked example from using the whole `/data` mount as a source
+- Docker image CI verifies the built Agent contains the inert starter config
+- Unraid template CI locks the narrow `/data` default and rejects `/mnt/user` as the default
+- `unraid/README.md` documents source/repository/restore containment and the deliberate inert first start
+- `docs/fresh-install.md` defines a clean Unraid + Windows deployment without chat-history assumptions
+- `docs/acceptance-test.md` defines an isolated `C:\NexusBackup-Test` proof with an independent SHA-256 reference manifest, dedicated test repository, backup/inventory/integrity/dry-run/staging restore, byte/hash verification, restart/control-outage/repository-outage/interrupted-restore tests and a final post-fault restore verification
+- top-level README roadmap is refreshed; M8, integrity and emergency recovery are no longer shown as unfinished
+
+Important acceptance prerequisite: NexusBackup-Agent's `/backup` mount is **not** a Windows-facing repository service. Final Windows -> Unraid proof requires a dedicated test-only Restic endpoint on Unraid that the Windows SYSTEM task can actually reach through the intended transport. If that endpoint is not provisioned, a local workstation-repository smoke test does not count as final acceptance.
+
+PCWatch-backup and standalone Copyarr remain untouched throughout the acceptance drill, and the Nexus acceptance repository must never be shared with PCWatch.
 
 ## Product gaps before a real workstation acceptance test
 
-- finish final CI/review and merge PR #23
-- fresh deployment/install/acceptance docs for Unraid + Windows without relying on chat history
+- finish final CI/review and merge PR #24
 - M9 architecture/security review with all high-severity findings resolved
 - final preflight review of the exact isolated acceptance procedure
 
 ## Real-machine acceptance once code is ready
 
-Use a disposable `NexusBackup-Test` dataset and preferably an isolated test repository first. Required real-world proof includes:
+Use the disposable `NexusBackup-Test` dataset and an isolated test repository defined by `docs/acceptance-test.md`. Required real-world proof includes:
 
 - normal backup
 - snapshot inventory and browse
 - standard repository integrity check
 - dry-run preview
 - real staging restore
-- byte/hash/content verification of restored data
+- independent byte/hash/content verification of restored data
 - controller restart
-- agent restart
-- temporary network loss
+- generic-agent restart
+- workstation-agent restart
+- temporary Control-path loss
 - repository unavailable
 - interrupted write restore
+- final post-fault integrity + staging restore + byte/hash PASS
 
 Only after that proof should a real workstation be cut over from PCWatch-backup. Cut over one workstation at a time; never run PCWatch and Nexus writes against the same Restic repository concurrently.
 
