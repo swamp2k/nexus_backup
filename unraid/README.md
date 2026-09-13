@@ -42,15 +42,15 @@ The shared runtime directory contains the generated local agent token. Control w
 The beta Agent template also exposes editable storage roots:
 
 ```text
-/data       default host path /mnt/user                    read-only
+/data       default host path /mnt/user/nexus-backup-source        read-only
 /backup     default host path /mnt/user/backups/nexus-backup
 /restore    default host path /mnt/user/restore/nexus-backup
 /downloads  default host path /mnt/user/downloads
 ```
 
-These are convenience defaults, not assumptions about your final layout. Review them during installation and point them at the shares/pools you actually want to use.
+These are convenience defaults, not assumptions about your final layout. The `/data` default is deliberately narrow instead of exposing all of `/mnt/user`; point it at the exact share/directory you intend Nexus to protect.
 
-A critical containment rule applies: **the configured backup source must not be able to descend into its own repository or restore staging tree**. The broad template default `/data -> /mnt/user` is useful for manual flexibility but is not a safe reason to configure `paths: ["/data"]` when `/backup` or `/restore` also map somewhere beneath `/mnt/user` on the host. Prefer narrowing the `/data` host mapping itself to the exact source share/directory, then use a correspondingly narrow path in `agent.json`.
+A critical containment rule still applies: **the configured backup source must not be able to descend into its own repository or restore staging tree**. Do not widen `/data` to `/mnt/user` and then configure `paths: ["/data"]` while `/backup` or `/restore` also map somewhere beneath `/mnt/user` on the host. Prefer a narrow `/data` host mapping and a correspondingly narrow path in `agent.json`.
 
 Agent is the only container granted:
 
