@@ -88,6 +88,8 @@ jobs:
           assert ac["/config"]["Mode"] == "rw"
           assert ac["/run/nexus-backup"]["Mode"] == "ro"
           assert ac["/data"]["Mode"] == "ro"
+          assert ac["/data"]["Default"] == "/mnt/user/nexus-backup-source"
+          assert ac["/data"]["Default"] != "/mnt/user"
 
           control_extra = control.findtext("ExtraParams") or ""
           agent_extra = agent.findtext("ExtraParams") or ""
