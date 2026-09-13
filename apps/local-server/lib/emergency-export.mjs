@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { cp, lstat, mkdir, readFile, readdir, readlink, rm, stat, writeFile, chmod } from "node:fs/promises";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 const REQUIRED_CONTROL_FILES = ["control-token", "agent-token"];
@@ -204,7 +204,7 @@ function assertNoPathOverlap(output, source, label) {
 
 function sameOrInside(candidate, parent) {
   const rel = relative(parent, candidate);
-  return rel === "" || (!rel.startsWith(`..${sep}`) && rel !== ".." && !rel.startsWith(".."));
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
 }
 
 function sqlString(value) { return String(value).replaceAll("'", "''"); }
