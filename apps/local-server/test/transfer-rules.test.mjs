@@ -2,11 +2,12 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { createTransferRuleService, persistTransferDiscovery } from "../lib/transfer-rules.mjs";
 import { openSqliteD1 } from "../lib/sqlite-d1.mjs";
 
-const migrationsDir=new URL("../../../migrations/",import.meta.url).pathname;
+const migrationsDir=fileURLToPath(new URL("../../../migrations/",import.meta.url));
 const config={available:true,endpoints:[{id:"seedbox",fs:"seedbox:",allowMove:true},{id:"downloads",fs:"/downloads",allowMove:false}]};
 
 async function fixture({initialBehavior="ignore_existing",stabilitySeconds=600,scanIntervalSeconds=300,retryCount=3,retryWaitSeconds=300}={}){

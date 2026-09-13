@@ -2,12 +2,13 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { createManagedDeviceService } from "../lib/managed-devices.mjs";
 import { createWorkstationService } from "../lib/workstations.mjs";
 import { openSqliteD1 } from "../lib/sqlite-d1.mjs";
 
-const migrationsDir = new URL("../../../migrations/", import.meta.url).pathname;
+const migrationsDir = fileURLToPath(new URL("../../../migrations/", import.meta.url));
 
 async function fixture() {
   const dir = await mkdtemp(join(tmpdir(), "nexus-workstation-recovery-"));

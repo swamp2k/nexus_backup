@@ -315,19 +315,29 @@ export function createWorkstationService({
   async function recoverExpired(deviceId = null) {
     const at = nowDate(now).toISOString();
     const deviceClause = deviceId ? " AND device_id=?" : "";
-    const restoreArgs = deviceId ? [at, at, deviceId] : [at, at];
     const failed = await db.prepare(`
       UPDATE workstation_runs SET state='failed',finished_at=?,lease_token=NULL,lease_expires_at=NULL,
         error_message='Restore lease expired; manual retry required',updated_at=?
       WHERE operation='restore' AND state IN ('leased','running') AND lease_expires_at IS NOT NULL AND lease_expires_at<=?${deviceClause}
-    `.replace("lease_expires_at<=?" + deviceClause, deviceId ? "lease_expires_at<=? AND device_id=?" : "lease_expires_at<=?"))
-      .bind(...(deviceId ? [at, at, at, deviceId] : [at, at, at])).run();
-    const requeueSql = deviceId
-      ? `UPDATE workstation_runs SET state='queued',lease_token=NULL,lease_expires_at=NULL,error_message='Previous lease expired; requeued',updated_at=? WHERE device_id=? AND operation<>'restore' AND state IN ('leased','running') AND lease_expires_at IS NOT NULL AND lease_expires_at<=?`
-      : `UPDATE workstation_runs SET state='queued',lease_token=NULL,lease_expires_at=NULL,error_message='Previous lease expired; requeued',updated_at=? WHERE operation<>'restore' AND state IN ('leased','running') AND lease_expires_at IS NOT NULL AND lease_expires_at<=?`;
-    const requeueArgs = deviceId ? [at, deviceId, at] : [at, at];
-    const requeued = await db.prepare(requeueSql).bind(...requeueArgs).run();
-    return Number(failed.meta?.changes ?? 0) + Number(requeued.meta?.changes ?? 0);
+      RETURNING id,device_id
+    `).bind(...(deviceId ? [at, at, at, deviceId] : [at, at, at])).all();
+    const requeued = await db.prepare(`
+      UPDATE workstation_runs SET state='queued',lease_token=NULL,lease_expires_at=NULL,error_message='Previous lease expired; requeued',updated_at=?
+      WHERE operation<>'restore' AND state IN ('leased','running') AND lease_expires_at IS NOT NULL AND lease_expires_at<=?${deviceClause}
+      RETURNING id,device_id
+    `).bind(...(deviceId ? [at, at, deviceId] : [at, at])).all();
+
+    const recoveredRuns = [...failed.results, ...requeued.results];
+    for (const run of recoveredRuns) {
+      // Only clear status when it still points at the run being recovered, so a
+      // newer run's status (e.g. one already re-leased) is never clobbered.
+      await db.prepare(`
+        UPDATE workstation_status SET agent_state='idle',current_run_id=NULL,updated_at=?
+        WHERE device_id=? AND current_run_id=?
+      `).bind(at, run.device_id, run.id).run();
+    }
+
+    return recoveredRuns.length;
   }
 
   async function persistRecoveryResult(deviceId, runId, operation, request, value, scannedAt) {
