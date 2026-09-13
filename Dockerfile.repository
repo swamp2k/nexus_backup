@@ -31,7 +31,8 @@ RUN chmod 0755 /usr/local/bin/nexus-repository-entrypoint /usr/local/bin/nexus-r
 
 ENV NEXUS_BACKUP_VERSION=$NEXUS_BACKUP_VERSION \
     NEXUS_BACKUP_REVISION=$NEXUS_BACKUP_REVISION \
-    NEXUS_BACKUP_REPOSITORY_PORT=8000
+    NEXUS_BACKUP_REPOSITORY_PORT=8000 \
+    NEXUS_BACKUP_REPOSITORY_PUBLIC_PORT=8001
 
-EXPOSE 8000
+EXPOSE 8000 8001
 ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/nexus-repository-entrypoint"]
