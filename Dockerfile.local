@@ -55,10 +55,10 @@ COPY --from=build /src/apps/control-plane/package.json ./apps/control-plane/pack
 COPY --from=build /src/apps/control-plane/dist ./apps/control-plane/dist
 COPY apps/local-server ./apps/local-server
 COPY migrations ./migrations
-COPY --from=workstation /out/nexus-backup-workstation-windows-amd64.exe ./workstation-assets/nexus-backup-workstation-windows-amd64.exe
-COPY --from=workstation /out/nexus-backup-workstation-windows-amd64.exe.sha256 ./workstation-assets/nexus-backup-workstation-windows-amd64.exe.sha256
-COPY --from=restic-windows /out/restic.exe ./workstation-assets/restic.exe
-COPY --from=restic-windows /out/restic.exe.sha256 ./workstation-assets/restic.exe.sha256
+COPY --from=workstation /out/nexus-backup-workstation-windows-amd64.exe ./apps/local-server/web/workstation/nexus-backup-workstation-windows-amd64.exe
+COPY --from=workstation /out/nexus-backup-workstation-windows-amd64.exe.sha256 ./apps/local-server/web/workstation/nexus-backup-workstation-windows-amd64.exe.sha256
+COPY --from=restic-windows /out/restic.exe ./apps/local-server/web/workstation/restic.exe
+COPY --from=restic-windows /out/restic.exe.sha256 ./apps/local-server/web/workstation/restic.exe.sha256
 
 RUN mkdir -p /app/node_modules/@nexus-backup /config /run/nexus-backup \
     && ln -s /app/packages/core /app/node_modules/@nexus-backup/core
@@ -67,7 +67,6 @@ ENV NEXUS_BACKUP_VERSION=$NEXUS_BACKUP_VERSION \
     NEXUS_BACKUP_REVISION=$NEXUS_BACKUP_REVISION \
     NEXUS_BACKUP_CONFIG_DIR=/config \
     NEXUS_BACKUP_RUNTIME_DIR=/run/nexus-backup \
-    NEXUS_BACKUP_WORKSTATION_ASSETS=/app/workstation-assets \
     NEXUS_BACKUP_HOST=0.0.0.0 \
     NEXUS_BACKUP_PORT=8787 \
     NEXUS_BACKUP_INTERNAL_PORT=8788
