@@ -18,13 +18,19 @@ function Download-VerifiedAsset([string]$Url, [string]$ChecksumUrl, [string]$Des
   }
 }
 
-function Download-PinnedAsset([string]$Url, [string]$ExpectedSha256, [string]$Destination) {
+function Write-PinnedBase64Asset([string]$Base64, [string]$ExpectedSha256, [string]$Destination) {
   $expected = $ExpectedSha256.Trim().ToLowerInvariant()
-  if ($expected -notmatch '^[0-9a-f]{64}$') { Fail 'Pinned asset SHA-256 must contain exactly 64 hexadecimal characters.' }
-  if ($Url -notmatch '^https?://') { Fail 'Pinned asset URL must use HTTP or HTTPS.' }
-  Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $Destination
+  if ($expected -notmatch '^[0-9a-f]{64}$') { Fail 'Pinned Repository CA SHA-256 must contain exactly 64 hexadecimal characters.' }
+  if ([string]::IsNullOrWhiteSpace($Base64)) { Fail 'Pinned Repository CA payload is empty.' }
+  try {
+    $bytes = [Convert]::FromBase64String($Base64.Trim())
+  } catch {
+    Fail 'Pinned Repository CA payload is not valid base64.'
+  }
+  if ($bytes.Length -eq 0) { Fail 'Pinned Repository CA payload decoded to an empty file.' }
+  [IO.File]::WriteAllBytes($Destination, $bytes)
   $actual = (Get-FileHash -Algorithm SHA256 -Path $Destination).Hash.ToLowerInvariant()
-  if ($actual -ne $expected) { Fail "Pinned asset checksum mismatch for $Url" }
+  if ($actual -ne $expected) { Fail 'Pinned Repository CA checksum mismatch.' }
 }
 
 function Write-WorkstationConfig([string]$Path, [System.Collections.IDictionary]$Config) {
@@ -203,14 +209,14 @@ try {
     $config['restPassword'] = $restPassword
   }
 
-  $caUrl = ([string]$env:NEXUS_BACKUP_REPOSITORY_CA_URL).Trim()
+  $caB64 = ([string]$env:NEXUS_BACKUP_REPOSITORY_CA_B64).Trim()
   $caSha = ([string]$env:NEXUS_BACKUP_REPOSITORY_CA_SHA256).Trim()
-  if ([string]::IsNullOrWhiteSpace($caUrl) -xor [string]::IsNullOrWhiteSpace($caSha)) {
-    Fail 'NEXUS_BACKUP_REPOSITORY_CA_URL and NEXUS_BACKUP_REPOSITORY_CA_SHA256 must be supplied together.'
+  if ([string]::IsNullOrWhiteSpace($caB64) -xor [string]::IsNullOrWhiteSpace($caSha)) {
+    Fail 'NEXUS_BACKUP_REPOSITORY_CA_B64 and NEXUS_BACKUP_REPOSITORY_CA_SHA256 must be supplied together.'
   }
-  if (-not [string]::IsNullOrWhiteSpace($caUrl)) {
-    Write-Host 'Nexus Backup: downloading pinned Repository CA certificate...'
-    Download-PinnedAsset $caUrl $caSha $tmpCa
+  if (-not [string]::IsNullOrWhiteSpace($caB64)) {
+    Write-Host 'Nexus Backup: decoding and verifying Repository CA certificate from local onboarding values...'
+    Write-PinnedBase64Asset $caB64 $caSha $tmpCa
     Move-Item -Force $tmpCa $caCertPath
     $config['caCertPath'] = $caCertPath
   }
@@ -219,10 +225,15 @@ try {
     [IO.File]::WriteAllText($passwordPath, [string]$env:NEXUS_BACKUP_RESTIC_PASSWORD, (New-Object Text.UTF8Encoding($false)))
   }
 
+  $isPinnedRest = [string]$config['repository'] -match '^rest:https://' -and -not [string]::IsNullOrWhiteSpace([string]$config['restUsername'])
+  if ($isPinnedRest -and [string]::IsNullOrWhiteSpace([string]$config['caCertPath'])) {
+    Fail 'Authenticated Nexus Repository setup requires a locally supplied and SHA-256-verified CA certificate.'
+  }
+
   # A Nexus-managed REST repository is initialized/verified only during this explicit
   # local provisioning step. Normal Agent runtime never initializes a remote repository
   # after a failed auth/TLS/network probe.
-  if ([string]$config['repository'] -match '^rest:https://' -and -not [string]::IsNullOrWhiteSpace([string]$config['restUsername']) -and -not [string]::IsNullOrWhiteSpace([string]$config['caCertPath'])) {
+  if ($isPinnedRest) {
     Invoke-PinnedRepositoryProvision $tmpRestic $config
     $config['autoInit'] = $false
   }
@@ -253,5 +264,5 @@ try {
   }
 } finally {
   Remove-Item $tmpAgent,$tmpRestic,$tmpCa -Force -ErrorAction SilentlyContinue
-  Remove-Item Env:NEXUS_BACKUP_TOKEN,Env:NEXUS_BACKUP_REST_PASSWORD,Env:NEXUS_BACKUP_RESTIC_PASSWORD -ErrorAction SilentlyContinue
+  Remove-Item Env:NEXUS_BACKUP_TOKEN,Env:NEXUS_BACKUP_REPOSITORY,Env:NEXUS_BACKUP_REST_USERNAME,Env:NEXUS_BACKUP_REST_PASSWORD,Env:NEXUS_BACKUP_REPOSITORY_CA_B64,Env:NEXUS_BACKUP_REPOSITORY_CA_SHA256,Env:NEXUS_BACKUP_RESTIC_PASSWORD -ErrorAction SilentlyContinue
 }
