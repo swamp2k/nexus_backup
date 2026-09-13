@@ -335,7 +335,7 @@ let repositoryCheckRefreshBusy = false;
 const repositoryCheckObserver = new MutationObserver(() => {
   if (isRepositoryView()) queueMicrotask(() => decorateRepositoryIntegrity(repositoryCheckJobs));
 });
-repositoryCheckObserver.observe(document.querySelector("#content"), { childList: true, subtree: true });
+repositoryCheckObserver.observe(document.querySelector("#content"), { childList: true });
 window.addEventListener("hashchange", () => {
   if (isRepositoryView()) void refreshRepositoryIntegrity();
 });
