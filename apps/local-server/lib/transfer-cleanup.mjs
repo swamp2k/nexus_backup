@@ -81,7 +81,7 @@ export function createTransferCleanupService({ db, enqueueJob, now = () => new D
 
   async function queue(at, limit, failures) {
     const rows = (await db.prepare(`
-      SELECT o.rule_id,o.object_key,o.rel_path,o.size,o.cleanup_attempt_count,
+      SELECT o.rule_id,o.object_key,o.rel_path,o.size,o.mod_time,o.cleanup_attempt_count,
              r.destination_endpoint_id,r.destination_path
       FROM transfer_objects AS o
       JOIN transfer_rules AS r ON r.id=o.rule_id
@@ -105,6 +105,7 @@ export function createTransferCleanupService({ db, enqueueJob, now = () => new D
             destinationPath: String(row.destination_path),
             relPath: String(row.rel_path),
             expectedSize: Number(row.size),
+            expectedModTime: String(row.mod_time),
             objectKey,
             cleanupAttempt: attempt,
           },
