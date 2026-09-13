@@ -93,6 +93,10 @@ const PUBLIC_FILES = new Map([
   ["/auth.css", ["auth.css", "text/css; charset=utf-8"]],
   ["/favicon.svg", ["favicon.svg", "image/svg+xml"]],
   ["/install.ps1", ["install.ps1", "text/plain; charset=utf-8"]],
+  ["/workstation/nexus-backup-workstation-windows-amd64.exe", ["workstation/nexus-backup-workstation-windows-amd64.exe", "application/octet-stream"]],
+  ["/workstation/nexus-backup-workstation-windows-amd64.exe.sha256", ["workstation/nexus-backup-workstation-windows-amd64.exe.sha256", "text/plain; charset=utf-8"]],
+  ["/workstation/restic.exe", ["workstation/restic.exe", "application/octet-stream"]],
+  ["/workstation/restic.exe.sha256", ["workstation/restic.exe.sha256", "text/plain; charset=utf-8"]],
 ]);
 
 const gateway = createServer(async (request, response) => {
@@ -364,7 +368,7 @@ async function servePublic(path, response) {
   const content = await readFile(join(webDir, file));
   response.statusCode = 200;
   response.setHeader("content-type", contentType);
-  response.setHeader("cache-control", path === "/auth.html" || path === "/install.ps1" ? "no-store" : "public, max-age=300");
+  response.setHeader("cache-control", path === "/auth.html" || path === "/install.ps1" || path.startsWith("/workstation/") ? "no-store" : "public, max-age=300");
   response.setHeader("x-content-type-options", "nosniff");
   response.setHeader("content-security-policy", "default-src 'self'; img-src 'self'; style-src 'self'; script-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'");
   response.end(content);
