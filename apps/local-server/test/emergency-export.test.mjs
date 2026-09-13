@@ -86,6 +86,44 @@ test("emergency verification rejects a tampered secret file", async () => {
   } finally { await f.close(); }
 });
 
+test("emergency verification confines manifest database paths to hashed bundle files", async () => {
+  const f = await fixture();
+  try {
+    const outputDir = join(f.root, "off-host", "bundle");
+    await createEmergencyBundle({ configDir: f.configDir, agentConfigDir: f.agentConfigDir, outputDir });
+
+    const outsidePath = join(f.root, "outside.sqlite");
+    const outside = new DatabaseSync(outsidePath);
+    outside.exec("CREATE TABLE outside_probe(id INTEGER PRIMARY KEY)");
+    outside.close();
+
+    const manifestPath = join(outputDir, "manifest.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+    manifest.database.path = "../../outside.sqlite";
+    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+
+    await assert.rejects(
+      () => verifyEmergencyBundle(outputDir),
+      /database\.path must be a safe relative path/,
+    );
+  } finally { await f.close(); }
+});
+
+test("emergency export rejects database names that can escape control config", async () => {
+  const f = await fixture();
+  try {
+    await assert.rejects(
+      () => createEmergencyBundle({
+        configDir: f.configDir,
+        agentConfigDir: f.agentConfigDir,
+        outputDir: join(f.root, "off-host", "bundle"),
+        databaseName: "../outside.sqlite",
+      }),
+      /databaseName must be a simple filename/,
+    );
+  } finally { await f.close(); }
+});
+
 test("emergency export refuses overlapping destinations and existing bundles", async () => {
   const f = await fixture();
   try {
