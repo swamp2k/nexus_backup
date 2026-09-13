@@ -8,6 +8,7 @@ PUBLIC_DIR=${NEXUS_BACKUP_REPOSITORY_PUBLIC_DIR:-/public}
 DATA_DIR=${NEXUS_BACKUP_REPOSITORY_DATA_DIR:-/data}
 HOST=${NEXUS_BACKUP_REPOSITORY_HOST:-}
 PORT=${NEXUS_BACKUP_REPOSITORY_PORT:-8000}
+PUBLIC_PORT=${NEXUS_BACKUP_REPOSITORY_PUBLIC_PORT:-8001}
 INITIAL_USER=${NEXUS_BACKUP_REPOSITORY_INITIAL_USER:-}
 
 fail() {
@@ -19,10 +20,13 @@ fail() {
 case "$HOST" in
   *[!A-Za-z0-9.-]*) fail "NEXUS_BACKUP_REPOSITORY_HOST contains unsupported characters" ;;
 esac
-case "$PORT" in
-  ''|*[!0-9]*) fail "NEXUS_BACKUP_REPOSITORY_PORT must be numeric" ;;
-esac
-[ "$PORT" -ge 1 ] 2>/dev/null && [ "$PORT" -le 65535 ] 2>/dev/null || fail "NEXUS_BACKUP_REPOSITORY_PORT must be between 1 and 65535"
+for value in "$PORT" "$PUBLIC_PORT"; do
+  case "$value" in
+    ''|*[!0-9]*) fail "repository ports must be numeric" ;;
+  esac
+  [ "$value" -ge 1 ] 2>/dev/null && [ "$value" -le 65535 ] 2>/dev/null || fail "repository ports must be between 1 and 65535"
+done
+[ "$PORT" != "$PUBLIC_PORT" ] || fail "TLS repository port and public CA bootstrap port must differ"
 
 mkdir -p "$CONFIG_DIR/clients" "$PUBLIC_DIR" "$DATA_DIR"
 chmod 0700 "$CONFIG_DIR" "$CONFIG_DIR/clients"
@@ -61,6 +65,7 @@ if [ ! -s "$TLS_KEY" ] || [ ! -s "$TLS_CERT" ] || [ "$current_host" != "$HOST" ]
   echo "Nexus Backup Repository: generated TLS certificate for $HOST"
 fi
 
+rm -rf "$PUBLIC_DIR"/*
 cp "$TLS_CERT" "$PUBLIC_CERT"
 chmod 0644 "$PUBLIC_CERT"
 sha256sum "$PUBLIC_CERT" | sed 's#  .*/#  #' > "$PUBLIC_DIR/repository-ca.pem.sha256"
@@ -74,6 +79,10 @@ if [ -n "$INITIAL_USER" ]; then
   echo "Nexus Backup Repository: initial client '$INITIAL_USER' is ready; retrieve its local setup values with: nexus-repository-client $INITIAL_USER main"
 fi
 
+# Only non-secret certificate/bootstrap metadata is exposed here. The workstation
+# installer pins repository-ca.pem to the SHA-256 printed by nexus-repository-client.
+httpd -p "$PUBLIC_PORT" -h "$PUBLIC_DIR"
+echo "Nexus Backup Repository: CA bootstrap available on http://$HOST:$PUBLIC_PORT/; installer must verify the locally supplied SHA-256"
 echo "Nexus Backup Repository: listening on TLS port $PORT; private authenticated repositories are enabled"
 exec /usr/local/bin/rest-server \
   --path "$DATA_DIR" \
