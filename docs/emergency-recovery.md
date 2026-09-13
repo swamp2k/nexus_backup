@@ -4,6 +4,8 @@ This runbook covers loss of the Nexus Backup application/container while backup 
 
 The goal is to recover control-plane identity and local storage configuration safely enough to inspect the system before any backup/restore/transfer worker is allowed to resume.
 
+The exporter copies this complete runbook into every emergency bundle as `EMERGENCY-RECOVERY.md`, and the copied runbook is covered by the bundle manifest. Recovery therefore does not depend on access to this Git repository.
+
 ## What must exist outside Nexus
 
 Keep at least one recent emergency bundle **off the Nexus host** and encrypted. The bundle contains secrets and is equivalent to privileged backup-system access.
@@ -16,12 +18,15 @@ An emergency bundle contains:
 - `/config/auth.json` when local admin setup has been completed
 - `/config/setup-token` only when setup is still pending
 - the complete local agent configuration tree (`agent.json`, Restic password files, rclone configuration and other local storage credentials)
+- this full runbook as `EMERGENCY-RECOVERY.md`
 - `manifest.json` with Nexus version/revision, applied migrations, size and SHA-256 for every bundled file
 - `RECOVERY.txt`
 
-It intentionally does **not** contain backup repository payloads, source data, restore staging data, runtime token mirrors, disposable agent caches/state, or workstation-local repository URLs/passwords. Workstation repository credentials remain on the Windows workstation by design.
+It intentionally does **not** contain backup repository payloads, source data, restore staging data, runtime token mirrors, disposable agent caches/state, workstation-local repository URLs/passwords, or container image archives. Workstation repository credentials remain on the Windows workstation by design.
 
 The emergency bundle is therefore the backup of **Nexus itself**, not a second copy of the protected data.
+
+For recovery when the registry is unavailable, keep an offline archive of the exact Nexus control and generic-agent images alongside the encrypted bundle. Without a cached image or an offline image archive, image retrieval remains an external dependency.
 
 ## Create a bundle while Nexus is healthy
 
@@ -34,7 +39,7 @@ docker compose cp "control:/tmp/nexus-backup-emergency-$STAMP" "./nexus-backup-e
 docker compose exec control rm -rf "/tmp/nexus-backup-emergency-$STAMP"
 ```
 
-The exporter runs SQLite `quick_check`, takes a consistent snapshot with `VACUUM INTO`, verifies the snapshot with `integrity_check`, copies the control identity and agent-config secrets, rejects symlinks, and writes a SHA-256 manifest. It never copies repository payload data.
+The exporter runs SQLite `quick_check`, takes a consistent snapshot with `VACUUM INTO`, verifies the snapshot with `integrity_check`, copies the control identity and agent-config secrets, bundles this runbook, rejects symlinks, and writes a SHA-256 manifest. It never copies repository payload data.
 
 Verify the copied bundle **before** moving it off-host. Prefer the same/pinned control image recorded for the deployment:
 
@@ -49,9 +54,30 @@ docker run --rm \
 
 A successful verification prints JSON with `"ok": true`. Then move the bundle to encrypted storage that is not dependent on the Nexus host.
 
-Create a new verified bundle after device/workstation enrollment or credential rotation, after repository/rclone credential or agent-config changes, before and after Nexus upgrades/migrations, after meaningful policy changes, and periodically even when configuration appears unchanged.
+The SHA-256 manifest detects corruption and inventory changes relative to the manifest. It is **not** a digital signature against an attacker who can replace both files and `manifest.json`. Protect the bundle itself with trusted encrypted/offline storage.
 
-Never keep the only emergency bundle inside the same Docker volume, Unraid appdata share, or physical host that it is meant to recover.
+### Keep exact images offline too
+
+While the known-good deployment images are present locally, archive the exact control and generic-agent images:
+
+```sh
+TAG="<exact-release-tag>"
+CONTROL_IMAGE="ghcr.io/swamp2k/nexus-backup-control:$TAG"
+AGENT_IMAGE="ghcr.io/swamp2k/nexus-backup-agent:$TAG"
+ARCHIVE="nexus-backup-images-$TAG.tar"
+
+docker image inspect "$CONTROL_IMAGE" "$AGENT_IMAGE" >/dev/null
+docker image save -o "$ARCHIVE" "$CONTROL_IMAGE" "$AGENT_IMAGE"
+sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
+```
+
+Store the image archive and checksum alongside the emergency bundle in the same trusted off-host recovery location. Do not put the image tar inside the emergency bundle itself; it is large, changes independently, and the bundle exporter intentionally handles only Nexus state/configuration.
+
+Before relying on the archive, test that its checksum verifies. A periodic disposable `docker load` test is stronger evidence than merely retaining the file.
+
+Create a new verified bundle after device/workstation enrollment or credential rotation, after repository/rclone credential or agent-config changes, before and after Nexus upgrades/migrations, after meaningful policy changes, and periodically even when configuration appears unchanged. Refresh the offline image archive whenever the deployed Nexus image tag changes.
+
+Never keep the only emergency bundle or image archive inside the same Docker volume, Unraid appdata share, or physical host that it is meant to recover.
 
 ## Export after the normal stack has stopped but Docker volumes survive
 
@@ -83,6 +109,19 @@ The control volume is mounted read/write because SQLite may need normal filesyst
 
 ## Disaster restore: safe sequence
 
+### 0. Recover the pinned images if necessary
+
+If the known-good images are no longer cached and the registry is unavailable, verify and load the off-host image archive first:
+
+```sh
+ARCHIVE="/path/to/nexus-backup-images-<tag>.tar"
+cd "$(dirname "$ARCHIVE")"
+sha256sum -c "$(basename "$ARCHIVE").sha256"
+docker load -i "$ARCHIVE"
+```
+
+Set `IMAGE` below to the exact control image tag restored from the archive. Do not substitute an arbitrary newer image during initial disaster recovery.
+
 ### 1. Freeze execution
 
 Stop the normal Nexus control and generic-agent containers. Prevent workstation agents from reaching the normal Nexus endpoint while recovering it.
@@ -104,7 +143,7 @@ docker run --rm \
 
 Do not continue if SHA-256 inventory or SQLite integrity verification fails.
 
-Read `manifest.json` and note `nexusBackup.version`, `nexusBackup.revision`, and the final entry in `database.migrations`. Prefer the matching image version for first boot. Starting a newer image may apply forward-only migrations and adds unnecessary variables during disaster recovery.
+Read the bundled `EMERGENCY-RECOVERY.md` and `manifest.json`. Note `nexusBackup.version`, `nexusBackup.revision`, and the final entry in `database.migrations`. Prefer the matching image version for first boot. Starting a newer image may apply forward-only migrations and adds unnecessary variables during disaster recovery.
 
 ### 3. Create **disposable inspection volumes**
 
@@ -115,18 +154,20 @@ docker volume create nexus-inspect-control-config
 docker volume create nexus-inspect-agent-config
 ```
 
-Copy the verified bundle into them:
+Copy the verified bundle into them using the same pinned control image; no separate utility image is required:
 
 ```sh
 docker run --rm \
   -v "/path/to/emergency-bundle/control:/from:ro" \
   -v nexus-inspect-control-config:/to \
-  alpine:3.22 sh -eu -c 'cp -a /from/. /to/'
+  --entrypoint sh \
+  "$IMAGE" -eu -c 'cp -a /from/. /to/'
 
 docker run --rm \
   -v "/path/to/emergency-bundle/agent-config:/from:ro" \
   -v nexus-inspect-agent-config:/to \
-  alpine:3.22 sh -eu -c 'cp -a /from/. /to/'
+  --entrypoint sh \
+  "$IMAGE" -eu -c 'cp -a /from/. /to/'
 ```
 
 ### 4. Isolated first boot: control only, alternate port
@@ -134,8 +175,6 @@ docker run --rm \
 Do **not** start the normal Compose stack. Start only the recovered control container on a different host port:
 
 ```sh
-IMAGE="ghcr.io/swamp2k/nexus-backup-control:<bundle-version-or-known-good-tag>"
-
 docker run --rm --name nexus-recovery-control \
   -p 127.0.0.1:18787:8787 \
   -v nexus-inspect-control-config:/config \
@@ -179,18 +218,20 @@ docker volume create nexus-recovery-control-config
 docker volume create nexus-recovery-agent-config
 ```
 
-Copy the bundle roots again from the immutable verified bundle:
+Copy the bundle roots again from the immutable verified bundle using the pinned control image:
 
 ```sh
 docker run --rm \
   -v "/path/to/emergency-bundle/control:/from:ro" \
   -v nexus-recovery-control-config:/to \
-  alpine:3.22 sh -eu -c 'cp -a /from/. /to/'
+  --entrypoint sh \
+  "$IMAGE" -eu -c 'cp -a /from/. /to/'
 
 docker run --rm \
   -v "/path/to/emergency-bundle/agent-config:/from:ro" \
   -v nexus-recovery-agent-config:/to \
-  alpine:3.22 sh -eu -c 'cp -a /from/. /to/'
+  --entrypoint sh \
+  "$IMAGE" -eu -c 'cp -a /from/. /to/'
 ```
 
 `runtime` and `agent-state` may be recreated empty. The runtime agent-token mirror is derived from restored `/config/agent-token` at control startup.
@@ -238,7 +279,9 @@ A recovery attempt must never modify backup repository payloads merely to make t
 This runbook is not considered proven until a disposable exercise demonstrates all of the following:
 
 - export from a live WAL-mode controller
+- bundle contains its full hash-verified recovery runbook
 - off-host bundle verification
+- offline image archive checksum verification and disposable `docker load`, or equivalent proof that the exact images are independently available
 - replacement/loss of the original control deployment in the test environment
 - isolated control-only boot from disposable inspection volumes
 - preserved login, device/workstation state, policies and history
