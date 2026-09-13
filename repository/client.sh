@@ -3,10 +3,13 @@ set -eu
 
 umask 077
 CONFIG_DIR=${NEXUS_BACKUP_REPOSITORY_CONFIG_DIR:-/config}
+PUBLIC_DIR=${NEXUS_BACKUP_REPOSITORY_PUBLIC_DIR:-/public}
 HOST=${NEXUS_BACKUP_REPOSITORY_HOST:-}
 PORT=${NEXUS_BACKUP_REPOSITORY_PORT:-8000}
+PUBLIC_PORT=${NEXUS_BACKUP_REPOSITORY_PUBLIC_PORT:-8001}
 HTPASSWD="$CONFIG_DIR/.htpasswd"
 CLIENTS_DIR="$CONFIG_DIR/clients"
+PUBLIC_CERT="$PUBLIC_DIR/repository-ca.pem"
 
 usage() {
   echo "Usage: nexus-repository-client <username> [repository-name] [--rotate]" >&2
@@ -19,6 +22,7 @@ REPO_NAME=${2:-main}
 ROTATE=${3:-}
 [ -z "$ROTATE" ] || [ "$ROTATE" = "--rotate" ] || usage
 [ -n "$HOST" ] || { echo "NEXUS_BACKUP_REPOSITORY_HOST is not configured" >&2; exit 1; }
+[ -s "$PUBLIC_CERT" ] || { echo "repository CA certificate is not ready" >&2; exit 1; }
 
 case "$USER_NAME" in
   ''|*[!A-Za-z0-9._-]*) echo "username must use only letters, numbers, dot, underscore or hyphen" >&2; exit 1 ;;
@@ -49,12 +53,15 @@ fi
 [ "${NEXUS_REPOSITORY_QUIET:-0}" = "1" ] && exit 0
 
 REPOSITORY="rest:https://$HOST:$PORT/$USER_NAME/$REPO_NAME"
+CA_URL="http://$HOST:$PUBLIC_PORT/repository-ca.pem"
+CA_SHA256=$(sha256sum "$PUBLIC_CERT" | awk '{print $1}')
 cat <<EOF
 # Paste these lines into an elevated PowerShell on the workstation before running its Nexus install command.
-# They are transport credentials only; they are never sent to Nexus Control.
+# Transport credentials remain local to Repository + workstation and are never sent to Nexus Control.
 \$env:NEXUS_BACKUP_REPOSITORY='$REPOSITORY'
 \$env:NEXUS_BACKUP_REST_USERNAME='$USER_NAME'
 \$env:NEXUS_BACKUP_REST_PASSWORD='$PASSWORD'
-\$env:NEXUS_BACKUP_USE_LOCAL_REPOSITORY_CA='1'
+\$env:NEXUS_BACKUP_REPOSITORY_CA_URL='$CA_URL'
+\$env:NEXUS_BACKUP_REPOSITORY_CA_SHA256='$CA_SHA256'
 # Also set NEXUS_BACKUP_RESTIC_PASSWORD to the workstation's Restic encryption password before first install.
 EOF
