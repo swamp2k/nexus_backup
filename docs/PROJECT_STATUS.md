@@ -63,6 +63,7 @@ These are not negotiable unless the architecture is explicitly redesigned and re
 - backup payloads never pass through Nexus control plane, Cloudflare or PCWatch
 - generic-agent source paths must not be able to descend into their own backup repository or restore staging tree
 - a fresh generic Agent must start inert; it must not acquire a source/repository/restore/remote definition from an example config automatically
+- the beta Unraid `/data` mapping must default to a narrow placeholder source root, not the whole `/mnt/user` tree
 
 ## M8 resilience/failure work – merged
 
@@ -82,15 +83,17 @@ The recovery runbook is still not field-proven until its disposable drill is exe
 
 ## Fresh install / acceptance – PR #24
 
-Reviewing the real beta Unraid mappings found a safety hazard before documentation was finalized: the Agent template may expose `/data -> /mnt/user` while `/backup` maps a path beneath `/mnt/user`, and the old worked example was also the auto-created starter config with `paths: ["/data"]`. That combination could let a backup source see its own repository through another container path.
+Reviewing the real beta Unraid mappings found a safety hazard before documentation was finalized: the old Agent template exposed `/data -> /mnt/user`, `/backup` mapped a path beneath `/mnt/user`, and the old worked example was also the auto-created starter config with `paths: ["/data"]`. That combination could let a backup source see its own repository through another container path.
 
-PR #24 fixes this rather than relying only on warnings:
+PR #24 fixes this in code, packaging and docs rather than relying only on warnings:
 
 - new `config/agent.default.json` has empty sources/repositories/restore targets/rclone endpoints/rTorrent gates and empty tools
 - `Dockerfile.agent` uses the inert file for `/app/defaults/agent.json`
 - `config/agent.example.json` remains a worked example but narrows its example source to `/data/example-source`
+- the Unraid Agent template now defaults `/data` to `/mnt/user/nexus-backup-source`, not all of `/mnt/user`
 - regression tests require the starter config to stay inert and prohibit the worked example from using the whole `/data` mount as a source
 - Docker image CI verifies the built Agent contains the inert starter config
+- Unraid template CI locks the narrow `/data` default and rejects `/mnt/user` as the default
 - `unraid/README.md` documents source/repository/restore containment and the deliberate inert first start
 - `docs/fresh-install.md` defines a clean Unraid + Windows deployment without chat-history assumptions
 - `docs/acceptance-test.md` defines an isolated `C:\NexusBackup-Test` proof with an independent SHA-256 reference manifest, dedicated test repository, backup/inventory/integrity/dry-run/staging restore, byte/hash verification, restart/control-outage/repository-outage/interrupted-restore tests and a final post-fault restore verification
