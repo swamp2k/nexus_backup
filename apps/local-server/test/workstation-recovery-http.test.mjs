@@ -12,7 +12,20 @@ function fixture() {
     request: { snapshotId: "abcdef1234567890", path: "/Users/Balder/save.dat" },
     result: { dryRun: true, restored: 1, updated: 0, unchanged: 0 },
   };
+  const latestCheck = {
+    id: "wsrun-check-1",
+    deviceId: "device-1",
+    state: "completed",
+    operation: "check",
+    request: {},
+    result: { operation: "check", integrity: "ok" },
+    finishedAt: "2026-09-13T15:00:00.000Z",
+  };
   const workstationService = {
+    async getLatestCheck(deviceId) {
+      calls.push(["check-get", deviceId]);
+      return deviceId === "device-1" ? latestCheck : null;
+    },
     async getRecoveryInventory(deviceId) {
       calls.push(["inventory-get", deviceId]);
       return { deviceId, snapshots: [{ id: "abcdef1234567890" }] };
@@ -30,8 +43,24 @@ function fixture() {
       return { id: `queued-${operation}`, deviceId, operation, request: input, state: "queued" };
     },
   };
-  return { calls, preview, api: createWorkstationRecoveryHttp({ workstationService }) };
+  return { calls, preview, latestCheck, api: createWorkstationRecoveryHttp({ workstationService }) };
 }
+
+test("integrity HTTP route exposes latest result and queues an isolated workstation check", async () => {
+  const f = fixture();
+  const getRoute = f.api.match("GET", "/v1/local/workstations/device-1/recovery/check");
+  assert.deepEqual(getRoute, { kind: "check", method: "GET", deviceId: "device-1" });
+  const current = await f.api.execute(getRoute);
+  assert.equal(current.status, 200);
+  assert.equal(current.body.check.result.integrity, "ok");
+  assert.deepEqual(f.calls.at(-1), ["check-get", "device-1"]);
+
+  const postRoute = f.api.match("POST", "/v1/local/workstations/device-1/recovery/check");
+  const queued = await f.api.execute(postRoute, { body: {} });
+  assert.equal(queued.status, 202);
+  assert.equal(queued.body.run.operation, "check");
+  assert.deepEqual(f.calls.at(-1), ["queue", "device-1", "check", {}]);
+});
 
 test("recovery HTTP routes expose inventory and cached browse without inventing target paths", async () => {
   const f = fixture();
