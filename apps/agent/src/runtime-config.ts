@@ -245,7 +245,7 @@ function collectTelemetryRedactionValues(input: StaticAgentRuntimeConfigInput): 
   const add = (value: unknown) => {
     if (typeof value !== "string") return;
     const normalized = value.trim();
-    if (normalized.length >= 4) values.add(normalized);
+    if (normalized.length >= 1) values.add(normalized);
   };
   const addUrlParts = (value: unknown) => {
     if (typeof value !== "string") return;
