@@ -2,16 +2,19 @@ import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { cp, lstat, mkdir, readFile, readdir, readlink, realpath, rm, stat, writeFile, chmod } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 
 const REQUIRED_CONTROL_FILES = ["control-token", "agent-token"];
 const OPTIONAL_CONTROL_FILES = ["auth.json", "setup-token"];
+const DEFAULT_RUNBOOK_PATH = fileURLToPath(new URL("../../../docs/emergency-recovery.md", import.meta.url));
 
 export async function createEmergencyBundle({
   configDir = "/config",
   agentConfigDir = "/agent-config",
   outputDir,
   databaseName = "nexus-backup.sqlite",
+  runbookPath = DEFAULT_RUNBOOK_PATH,
   version = process.env.NEXUS_BACKUP_VERSION ?? "unknown",
   revision = process.env.NEXUS_BACKUP_REVISION ?? "unknown",
   now = () => new Date(),
@@ -21,8 +24,10 @@ export async function createEmergencyBundle({
 
   const controlRequested = resolve(configDir);
   const agentRequested = resolve(agentConfigDir);
+  const runbookSource = resolve(runbookPath);
   await requireDirectory(controlRequested, "control config directory");
   await requireDirectory(agentRequested, "agent config directory");
+  await requireRegularFile(runbookSource, "emergency recovery runbook");
   const controlSource = await realpath(controlRequested);
   const agentSource = await realpath(agentRequested);
 
@@ -61,6 +66,8 @@ export async function createEmergencyBundle({
 
     const readme = emergencyReadme({ version, revision });
     await writeFile(join(output, "RECOVERY.txt"), readme, { mode: 0o600 });
+    await cp(runbookSource, join(output, "EMERGENCY-RECOVERY.md"), { preserveTimestamps: true });
+    await chmod(join(output, "EMERGENCY-RECOVERY.md"), 0o600);
 
     const files = await collectBundleFiles(output, { exclude: new Set(["manifest.json"]) });
     const createdAt = normalizeDate(now()).toISOString();
@@ -69,6 +76,7 @@ export async function createEmergencyBundle({
       createdAt,
       nexusBackup: { version: String(version), revision: String(revision) },
       containsSecrets: true,
+      recoveryRunbook: "EMERGENCY-RECOVERY.md",
       database: {
         path: `control/${databaseName}`,
         sourceQuickCheck,
@@ -83,6 +91,7 @@ export async function createEmergencyBundle({
         "runtime token mirror",
         "disposable agent caches/state",
         "workstation-local repository credentials",
+        "container image archives",
       ],
       files,
     };
@@ -104,6 +113,14 @@ export async function verifyEmergencyBundle(bundleDir) {
   const actual = await collectBundleFiles(root, { exclude: new Set(["manifest.json"]) });
   const expected = [...manifest.files].sort(compareEntries);
   if (JSON.stringify(actual) !== JSON.stringify(expected)) throw new Error("Emergency bundle file inventory or SHA-256 verification failed");
+
+  const runbookRelativePath = safeBundleRelativePath(manifest.recoveryRunbook, "recoveryRunbook");
+  if (!expected.some((entry) => entry?.path === runbookRelativePath)) {
+    throw new Error("Emergency recovery runbook is not present in the verified file manifest");
+  }
+  const runbookFile = resolve(root, runbookRelativePath);
+  if (!sameOrInside(runbookFile, root)) throw new Error("Emergency recovery runbook path escapes the bundle root");
+  await requireRegularFile(runbookFile, "emergency recovery runbook");
 
   const databaseRelativePath = safeBundleRelativePath(manifest.database?.path, "database.path");
   if (!expected.some((entry) => entry?.path === databaseRelativePath)) {
@@ -259,9 +276,9 @@ function emergencyReadme({ version, revision }) {
   return `Nexus Backup emergency recovery bundle\n\n` +
     `Nexus version: ${version}\nRevision: ${revision}\n\n` +
     `THIS DIRECTORY CONTAINS SECRETS. Store it encrypted and offline from the Nexus host.\n\n` +
+    `Start with EMERGENCY-RECOVERY.md in this bundle; it is covered by manifest.json.\n` +
     `control/ contains a consistent SQLite snapshot plus controller/auth identity files.\n` +
     `agent-config/ contains local agent configuration and storage credentials.\n` +
     `manifest.json contains SHA-256 hashes and the applied migration list.\n\n` +
-    `Backup repository payloads and source data are intentionally not included.\n` +
-    `See docs/emergency-recovery.md in the Nexus Backup repository before restoring.\n`;
+    `Backup repository payloads, source data, and container image archives are intentionally not included.\n`;
 }
