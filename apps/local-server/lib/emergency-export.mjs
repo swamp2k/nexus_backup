@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { cp, lstat, mkdir, readFile, readdir, readlink, rm, stat, writeFile, chmod } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 const REQUIRED_CONTROL_FILES = ["control-token", "agent-token"];
@@ -17,6 +17,7 @@ export async function createEmergencyBundle({
   now = () => new Date(),
 } = {}) {
   if (typeof outputDir !== "string" || !outputDir.trim()) throw new TypeError("outputDir is required");
+  assertSafeDatabaseName(databaseName);
   const controlSource = resolve(configDir);
   const agentSource = resolve(agentConfigDir);
   const output = resolve(outputDir);
@@ -99,7 +100,12 @@ export async function verifyEmergencyBundle(bundleDir) {
   const expected = [...manifest.files].sort(compareEntries);
   if (JSON.stringify(actual) !== JSON.stringify(expected)) throw new Error("Emergency bundle file inventory or SHA-256 verification failed");
 
-  const databasePath = join(root, String(manifest.database?.path ?? ""));
+  const databaseRelativePath = safeBundleRelativePath(manifest.database?.path, "database.path");
+  if (!expected.some((entry) => entry?.path === databaseRelativePath)) {
+    throw new Error("Emergency database snapshot is not present in the verified file manifest");
+  }
+  const databasePath = resolve(root, databaseRelativePath);
+  if (!sameOrInside(databasePath, root)) throw new Error("Emergency database path escapes the bundle root");
   await requireRegularFile(databasePath, "emergency database snapshot");
   const snapshot = inspectSnapshot(databasePath);
   if (!snapshot.integrityOk) throw new Error(`Emergency database snapshot failed integrity_check: ${snapshot.integrity.join("; ")}`);
@@ -205,6 +211,22 @@ function assertNoPathOverlap(output, source, label) {
 function sameOrInside(candidate, parent) {
   const rel = relative(parent, candidate);
   return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
+
+function assertSafeDatabaseName(value) {
+  if (typeof value !== "string" || !value || value !== basename(value) || value === "." || value === "..") {
+    throw new TypeError("databaseName must be a simple filename");
+  }
+}
+
+function safeBundleRelativePath(value, label) {
+  if (typeof value !== "string" || !value || isAbsolute(value)) throw new Error(`Emergency manifest ${label} must be a safe relative path`);
+  const normalized = value.replaceAll("\\", "/");
+  const segments = normalized.split("/");
+  if (segments.some((segment) => !segment || segment === "." || segment === "..")) {
+    throw new Error(`Emergency manifest ${label} must be a safe relative path`);
+  }
+  return normalized;
 }
 
 function sqlString(value) { return String(value).replaceAll("'", "''"); }
