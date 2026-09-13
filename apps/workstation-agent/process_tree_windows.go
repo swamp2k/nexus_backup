@@ -15,8 +15,6 @@ import (
 const (
 	jobObjectExtendedLimitInformation = 9
 	jobObjectLimitKillOnJobClose      = 0x00002000
-	processSetQuota                   = 0x0100
-	processTerminate                  = 0x0001
 )
 
 type jobObjectBasicLimitInformation struct {
@@ -50,87 +48,74 @@ type jobObjectExtendedLimitInfo struct {
 }
 
 var (
-	kernel32                    = syscall.NewLazyDLL("kernel32.dll")
-	procCreateJobObjectW        = kernel32.NewProc("CreateJobObjectW")
-	procSetInformationJobObject = kernel32.NewProc("SetInformationJobObject")
+	kernel32                     = syscall.NewLazyDLL("kernel32.dll")
+	procCreateJobObjectW         = kernel32.NewProc("CreateJobObjectW")
+	procSetInformationJobObject  = kernel32.NewProc("SetInformationJobObject")
 	procAssignProcessToJobObject = kernel32.NewProc("AssignProcessToJobObject")
-	procTerminateJobObject      = kernel32.NewProc("TerminateJobObject")
-	processTreeJobs             sync.Map // map[*exec.Cmd]syscall.Handle
+	procGetCurrentProcess        = kernel32.NewProc("GetCurrentProcess")
+	procTerminateJobObject       = kernel32.NewProc("TerminateJobObject")
+	agentJobOnce                 sync.Once
+	agentJobHandle               syscall.Handle
+	agentJobErr                  error
 )
 
-func configureProcessTree(cmd *exec.Cmd) {
-	// Binding happens immediately after Start, once the child PID is available.
-}
-
-func bindProcessTree(cmd *exec.Cmd) error {
-	if cmd == nil || cmd.Process == nil {
-		return errors.New("process has not started")
-	}
-
-	rawJob, _, createErr := procCreateJobObjectW.Call(0, 0)
-	if rawJob == 0 {
-		return windowsCallError(createErr)
-	}
-	job := syscall.Handle(rawJob)
-	closeJob := true
-	defer func() {
-		if closeJob {
-			_ = syscall.CloseHandle(job)
+// initializeAgentProcessTree places the workstation agent itself in a Windows
+// Job Object with KILL_ON_JOB_CLOSE. Descendants inherit job membership, so a
+// Scheduled Task stop, crash, update or hard agent restart cannot leave an
+// orphaned restic.exe continuing against a repository or staging directory.
+// The handle intentionally stays open for the lifetime of the agent process.
+func initializeAgentProcessTree() error {
+	agentJobOnce.Do(func() {
+		rawJob, _, createErr := procCreateJobObjectW.Call(0, 0)
+		if rawJob == 0 {
+			agentJobErr = windowsCallError(createErr)
+			return
 		}
-	}()
+		job := syscall.Handle(rawJob)
 
-	info := jobObjectExtendedLimitInfo{}
-	info.BasicLimitInformation.LimitFlags = jobObjectLimitKillOnJobClose
-	ret, _, setErr := procSetInformationJobObject.Call(
-		uintptr(job),
-		uintptr(jobObjectExtendedLimitInformation),
-		uintptr(unsafe.Pointer(&info)),
-		unsafe.Sizeof(info),
-	)
-	if ret == 0 {
-		return windowsCallError(setErr)
-	}
+		info := jobObjectExtendedLimitInfo{}
+		info.BasicLimitInformation.LimitFlags = jobObjectLimitKillOnJobClose
+		ret, _, setErr := procSetInformationJobObject.Call(
+			uintptr(job),
+			uintptr(jobObjectExtendedLimitInformation),
+			uintptr(unsafe.Pointer(&info)),
+			unsafe.Sizeof(info),
+		)
+		if ret == 0 {
+			_ = syscall.CloseHandle(job)
+			agentJobErr = windowsCallError(setErr)
+			return
+		}
 
-	process, err := syscall.OpenProcess(processSetQuota|processTerminate, false, uint32(cmd.Process.Pid))
-	if err != nil {
-		return err
-	}
-	defer syscall.CloseHandle(process)
-	ret, _, assignErr := procAssignProcessToJobObject.Call(uintptr(job), uintptr(process))
-	if ret == 0 {
-		return windowsCallError(assignErr)
-	}
-
-	processTreeJobs.Store(cmd, job)
-	closeJob = false
-	return nil
+		currentProcess, _, currentErr := procGetCurrentProcess.Call()
+		if currentProcess == 0 {
+			_ = syscall.CloseHandle(job)
+			agentJobErr = windowsCallError(currentErr)
+			return
+		}
+		ret, _, assignErr := procAssignProcessToJobObject.Call(uintptr(job), currentProcess)
+		if ret == 0 {
+			_ = syscall.CloseHandle(job)
+			agentJobErr = windowsCallError(assignErr)
+			return
+		}
+		agentJobHandle = job
+	})
+	return agentJobErr
 }
 
-func releaseProcessTree(cmd *exec.Cmd) {
-	if cmd == nil {
-		return
-	}
-	if value, ok := processTreeJobs.LoadAndDelete(cmd); ok {
-		_ = syscall.CloseHandle(value.(syscall.Handle))
-	}
+func configureProcessTree(cmd *exec.Cmd) {
+	// Individual children are already contained because the agent itself is in
+	// a kill-on-close Job Object. Explicit cancellation still uses taskkill /T.
 }
+
+func bindProcessTree(cmd *exec.Cmd) error { return nil }
+func releaseProcessTree(cmd *exec.Cmd)    {}
 
 func terminateProcessTree(cmd *exec.Cmd) error {
 	if cmd == nil || cmd.Process == nil {
 		return os.ErrProcessDone
 	}
-	if value, ok := processTreeJobs.Load(cmd); ok {
-		job := value.(syscall.Handle)
-		ret, _, err := procTerminateJobObject.Call(uintptr(job), 1)
-		if ret != 0 {
-			return nil
-		}
-		if callErr := windowsCallError(err); callErr != nil {
-			// Fall through to taskkill/direct kill. The job handle remains open
-			// until Wait completes or the agent exits.
-		}
-	}
-
 	pid := strconv.Itoa(cmd.Process.Pid)
 	// /T terminates descendants and /F prevents a child console process from
 	// keeping inherited pipes open after the controller revoked the lease.
@@ -138,6 +123,17 @@ func terminateProcessTree(cmd *exec.Cmd) error {
 		return nil
 	}
 	return cmd.Process.Kill()
+}
+
+func terminateAllAgentChildrenForTest() error {
+	if agentJobHandle == 0 {
+		return errors.New("agent job object is not initialized")
+	}
+	ret, _, err := procTerminateJobObject.Call(uintptr(agentJobHandle), 1)
+	if ret == 0 {
+		return windowsCallError(err)
+	}
+	return nil
 }
 
 func windowsCallError(err error) error {
