@@ -58,7 +58,7 @@ async function runTransferScheduler() {
 
     const cleanup = await transferCleanupService.runDue();
     if (cleanup.queued > 0 || cleanup.reconciled > 0) log("info", "transfer cleanup scheduler updated work", { queued: cleanup.queued, reconciled: cleanup.reconciled });
-    for (const failure of cleanup.failures) log("error", "transfer cleanup scheduler action failed", failure);
+    for (const failure of cleanup.failures) log("error", "transfer cleanup action failed", failure);
   } catch (error) {
     log("error", "transfer scheduler failed", { error: serializeError(error) });
   } finally {
