@@ -43,7 +43,7 @@ export function runtimeOptionsFromEnv(env = process.env) {
     pollIntervalMs: positiveInteger(env.NEXUS_BACKUP_POLL_INTERVAL_MS ?? "5000", "NEXUS_BACKUP_POLL_INTERVAL_MS"),
     version: optionalString(env.NEXUS_BACKUP_AGENT_VERSION) ?? "0.5.0",
     ...(leaseTtlRaw === undefined ? {} : {
-      leaseTtlMs: positiveInteger(env.NEXUS_BACKUP_LEASE_TTL_MS, "NEXUS_BACKUP_LEASE_TTL_MS"),
+      leaseTtlMs: positiveInteger(leaseTtlRaw, "NEXUS_BACKUP_LEASE_TTL_MS"),
     }),
   };
 }
