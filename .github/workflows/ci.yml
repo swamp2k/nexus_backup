@@ -102,9 +102,25 @@ jobs:
           print("Unraid templates are well-formed and shared-path/security contracts match")
           PY
 
+  workstation-windows:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: apps/workstation-agent/go.mod
+          cache-dependency-path: apps/workstation-agent/go.mod
+      - name: Test workstation agent on Windows
+        working-directory: apps/workstation-agent
+        run: go test ./...
+      - name: Vet workstation agent on Windows
+        working-directory: apps/workstation-agent
+        run: go vet ./...
+
   images:
     runs-on: ubuntu-latest
-    needs: test
+    needs: [test, workstation-windows]
     env:
       CI_VERSION: 0.0.0-ci
     steps:
