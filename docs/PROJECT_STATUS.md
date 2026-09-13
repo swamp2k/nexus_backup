@@ -14,13 +14,13 @@ Existing PCWatch-backup and standalone Copyarr are fallbacks. Do not remove or m
 
 **M8 – recovery/failure torture testing**
 
-M7 workstation recovery is merged on `main` at `05310c07ba38c35728c7f6621087754ad09a11e9`.
+M7 workstation recovery is merged. M8 batch 1 is merged on `main` as `941d138bde505181c3fd36af2e4bcf6e5b0b8736`.
 
-Active branch: `m8-recovery-torture`
+Active branch: `m8-failure-matrix`
 
-Active PR: **#18 – M8: begin workstation recovery torture testing**
+Active PR: **#19 – M8: state reconciliation and repository failure matrix**
 
-PR #18 is M8 batch 1. It should merge once the final full CI run is green. Do not grow it with the next failure-matrix batch.
+Keep this batch focused on resilience/state correctness; do not expand product scope here.
 
 ## Completed through M7
 
@@ -48,13 +48,14 @@ These are not negotiable unless the architecture is explicitly redesigned and re
 - interrupted/expired write restore is not automatically requeued; manual retry only
 - stale lease tokens cannot mutate a newly leased run
 - explicit stale-lease rejection cancels local leased work; transient communication/5xx failures do not
-- recovery must not overwrite successful backup-history fields
+- recovery/failure must not overwrite successful backup-history fields
+- a locally completed backup is not authoritative success until the controller ACKs the exact leased result
 - repository credentials stay local to the workstation/agent
 - backup payloads never pass through Nexus control plane, Cloudflare or PCWatch
 
-## M8 batch 1 completed work
+## M8 batch 1 – merged
 
-Deterministic torture coverage now includes:
+Deterministic torture coverage includes:
 
 - controller/service recreation during an active lease
 - expired workstation leases and re-leasing
@@ -68,44 +69,40 @@ Deterministic torture coverage now includes:
 - cancellation of repository probes and retention/prune after explicit lease loss
 - recovery write cancellation remains failure/manual-retry-only
 
-Confirmed bugs found and fixed:
+Confirmed bugs fixed in batch 1:
 
-1. `recoverExpired()` requeued/failed a run but left `workstation_status.current_run_id` pointing at the dead lease. It now clears status only if it still references the exact recovered run, so a newer run cannot be clobbered.
-2. `exec.CommandContext()` killed the immediate process but could leave descendants alive with inherited pipes. Cancellable Restic commands now use a process-tree abstraction: Unix process groups are killed as a unit; Windows uses `taskkill /T /F` with direct-kill fallback and bounded wait.
-3. Repository probe and `forget --prune` were outside the cancellable lease context. They are now lease-cancellable as well.
+1. `recoverExpired()` requeued/failed a run but left `workstation_status.current_run_id` pointing at the dead lease.
+2. `exec.CommandContext()` could kill only the immediate process while descendants retained stdout/stderr pipes.
+3. Repository probe and `forget --prune` were outside the cancellable lease context.
 
-CI was expanded with a real `windows-latest` workstation-agent test/vet job. Windows is no longer only cross-built.
+CI runs workstation-agent test/vet on both Linux and native Windows, plus Windows cross-build and full Docker/release validation.
 
-## Immediate next steps after PR #18 merge
+## M8 batch 2 – current work
 
-Start a fresh M8 batch 2 branch/PR. Focus on state reconciliation and failure injection rather than new product features:
+Completed/covered so far:
 
-- agent process restart during backup
-- agent process restart during inventory/browse/preview/write restore
-- controller unavailable shorter than lease duration
-- controller unavailable longer than lease duration
-- controller unreachable during finish after Restic completed locally
-- repository unavailable
-- repository authentication failure
-- repository locked
-- repository disappears mid-backup
-- local repository disk-full behavior where practical to simulate
-- write restore interruption/orphaned staging behavior
-- scheduler interactions with inventory/browse/preview/restore
-- last-known-success state preservation under all failure cases
+- **Unacknowledged finish / ghost success:** a Restic backup that completes locally but cannot submit `finish` to the controller no longer advances local `LastSuccessAt` or `LastSnapshotID`. The previous known-good success is preserved and the failed ACK becomes visible in `LastError`.
+- **Repository failure matrix:** authentication failure, unavailable repository, repository lock and disk-full style failures are fatal (not success/partial), and local repository/password configuration is redacted from surfaced errors.
+- **Interrupted write restore:** cancellation leaves any partial staging output in place as an orphan for inspection; the same run/staging target cannot be reused. Retry requires a fresh manual restore/run id.
+- **Hard Windows agent loss:** the workstation agent initializes a Windows Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`; Restic descendants inherit containment, so killing/restarting the Scheduled Task/agent cannot leave an orphan `restic.exe` continuing against the repository. Native Windows CI includes a real parent-death/child-survival regression test.
+- Unix explicit cancellation still uses isolated process groups; platform-independent command wrappers retain bounded wait behavior.
 
-Do not fix tests by weakening safety invariants or by extending leases/timeouts to hide races.
+Remaining M8 batch 2 review points:
+
+- verify final CI for latest Job Object implementation and image build
+- review controller-side last-success/last-snapshot semantics for failed/partial results
+- confirm no high-severity state-reconciliation gaps remain
 
 ## Product gaps to close before asking for a real acceptance test
 
 The aim is not merely green M8 tests. Before telling the user the product is ready for a real end-to-end test, also close/review these known gaps:
 
-- M8 failure matrix at a reasonable production-focused depth
+- finish M8 production-focused failure matrix
 - repository integrity operation (`restic check`) distinct from read-only inventory
 - storage/repository health presentation sufficient to surface unavailable/locked/full/auth failures clearly
 - emergency recovery runbook: how to restore data if Nexus Backup itself is unavailable
 - M9 architecture/security review with high-severity findings resolved
-- deployment/install docs accurate enough to perform a fresh Unraid + Windows workstation install without chat history
+- deployment/install/acceptance docs accurate enough to perform a fresh Unraid + Windows workstation install without chat history
 
 ## Real-machine acceptance once code is ready
 
