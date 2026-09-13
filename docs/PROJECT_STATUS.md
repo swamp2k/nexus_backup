@@ -30,9 +30,9 @@ PR #26 final-head CI #252 and post-merge `main` CI #253 were fully green, includ
 
 PR #27 final-head CI #254 and post-merge `main` CI #255 were also fully green. The release-identity guard, native Windows tests, all three image builds, real Repository TLS/auth Restic integration, metadata and Compose gates passed on `515ecbee832c23ad1768b1bcfdf0a282627dc663`.
 
-Active branch: `acceptance-rc-handoff`
+This status-sync change itself passed full CI #256, including the same image and live Repository integration gates. Once this file is merged, no feature branch is required for the next action: the next step is an explicit acceptance RC publish from the `main` SHA containing this handoff.
 
-The code and distribution workflow are now ready for one explicit acceptance RC publish. No RC has been published yet, and no production workload has been moved.
+The code and distribution workflow are ready for one explicit acceptance RC publish. No RC has been published yet, and no production workload has been moved.
 
 Do not call the product ready for real-machine acceptance until the exact published RC image set has been pulled through the actual Unraid deployment path, its immutable digests recorded, and the final runbook preflight repeated against those identities.
 
@@ -92,7 +92,7 @@ The identity decision lives in `.github/scripts/resolve-release-version.sh` and 
 
 Normal `v*` tag releases continue to determine stable/prerelease status from the tag and can move `latest` only for a stable SemVer tag.
 
-No image is published merely by merging the workflow. The next acceptance action is one explicit manual prerelease publish from the then-current final `main` SHA.
+No image is published merely by merging the workflow. The next acceptance action is one explicit manual prerelease publish from the final `main` SHA containing this handoff.
 
 ## Completed M9 security review
 
@@ -162,11 +162,10 @@ The isolated acceptance test may use disposable secrets/repositories, but passin
 
 ## Remaining gates before “Nu tester vi”
 
-1. merge this handoff-only status sync so the RC source SHA includes the current source-of-truth;
-2. publish one exact prerelease image set from that merged `main` SHA without moving `latest`;
-3. verify Control, Agent and Repository can all be pulled by the actual Unraid deployment path and record their immutable digests;
-4. rerun the final acceptance runbook preflight against those exact image identities;
-5. only then start the isolated real-machine acceptance drill.
+1. publish one exact prerelease image set from the merged `main` SHA containing this status sync, without moving `latest`;
+2. verify Control, Agent and Repository can all be pulled by the actual Unraid deployment path and record their immutable digests;
+3. rerun the final acceptance runbook preflight against those exact image identities;
+4. only then start the isolated real-machine acceptance drill.
 
 ## Roadmap after isolated workstation proof
 
