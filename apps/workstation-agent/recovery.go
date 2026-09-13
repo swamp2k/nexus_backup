@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -101,7 +100,7 @@ func listRecoverySnapshots(parent context.Context, cfg config, deviceID string) 
 
 	ctx, cancel := context.WithTimeout(parent, 2*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, cfg.ResticPath,
+	cmd := commandContextWithTree(ctx, cfg.ResticPath,
 		"snapshots", "--json", "--latest", fmt.Sprint(maxRecoverySnapshots), "--group-by", "", "--tag", "nexus-workstation:"+deviceID,
 	)
 	cmd.Env = env
@@ -173,7 +172,7 @@ func browseRecoverySnapshot(parent context.Context, cfg config, snapshotID, snap
 
 	ctx, cancel := context.WithTimeout(parent, 2*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, cfg.ResticPath, "ls", "--json", id, selectedPath)
+	cmd := commandContextWithTree(ctx, cfg.ResticPath, "ls", "--json", id, selectedPath)
 	cmd.Env = env
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -310,7 +309,7 @@ func runRecoveryRestore(ctx context.Context, cfg config, restoreRoot, runID, sna
 
 func runRestoreCommand(ctx context.Context, resticPath string, env, args []string, target string, dryRun bool) restoreResult {
 	result := restoreResult{Target: target, DryRun: dryRun, ChangedLogs: make([]string, 0)}
-	cmd := exec.CommandContext(ctx, resticPath, args...)
+	cmd := commandContextWithTree(ctx, resticPath, args...)
 	cmd.Env = env
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
