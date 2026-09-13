@@ -4,6 +4,7 @@ import { noopExecutionEventSink } from "./execution-events.js";
 import type { JobExecutionResult, JobExecutor } from "./executor.js";
 import type { CommandRunner } from "./process-runner.js";
 import { ToolExitError } from "./process-runner.js";
+import { restoreStagingTarget } from "./restore-staging.js";
 import type { AgentRuntimeConfig, LocalResticRepository } from "./runtime-config.js";
 
 const MAX_CHANGED_LOGS = 400;
@@ -30,16 +31,16 @@ export class ResticRestorePreviewExecutor implements JobExecutor {
     const payload = parsePayload(job.payload);
     const repository = this.#config.resticRepository(payload.repositoryId);
     const target = this.#config.restoreTarget(payload.targetId);
-    const overwrite = target.overwrite ?? "never";
+    const stagingTarget = restoreStagingTarget(target.path, job.id, job.attempt, "preview");
     const args = [
       "restore",
       payload.snapshotId,
       "--target",
-      target.path,
+      stagingTarget,
       "--dry-run",
       "--verbose=2",
       "--overwrite",
-      overwrite,
+      "never",
     ];
     if (payload.path && payload.path !== "/") args.push("--include", payload.path);
 
@@ -53,7 +54,7 @@ export class ResticRestorePreviewExecutor implements JobExecutor {
       type: "log",
       tool: "restic",
       stream: "stdout",
-      message: `Restore preview started: snapshot ${payload.snapshotId.slice(0, 8)} → target ${payload.targetId}`,
+      message: `Restore preview started: snapshot ${payload.snapshotId.slice(0, 8)} → staging target ${payload.targetId}`,
     });
 
     const result = await this.#runner.run({
@@ -98,7 +99,8 @@ export class ResticRestorePreviewExecutor implements JobExecutor {
         snapshotId: payload.snapshotId,
         targetId: payload.targetId,
         ...(payload.path ? { path: payload.path } : {}),
-        overwrite,
+        overwrite: "never",
+        staging: true,
         dryRun: true,
         restored,
         updated,
