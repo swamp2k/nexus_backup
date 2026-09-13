@@ -268,7 +268,7 @@ export function createWorkstationService({
     const operation = normalizeStoredOperation(current.operation);
     const state = normalizeResultState(input?.status, operation);
     const request = parseJson(current.request_json, {});
-    const resultValue = normalizeResult(input?.result, operation, request, normalizedRunId);
+    const resultValue = normalizeResult(input?.result, operation, request, normalizedRunId, state);
     const errorMessage = state === "failed" || state === "partial" ? optionalString(input?.error, "error", 4000) : null;
     const at = nowDate(now);
     const result = await db.prepare(`
@@ -566,13 +566,19 @@ function normalizeResultState(value, operation) {
   throw new RangeError(operation === "backup" ? "status must be success, partial, or failure" : "recovery status must be success or failure");
 }
 
-function normalizeResult(value, operation, request, runId) {
-  if (value === undefined || value === null) return null;
+function normalizeResult(value, operation, request, runId, state) {
+  if (value === undefined || value === null) {
+    if (operation === "backup" || state === "failed") return null;
+    throw new RangeError("successful workstation operation must include a result");
+  }
   if (!isRecord(value)) throw new RangeError("result must be an object");
   const max = operation === "backup" ? 64 * 1024 : 900 * 1024;
   if (JSON.stringify(value).length > max) throw new RangeError("result is too large");
   if (operation === "backup") return value;
   if (value.operation !== operation) throw new RangeError("recovery result operation does not match the leased run");
+  if (state === "failed" && (operation === "check" || operation === "inventory" || operation === "browse")) {
+    return { operation };
+  }
   if (operation === "check") {
     if (value.integrity !== "ok") throw new RangeError("integrity check result must report ok");
     return { operation, integrity: "ok" };
