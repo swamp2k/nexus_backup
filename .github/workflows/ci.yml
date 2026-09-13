@@ -45,6 +45,7 @@ jobs:
           grep -F 'NEXUS_BACKUP_REST_PASSWORD' "$installer"
           grep -F 'NEXUS_BACKUP_REPOSITORY_CA_SHA256' "$installer"
           grep -F 'Pinned asset checksum mismatch' "$installer"
+          grep -F 'Invoke-PinnedRepositoryProvision' "$installer"
           if grep -Fq 'api.github.com/repos/swamp2k/nexus_backup/releases/latest' "$installer"; then
             echo 'installer must not depend on GitHub Releases' >&2
             exit 1
@@ -65,8 +66,9 @@ jobs:
         shell: bash
         run: |
           python - <<'PY'
+          import os
           import xml.etree.ElementTree as ET
-          from pathlib import Path
+          from pathlib import Path, PurePosixPath
 
           control = ET.parse(Path("unraid/templates/nexus-backup-control.xml")).getroot()
           agent = ET.parse(Path("unraid/templates/nexus-backup-agent.xml")).getroot()
@@ -95,10 +97,16 @@ jobs:
           assert ac["/data"]["Mode"] == "ro"
           assert ac["/data"]["Default"] == "/mnt/user/nexus-backup-source"
           assert ac["/data"]["Default"] != "/mnt/user"
+          assert ac["/backup"]["Default"] == "/mnt/user/backups/nexus-backup/generic"
           assert rc["/config"]["Mode"] == "rw"
           assert rc["/data"]["Mode"] == "rw"
           assert rc["/data"]["Default"] == "/mnt/user/backups/nexus-backup/workstations"
-          assert rc["/data"]["Default"] != ac["/backup"]["Default"]
+
+          generic_root = PurePosixPath(ac["/backup"]["Default"])
+          workstation_root = PurePosixPath(rc["/data"]["Default"])
+          assert generic_root != workstation_root
+          assert generic_root not in workstation_root.parents
+          assert workstation_root not in generic_root.parents
 
           for root in (control, agent, repository):
               extra = root.findtext("ExtraParams") or ""
@@ -201,10 +209,28 @@ jobs:
             -v nexus-repository-config-ci:/config \
             -v nexus-repository-data-ci:/data \
             nexus-backup-repository:ci >/dev/null
+
+          ready=0
           for _ in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:18001/repository-ca.pem -o /tmp/repository-ca.pem; then break; fi
+            if curl -fsS http://127.0.0.1:18001/repository-ca.pem -o /tmp/repository-ca.pem; then
+              ready=1
+              break
+            fi
+            if [ "$(docker inspect -f '{{.State.Running}}' nexus-repository-ci 2>/dev/null || true)" != "true" ]; then
+              break
+            fi
             sleep 1
           done
+          if [ "$ready" != "1" ]; then
+            echo '--- Repository container state ---' >&2
+            docker inspect nexus-repository-ci --format '{{json .State}}' >&2 || true
+            echo '--- Repository container logs ---' >&2
+            docker logs nexus-repository-ci >&2 || true
+            echo '--- rest-server --help from built image ---' >&2
+            docker run --rm --entrypoint /usr/local/bin/rest-server nexus-backup-repository:ci --help >&2 || true
+            exit 1
+          fi
+
           test -s /tmp/repository-ca.pem
           actual_ca_sha="$(sha256sum /tmp/repository-ca.pem | awk '{print $1}')"
           helper="$(docker exec nexus-repository-ci nexus-repository-client ci-user main)"
