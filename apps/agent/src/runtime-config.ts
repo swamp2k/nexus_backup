@@ -10,7 +10,7 @@ export interface LocalResticRepository {
   environment?: Readonly<Record<string, string>>;
 }
 
-export type RestoreOverwriteMode = "always" | "if-changed" | "if-newer" | "never";
+export type RestoreOverwriteMode = "never";
 
 export interface LocalRestoreTarget {
   id: string;
@@ -173,14 +173,18 @@ function indexById<T extends { id: string }>(
 
 function normalizeRestoreTarget(input: LocalRestoreTarget): LocalRestoreTarget {
   const overwrite = input.overwrite ?? "never";
-  if (!["always", "if-changed", "if-newer", "never"].includes(overwrite)) {
-    throw new Error(`Unsupported restore overwrite mode: ${overwrite}`);
+  if (overwrite !== "never") {
+    throw new Error("Restore targets must use overwrite=never; write restores are staging-only");
+  }
+  const path = requireNonEmpty(input.path, "restore target path");
+  if (!path.startsWith("/") || path.includes("\0") || path.split("/").some((segment) => segment === "." || segment === "..")) {
+    throw new Error("restore target path must be an absolute local path without dot segments");
   }
   return Object.freeze({
     id: requireNonEmpty(input.id, "restore target id"),
-    path: requireNonEmpty(input.path, "restore target path"),
+    path: path.length > 1 ? path.replace(/\/+$/, "") : path,
     ...(input.label === undefined ? {} : { label: requireNonEmpty(input.label, "restore target label") }),
-    overwrite,
+    overwrite: "never" as const,
     allowWrite: input.allowWrite === true,
   });
 }
