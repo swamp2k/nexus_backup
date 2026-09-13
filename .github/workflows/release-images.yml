@@ -26,50 +26,13 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       stable: ${{ steps.version.outputs.stable }}
     steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - id: version
         shell: bash
         env:
           INPUT_VERSION: ${{ inputs.version }}
           INPUT_EXPECTED_SHA: ${{ inputs.expected_sha }}
-        run: |
-          set -euo pipefail
-
-          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
-            version="$INPUT_VERSION"
-            expected_sha="${INPUT_EXPECTED_SHA,,}"
-            actual_sha="${GITHUB_SHA,,}"
-
-            if [[ "$GITHUB_REF_NAME" != "main" ]]; then
-              echo "Manual acceptance publishing is allowed only from main; selected ref is $GITHUB_REF_NAME" >&2
-              exit 1
-            fi
-            if [[ ! "$expected_sha" =~ ^[0-9a-f]{40}$ ]]; then
-              echo "expected_sha must be exactly 40 hexadecimal characters" >&2
-              exit 1
-            fi
-            if [[ "$actual_sha" != "$expected_sha" ]]; then
-              echo "Selected main SHA $actual_sha does not match expected_sha $expected_sha" >&2
-              exit 1
-            fi
-            if [[ "$version" != *-* ]]; then
-              echo "Manual publishing is acceptance-only and requires a prerelease version such as 0.7.0-rc.1" >&2
-              exit 1
-            fi
-            stable=false
-          else
-            version="${GITHUB_REF_NAME#v}"
-            stable=true
-            if [[ "$version" == *-* ]]; then stable=false; fi
-          fi
-
-          if [[ ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ ]]; then
-            echo "Version must be SemVer, for example 0.7.0 or 0.7.0-rc.1" >&2
-            exit 1
-          fi
-
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "stable=$stable" >> "$GITHUB_OUTPUT"
-          echo "Publishing Nexus Backup $version from $GITHUB_SHA (stable=$stable)"
+        run: .github/scripts/resolve-release-version.sh
 
   publish:
     needs: version
