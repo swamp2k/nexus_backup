@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { confirmationPhrase, createLocalAuth } from "../lib/local-auth.mjs";
 
-function request({cookie,csrf,remote="127.0.0.1"}={}){return{headers:{...(cookie?{cookie}:{}),...(csrf?{"x-nexus-csrf":csrf}:{})},socket:{remoteAddress:remote,encrypted:false}}}
+function request({cookie,csrf,remote="127.0.0.1",headers={}}={}){return{headers:{...headers,...(cookie?{cookie}:{}),...(csrf?{"x-nexus-csrf":csrf}:{})},socket:{remoteAddress:remote,encrypted:false}}}
 function response(){const headers=new Map();return{headers,setHeader(name,value){headers.set(name.toLowerCase(),value)}}}
 function cookieFrom(response){return String(response.headers.get("set-cookie")).split(";")[0]}
 
@@ -49,4 +49,23 @@ test("invalid login attempts are rate limited",async()=>{
     for(let i=0;i<5;i++)await assert.rejects(()=>auth.login({password:"wrong-password-value",request:request({remote:"10.0.0.7"}),response:response()}),/Invalid password/);
     await assert.rejects(()=>auth.login({password:"correct horse battery staple",request:request({remote:"10.0.0.7"}),response:response()}),error=>error.statusCode===429);
   }finally{await rm(dir,{recursive:true,force:true})}
+});
+
+test("forwarded proto cannot spoof Secure cookies; explicit public URL can",async()=>{
+  const dir=await mkdtemp(join(tmpdir(),"nexus-auth-cookie-"));const logs=[];const previous=process.env.NEXUS_BACKUP_PUBLIC_URL;
+  try{
+    delete process.env.NEXUS_BACKUP_PUBLIC_URL;
+    const auth=await createLocalAuth({configDir:dir,log:(level,message,data)=>logs.push({level,message,data})});
+    const setupResponse=response();
+    await auth.setup({setupToken:logs[0].data.setupToken,password:"correct horse battery staple",request:request({headers:{"x-forwarded-proto":"https"}}),response:setupResponse});
+    assert.equal(String(setupResponse.headers.get("set-cookie")).includes("; Secure"),false);
+
+    process.env.NEXUS_BACKUP_PUBLIC_URL="https://backup.example.test";
+    const loginResponse=response();
+    await auth.login({password:"correct horse battery staple",request:request(),response:loginResponse});
+    assert.equal(String(loginResponse.headers.get("set-cookie")).includes("; Secure"),true);
+  }finally{
+    if(previous===undefined)delete process.env.NEXUS_BACKUP_PUBLIC_URL;else process.env.NEXUS_BACKUP_PUBLIC_URL=previous;
+    await rm(dir,{recursive:true,force:true});
+  }
 });
