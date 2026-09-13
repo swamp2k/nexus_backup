@@ -19,8 +19,10 @@ func terminateProcessTree(cmd *exec.Cmd) error {
 	}
 	pid := cmd.Process.Pid
 	if pid > 0 {
-		if err := syscall.Kill(-pid, syscall.SIGKILL); err == nil || errors.Is(err, syscall.ESRCH) {
-			return err
+		if err := syscall.Kill(-pid, syscall.SIGKILL); err == nil {
+			return nil
+		} else if errors.Is(err, syscall.ESRCH) {
+			return os.ErrProcessDone
 		}
 	}
 	return cmd.Process.Kill()
