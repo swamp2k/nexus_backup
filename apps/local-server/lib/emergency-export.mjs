@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { cp, lstat, mkdir, readFile, readdir, readlink, rm, stat, writeFile, chmod } from "node:fs/promises";
+import { cp, lstat, mkdir, readFile, readdir, readlink, realpath, rm, stat, writeFile, chmod } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
@@ -18,18 +18,25 @@ export async function createEmergencyBundle({
 } = {}) {
   if (typeof outputDir !== "string" || !outputDir.trim()) throw new TypeError("outputDir is required");
   assertSafeDatabaseName(databaseName);
-  const controlSource = resolve(configDir);
-  const agentSource = resolve(agentConfigDir);
-  const output = resolve(outputDir);
-  assertNoPathOverlap(output, controlSource, "control config");
-  assertNoPathOverlap(output, agentSource, "agent config");
+
+  const controlRequested = resolve(configDir);
+  const agentRequested = resolve(agentConfigDir);
+  await requireDirectory(controlRequested, "control config directory");
+  await requireDirectory(agentRequested, "agent config directory");
+  const controlSource = await realpath(controlRequested);
+  const agentSource = await realpath(agentRequested);
 
   const databasePath = join(controlSource, databaseName);
   await requireRegularFile(databasePath, "control database");
-  await requireDirectory(agentSource, "agent config directory");
   for (const name of REQUIRED_CONTROL_FILES) await requireRegularFile(join(controlSource, name), name);
 
-  await mkdir(dirname(output), { recursive: true });
+  const outputRequested = resolve(outputDir);
+  await mkdir(dirname(outputRequested), { recursive: true });
+  const outputParent = await realpath(dirname(outputRequested));
+  const output = join(outputParent, basename(outputRequested));
+  assertNoPathOverlap(output, controlSource, "control config");
+  assertNoPathOverlap(output, agentSource, "agent config");
+
   await mkdir(output, { mode: 0o700 });
   await chmod(output, 0o700);
 
