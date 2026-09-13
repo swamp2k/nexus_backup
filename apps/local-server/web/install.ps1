@@ -18,6 +18,15 @@ function Download-VerifiedAsset([string]$Url, [string]$ChecksumUrl, [string]$Des
   }
 }
 
+function Download-PinnedAsset([string]$Url, [string]$ExpectedSha256, [string]$Destination) {
+  $expected = $ExpectedSha256.Trim().ToLowerInvariant()
+  if ($expected -notmatch '^[0-9a-f]{64}$') { Fail 'Pinned asset SHA-256 must contain exactly 64 hexadecimal characters.' }
+  if ($Url -notmatch '^https?://') { Fail 'Pinned asset URL must use HTTP or HTTPS.' }
+  Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $Destination
+  $actual = (Get-FileHash -Algorithm SHA256 -Path $Destination).Hash.ToLowerInvariant()
+  if ($actual -ne $expected) { Fail "Pinned asset checksum mismatch for $Url" }
+}
+
 function Write-WorkstationConfig([string]$Path, [System.Collections.IDictionary]$Config) {
   $json = $Config | ConvertTo-Json -Depth 4
   [IO.File]::WriteAllText($Path, $json, (New-Object Text.UTF8Encoding($false)))
@@ -40,14 +49,16 @@ $installDir = Join-Path $env:ProgramFiles 'Nexus Backup Workstation'
 $dataDir = Join-Path $env:ProgramData 'NexusBackup'
 $configPath = Join-Path $dataDir 'workstation.json'
 $passwordPath = Join-Path $dataDir 'restic-password'
+$caCertPath = Join-Path $dataDir 'repository-ca.pem'
 $agentPath = Join-Path $installDir 'nexus-backup-workstation.exe'
 $resticPath = Join-Path $installDir 'restic.exe'
 $taskName = 'NexusBackupWorkstation'
 New-Item -ItemType Directory -Path $installDir -Force | Out-Null
 New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
 
-# Device credentials and the Restic password live below ProgramData. Do not inherit
-# ordinary Users read access; retain only SYSTEM and local Administrators.
+# Device credentials, REST transport credentials and the Restic encryption password
+# live below ProgramData. Do not inherit ordinary Users read access; retain only
+# SYSTEM and local Administrators.
 & icacls.exe $dataDir '/inheritance:r' '/grant:r' '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '/T' '/C' | Out-Null
 if ($LASTEXITCODE -ne 0) { Fail 'Could not secure the local NexusBackup data directory ACL.' }
 
@@ -66,6 +77,7 @@ if (Test-Path $configPath) {
 # consuming a one-shot enrollment credential. The target PC needs no Internet access.
 $tmpAgent = Join-Path $env:TEMP ("nexus-backup-workstation-{0}.exe" -f [guid]::NewGuid().ToString('N'))
 $tmpRestic = Join-Path $env:TEMP ("nexus-backup-restic-{0}.exe" -f [guid]::NewGuid().ToString('N'))
+$tmpCa = Join-Path $env:TEMP ("nexus-backup-repository-ca-{0}.pem" -f [guid]::NewGuid().ToString('N'))
 try {
   Write-Host 'Nexus Backup: downloading workstation agent from local Nexus...'
   Download-VerifiedAsset `
@@ -110,25 +122,54 @@ try {
     repository = ''
     passwordFile = $passwordPath
     resticPath = $resticPath
+    restUsername = ''
+    restPassword = ''
+    caCertPath = ''
     pollSeconds = 15
     reportSeconds = 60
     autoInit = $true
   }
   if ($null -ne $old) {
-    foreach ($name in @('repository','passwordFile','resticPath','pollSeconds','reportSeconds','autoInit')) {
+    foreach ($name in @('repository','passwordFile','resticPath','restUsername','restPassword','caCertPath','pollSeconds','reportSeconds','autoInit')) {
       if ($null -ne $old.$name) { $config[$name] = $old.$name }
     }
   }
   if (-not [string]::IsNullOrWhiteSpace([string]$env:NEXUS_BACKUP_REPOSITORY)) {
-    $config['repository'] = [string]$env:NEXUS_BACKUP_REPOSITORY
+    $config['repository'] = ([string]$env:NEXUS_BACKUP_REPOSITORY).Trim()
   }
+
+  $restUsername = ([string]$env:NEXUS_BACKUP_REST_USERNAME).Trim()
+  $restPassword = ([string]$env:NEXUS_BACKUP_REST_PASSWORD).Trim()
+  if ([string]::IsNullOrWhiteSpace($restUsername) -xor [string]::IsNullOrWhiteSpace($restPassword)) {
+    Fail 'NEXUS_BACKUP_REST_USERNAME and NEXUS_BACKUP_REST_PASSWORD must be supplied together.'
+  }
+  if (-not [string]::IsNullOrWhiteSpace($restUsername)) {
+    if ([string]$config['repository'] -notmatch '^rest:https://') {
+      Fail 'REST transport credentials are only accepted for a rest:https:// repository.'
+    }
+    $config['restUsername'] = $restUsername
+    $config['restPassword'] = $restPassword
+  }
+
+  $caUrl = ([string]$env:NEXUS_BACKUP_REPOSITORY_CA_URL).Trim()
+  $caSha = ([string]$env:NEXUS_BACKUP_REPOSITORY_CA_SHA256).Trim()
+  if ([string]::IsNullOrWhiteSpace($caUrl) -xor [string]::IsNullOrWhiteSpace($caSha)) {
+    Fail 'NEXUS_BACKUP_REPOSITORY_CA_URL and NEXUS_BACKUP_REPOSITORY_CA_SHA256 must be supplied together.'
+  }
+  if (-not [string]::IsNullOrWhiteSpace($caUrl)) {
+    Write-Host 'Nexus Backup: downloading pinned Repository CA certificate...'
+    Download-PinnedAsset $caUrl $caSha $tmpCa
+    Move-Item -Force $tmpCa $caCertPath
+    $config['caCertPath'] = $caCertPath
+  }
+
   if (-not [string]::IsNullOrWhiteSpace([string]$env:NEXUS_BACKUP_RESTIC_PASSWORD)) {
     [IO.File]::WriteAllText($passwordPath, [string]$env:NEXUS_BACKUP_RESTIC_PASSWORD, (New-Object Text.UTF8Encoding($false)))
   }
 
-  # Persist the permanent token before touching the existing installation. If a later
-  # file replacement fails, rerunning the same installer can repair it without needing
-  # the already-consumed bootstrap token.
+  # Persist the permanent token and local repository credentials before touching the
+  # existing installation. If a later file replacement fails, rerunning the installer
+  # can repair it without needing the already-consumed bootstrap token.
   Write-WorkstationConfig $configPath $config
   & icacls.exe $dataDir '/inheritance:r' '/grant:r' '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '/T' '/C' | Out-Null
   if ($LASTEXITCODE -ne 0) { Fail 'Could not protect Nexus Backup workstation configuration.' }
@@ -151,5 +192,6 @@ try {
     Write-Host 'Storage is not configured yet; Nexus will show this workstation as Needs storage setup.'
   }
 } finally {
-  Remove-Item $tmpAgent,$tmpRestic -Force -ErrorAction SilentlyContinue
+  Remove-Item $tmpAgent,$tmpRestic,$tmpCa -Force -ErrorAction SilentlyContinue
+  Remove-Item Env:NEXUS_BACKUP_TOKEN,Env:NEXUS_BACKUP_REST_PASSWORD,Env:NEXUS_BACKUP_RESTIC_PASSWORD -ErrorAction SilentlyContinue
 }
