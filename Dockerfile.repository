@@ -27,12 +27,11 @@ RUN apk add --no-cache apache2-utils ca-certificates curl openssl tini \
 COPY repository/docker-entrypoint.sh /usr/local/bin/nexus-repository-entrypoint
 COPY repository/client.sh /usr/local/bin/nexus-repository-client
 RUN chmod 0755 /usr/local/bin/nexus-repository-entrypoint /usr/local/bin/nexus-repository-client \
-    && mkdir -p /config /public /data
+    && mkdir -p /config /data
 
 ENV NEXUS_BACKUP_VERSION=$NEXUS_BACKUP_VERSION \
     NEXUS_BACKUP_REVISION=$NEXUS_BACKUP_REVISION \
-    NEXUS_BACKUP_REPOSITORY_PORT=8000 \
-    NEXUS_BACKUP_REPOSITORY_PUBLIC_PORT=8001
+    NEXUS_BACKUP_REPOSITORY_PORT=8000
 
-EXPOSE 8000 8001
+EXPOSE 8000
 ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/nexus-repository-entrypoint"]
