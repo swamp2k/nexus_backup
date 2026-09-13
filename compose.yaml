@@ -37,10 +37,6 @@ services:
     depends_on:
       control:
         condition: service_healthy
-    cap_add:
-      - SYS_ADMIN
-    devices:
-      - /dev/fuse:/dev/fuse
     environment:
       NEXUS_BACKUP_URL: http://control:8787
       NEXUS_BACKUP_AGENT_ID: local-agent
