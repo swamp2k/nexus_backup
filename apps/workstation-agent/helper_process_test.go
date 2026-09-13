@@ -3,14 +3,15 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"testing"
 	"time"
 )
 
 // TestHelperProcess is not a real test on its own. Other tests re-exec the
 // current test binary as a subprocess (the standard os/exec helper-process
-// idiom) and point resticPath at os.Args[0], so cancellation and repository
-// failures can be exercised against a real process on every platform.
+// idiom) and point resticPath at os.Args[0], so cancellation, repository
+// failures, and hard parent-process loss can be exercised cross-platform.
 func TestHelperProcess(t *testing.T) {
 	if os.Getenv("GO_WANT_HELPER_PROCESS") != "1" {
 		return
@@ -67,6 +68,27 @@ func TestHelperProcess(t *testing.T) {
 		}
 		fmt.Println("restored /partial.txt")
 		time.Sleep(30 * time.Second)
+	case "agent-job-parent":
+		if err := initializeAgentProcessTree(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+		sentinel := os.Getenv("HELPER_SENTINEL")
+		child := exec.Command(os.Args[0], "-test.run=^TestHelperProcess$")
+		child.Env = append(os.Environ(), "GO_WANT_HELPER_PROCESS=1", "HELPER_MODE=delayed-sentinel", "HELPER_SENTINEL="+sentinel)
+		if err := child.Start(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+		fmt.Println("READY")
+		_ = os.Stdout.Sync()
+		time.Sleep(30 * time.Second)
+	case "delayed-sentinel":
+		time.Sleep(1500 * time.Millisecond)
+		if err := os.WriteFile(os.Getenv("HELPER_SENTINEL"), []byte("orphan survived\n"), 0o600); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
 	}
 	os.Exit(0)
 }
