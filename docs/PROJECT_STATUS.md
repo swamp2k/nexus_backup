@@ -1,6 +1,6 @@
 # Nexus Backup project status
 
-Last updated: 2026-09-13
+Last updated: 2026-09-14
 
 This is the durable handoff for future sessions. Read it before changing the project. The repository, not chat history, is the source of truth.
 
@@ -12,7 +12,7 @@ Existing PCWatch-backup and standalone Copyarr are fallbacks. Do not modify or r
 
 ## Current milestone
 
-**Final acceptance preflight – publish an exact coordinated RC image set**
+**Final acceptance preflight – publish and verify an exact coordinated RC image set**
 
 Merged on `main`:
 
@@ -24,14 +24,17 @@ Merged on `main`:
 - fresh install + isolated acceptance runbook, PR #24: `3963a17104689ad8bbd63d5d1c7325cf3965df86`
 - M9 architecture/security hardening, PR #25: `e375ae4919ebe589be228c399cd133db849ce04b`
 - self-contained workstation Repository endpoint, PR #26: `33e06ad6b5ae24eaaf6301fbcfce4fcc64917cf1`
+- guarded acceptance RC publishing, PR #27: `515ecbee832c23ad1768b1bcfdf0a282627dc663`
 
-PR #26 final-head CI #252 was green, including real authenticated TLS Restic init/open against the built Repository image. The post-merge `main` CI #253 is also fully green on `33e06ad6...` across Node/typecheck, Linux Go, native Windows Go, installer/templates and all image/Repository integration gates.
+PR #26 final-head CI #252 and post-merge `main` CI #253 were fully green, including real authenticated TLS Restic init/open against the built Repository image.
 
-Active branch: `acceptance-release-preflight`
+PR #27 final-head CI #254 and post-merge `main` CI #255 were also fully green. The release-identity guard, native Windows tests, all three image builds, real Repository TLS/auth Restic integration, metadata and Compose gates passed on `515ecbee832c23ad1768b1bcfdf0a282627dc663`.
 
-Current preflight finding: there is no GitHub release yet, and the release-image workflow was tag-only. The code path is therefore proven, but the Unraid acceptance procedure still lacks an exact coordinated published Control + Agent + Repository image set that can be pinned and recorded by digest.
+Active branch: `acceptance-rc-handoff`
 
-Do not call the product ready for real-machine acceptance until this distribution gate is closed and the final runbook preflight is repeated against the published RC identity.
+The code and distribution workflow are now ready for one explicit acceptance RC publish. No RC has been published yet, and no production workload has been moved.
+
+Do not call the product ready for real-machine acceptance until the exact published RC image set has been pulled through the actual Unraid deployment path, its immutable digests recorded, and the final runbook preflight repeated against those identities.
 
 ## Architecture now on main
 
@@ -72,9 +75,9 @@ REST transport credentials remain local to Repository + workstation. The separat
 - repository/auth/TLS/network failures fail closed.
 - Repository URL/username/password/CA path/encryption password remain absent from Control/browser-visible telemetry/errors.
 
-## Acceptance RC publishing preflight
+## Acceptance RC publishing path now on main
 
-The active branch adds a guarded manual path to `.github/workflows/release-images.yml` for acceptance images without changing normal tag-release semantics.
+PR #27 added a guarded manual `workflow_dispatch` path to `.github/workflows/release-images.yml` without changing normal tag-release semantics.
 
 Manual acceptance publishing must:
 
@@ -85,9 +88,11 @@ Manual acceptance publishing must:
 - publish Control, Agent and Repository with the same version/source revision;
 - record each image digest in the GitHub Actions step summary.
 
-The identity decision lives in `.github/scripts/resolve-release-version.sh` and is covered by the normal Node test suite for allowed and rejected cases. Third-party release Actions remain pinned to commit SHAs.
+The identity decision lives in `.github/scripts/resolve-release-version.sh` and is covered by the normal Node test suite for allowed and rejected cases. Third-party release Actions are pinned to reviewed commit SHAs.
 
 Normal `v*` tag releases continue to determine stable/prerelease status from the tag and can move `latest` only for a stable SemVer tag.
+
+No image is published merely by merging the workflow. The next acceptance action is one explicit manual prerelease publish from the then-current final `main` SHA.
 
 ## Completed M9 security review
 
@@ -157,8 +162,8 @@ The isolated acceptance test may use disposable secrets/repositories, but passin
 
 ## Remaining gates before “Nu tester vi”
 
-1. finish and merge the guarded manual RC-publish preflight;
-2. publish one exact prerelease image set from the then-current merged `main` SHA without moving `latest`;
+1. merge this handoff-only status sync so the RC source SHA includes the current source-of-truth;
+2. publish one exact prerelease image set from that merged `main` SHA without moving `latest`;
 3. verify Control, Agent and Repository can all be pulled by the actual Unraid deployment path and record their immutable digests;
 4. rerun the final acceptance runbook preflight against those exact image identities;
 5. only then start the isolated real-machine acceptance drill.
