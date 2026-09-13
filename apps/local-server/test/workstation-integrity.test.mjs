@@ -16,6 +16,7 @@ async function fixture({ integrityCapability = true } = {}) {
   let now = new Date("2026-09-13T15:00:00.000Z");
   let runNumber = 0;
   let tokenNumber = 0;
+  let leaseNumber = 0;
   const devices = createManagedDeviceService({
     db,
     now: () => new Date(now),
@@ -27,7 +28,7 @@ async function fixture({ integrityCapability = true } = {}) {
     deviceService: devices,
     now: () => new Date(now),
     id: () => `wsrun-integrity-${++runNumber}`,
-    leaseToken: () => `nxbws_${String(runNumber).padStart(32, "z")}`,
+    leaseToken: () => `nxbws_${String(++leaseNumber).padStart(32, "z")}`,
     leaseMs: 60_000,
   });
   const created = await devices.create({ name: "Balder PC", kind: "workstation" });
