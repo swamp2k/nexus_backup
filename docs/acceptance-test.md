@@ -73,11 +73,11 @@ The command prints local PowerShell environment lines containing:
 NEXUS_BACKUP_REPOSITORY
 NEXUS_BACKUP_REST_USERNAME
 NEXUS_BACKUP_REST_PASSWORD
-NEXUS_BACKUP_REPOSITORY_CA_URL
+NEXUS_BACKUP_REPOSITORY_CA_B64
 NEXUS_BACKUP_REPOSITORY_CA_SHA256
 ```
 
-Do **not** put those values in the acceptance report. The CA SHA is used by the installer to pin the certificate downloaded from the CA-only bootstrap port.
+Do **not** put those values in the acceptance report. The public CA is carried directly in the local helper output; Repository exposes no HTTP bootstrap port. The installer decodes that exact CA and refuses it unless `NEXUS_BACKUP_REPOSITORY_CA_SHA256` matches.
 
 In the same elevated PowerShell that will run the Nexus workstation installer, paste those environment lines and add a new disposable Restic encryption password:
 
@@ -89,7 +89,7 @@ Then use Nexus **Add workstation** and run its generated one-line install/enroll
 
 The install is acceptable only if it:
 
-- verifies the CA SHA before trusting Repository TLS;
+- decodes and verifies the locally supplied CA SHA before trusting Repository TLS;
 - initializes the exact new acceptance namespace or verifies it if already initialized;
 - leaves remote runtime `autoInit=false`;
 - stores Repository transport + encryption secrets locally below `%ProgramData%\NexusBackup` with SYSTEM/Admin-only ACL;
