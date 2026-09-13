@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -140,6 +140,13 @@ test("emergency export refuses overlapping destinations and existing bundles", a
       () => createEmergencyBundle({ configDir: f.configDir, agentConfigDir: f.agentConfigDir, outputDir: join(linkedParent, "bundle") }),
       /must not overlap control config/,
     );
+
+    const nestedOutput = join(linkedParent, "new-parent", "bundle");
+    await assert.rejects(
+      () => createEmergencyBundle({ configDir: f.configDir, agentConfigDir: f.agentConfigDir, outputDir: nestedOutput }),
+      /must not overlap control config/,
+    );
+    await assert.rejects(() => lstat(join(f.configDir, "new-parent")), /ENOENT/);
 
     const existing = join(f.root, "existing");
     await mkdir(existing);
