@@ -55,6 +55,7 @@ COPY --from=build /src/apps/control-plane/package.json ./apps/control-plane/pack
 COPY --from=build /src/apps/control-plane/dist ./apps/control-plane/dist
 COPY apps/local-server ./apps/local-server
 COPY migrations ./migrations
+COPY docs/emergency-recovery.md ./docs/emergency-recovery.md
 COPY --from=workstation /out/nexus-backup-workstation-windows-amd64.exe ./apps/local-server/web/workstation/nexus-backup-workstation-windows-amd64.exe
 COPY --from=workstation /out/nexus-backup-workstation-windows-amd64.exe.sha256 ./apps/local-server/web/workstation/nexus-backup-workstation-windows-amd64.exe.sha256
 COPY --from=restic-windows /out/restic.exe ./apps/local-server/web/workstation/restic.exe

@@ -138,6 +138,18 @@ jobs:
             sha256sum -c nexus-backup-workstation-windows-amd64.exe.sha256
             sha256sum -c restic.exe.sha256
           '
+      - name: Verify bundled emergency recovery assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint sh nexus-backup-local:ci -ec '
+            test -s /app/apps/local-server/bin/emergency-export.mjs
+            test -s /app/apps/local-server/lib/emergency-export.mjs
+            test -s /app/docs/emergency-recovery.md
+            grep -Fq "# Emergency recovery: recover Nexus Backup without Nexus Backup" /app/docs/emergency-recovery.md
+            node --check /app/apps/local-server/bin/emergency-export.mjs
+            node --check /app/apps/local-server/lib/emergency-export.mjs
+          '
       - name: Build agent image
         run: docker build -f Dockerfile.agent --build-arg NEXUS_BACKUP_VERSION="$CI_VERSION" --build-arg NEXUS_BACKUP_REVISION="$GITHUB_SHA" -t nexus-backup-agent:ci .
       - name: Verify image version metadata

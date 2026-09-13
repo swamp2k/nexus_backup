@@ -12,31 +12,35 @@ Existing PCWatch-backup and standalone Copyarr are fallbacks. Do not remove or m
 
 ## Current milestone
 
-**Pre-acceptance hardening – repository integrity and health**
+**Pre-acceptance hardening – recover Nexus Backup itself**
 
-M7 workstation recovery is merged. M8 resilience/failure batches are merged on `main`:
+Merged on `main`:
 
-- M8 batch 1: `941d138bde505181c3fd36af2e4bcf6e5b0b8736`
-- M8 batch 2: `527909f3385b41c33b46cb421aabdc8b61cadf0e`
+- M8 resilience batch 1: `941d138bde505181c3fd36af2e4bcf6e5b0b8736`
+- M8 resilience batch 2: `527909f3385b41c33b46cb421aabdc8b61cadf0e`
+- generic/Unraid repository integrity health, PR #21: `5b975e7b761d19a25a9d7a4fbdb6de549cb1f848`
+- workstation-native repository integrity, PR #22: `4e2406ce5f17ed4eae27281f1f6ec2c186aaaceb`
 
-Active branch: `repository-integrity-health`
+Active branch: `emergency-recovery-kit`
 
-Active PR: **#21 – Repository integrity checks and health**
+Active PR: **#23 – Emergency recovery kit for Nexus Backup**. Keep it draft until the final branch head has passed the full Node/typecheck, Linux/native-Windows workstation, installer/template and Docker-image CI gates.
 
 Do not call the product ready for real-machine acceptance until the remaining pre-acceptance gates below are closed.
 
-## Completed through M7
+## Completed platform/recovery capability
 
-- local control plane, SQLite state and authenticated UI/API
+- local authenticated control plane and authoritative SQLite state
 - Restic/rclone execution
 - self-contained Docker/Unraid packaging
 - workstation enrollment, policies, scheduling and Windows agent
-- workstation snapshot inventory
-- non-recursive snapshot browsing
-- restore dry-run preview
-- write restore to an agent-generated staging directory
+- workstation snapshot inventory and non-recursive browse
+- dry-run restore preview and staging-only write restore
 - exact preview -> restore binding with 30-minute maximum preview age
-- recovery UI in Workstations
+- repository integrity checks for generic/Unraid repositories
+- workstation-native repository integrity checks using only workstation-local repository credentials
+- explicit UI health states for integrity not checked / checking / OK / failed
+
+A standard `restic check` is repository consistency evidence, not proof that selected files can be recovered byte-for-byte. Acceptance still requires an actual staging restore plus byte/hash/content verification.
 
 ## Recovery safety invariants
 
@@ -51,55 +55,51 @@ These are not negotiable unless the architecture is explicitly redesigned and re
 - interrupted/expired write restore is not automatically requeued; manual retry only
 - stale lease tokens cannot mutate a newly leased run
 - explicit stale-lease rejection cancels local leased work; transient communication/5xx failures do not
-- recovery/failure must not overwrite successful backup-history fields
+- recovery/failure/integrity jobs must not overwrite successful backup-history fields
 - a locally completed backup is not authoritative success until the controller ACKs the exact leased result
 - repository credentials stay local to the workstation/agent
 - backup payloads never pass through Nexus control plane, Cloudflare or PCWatch
 
 ## M8 resilience/failure work – merged
 
-Deterministic torture coverage includes:
-
-- controller/service recreation during an active lease
-- expired workstation leases and re-leasing
-- stale lease-token rejection
-- offline workstation recovery rejection
-- due backup deferral while recovery owns the workstation
-- workstation status consistency after lease recovery
-- explicit HTTP 409 lease rejection vs transient 5xx/network-like errors
-- local Restic cancellation for backup and recovery
-- descendant process-tree termination so wrapper/child processes cannot keep inherited pipes alive
-- cancellation of repository probes and retention/prune after explicit lease loss
-- recovery write cancellation remains failure/manual-retry-only
-- controller-unreachable finish does not create local ghost success
-- repository authentication/unavailable/locked/disk-full failures remain failures
-- interrupted write restore leaves staging output but never auto-retries or reuses the same target
-- hard Windows Scheduled Task/agent death cannot leave inherited Restic children running; Windows Job Object uses kill-on-close containment
-- partial/failed backup results cannot replace the controller's last successful snapshot
+Deterministic torture coverage includes controller recreation during a lease, expired leases/re-leasing, stale-token rejection, offline recovery rejection, backup deferral while recovery owns a workstation, explicit 409 vs transient 5xx/network handling, full descendant process-tree cancellation, repository auth/unavailable/lock/disk-full failures, interrupted write-restore behavior, Windows Job Object kill-on-close containment, and protection of previous successful backup history.
 
 CI runs workstation-agent test/vet on both Linux and native Windows, plus Windows cross-build and full Docker/release validation.
 
-## Repository integrity/health – current work
+## Emergency recovery – PR #23
 
-Current PR #21 adds a first-class `restic-check` job:
+`emergency-recovery-kit` adds a recovery path for losing Nexus Backup itself while repositories/persistent state survive.
 
-- standard read-only `restic check`
-- repository-local credentials only
-- same per-repository Restic lock as backup/prune/inventory/restore
-- normal lease cancellation and telemetry
-- explicit tool failure on non-zero Restic exit
-- repository UI derives health from authoritative `restic-check` jobs, separate from inventory state
-- UI states distinguish not checked, checking, check OK and check failed
-- failed integrity remains visible even if snapshot inventory is still readable
+Implemented on the branch:
 
-A standard `restic check` is repository consistency evidence, not a substitute for reading every data byte. Real acceptance still requires an actual staging restore plus byte/content/hash verification.
+- `apps/local-server/bin/emergency-export.mjs`
+- consistent live SQLite snapshot using `quick_check` + `VACUUM INTO` + snapshot `integrity_check`
+- control identity/auth files copied into the bundle
+- complete generic-agent config/secrets tree copied into the bundle
+- full `EMERGENCY-RECOVERY.md` runbook copied into every bundle and covered by the manifest, so recovery instructions do not depend on GitHub access
+- SHA-256 + size manifest for every bundled file
+- Nexus version/revision and applied migration list in the manifest
+- verification rejects changed/missing/extra files and bad SQLite integrity
+- manifest database/runbook paths must be safe relative paths inside the hash-verified bundle inventory
+- database snapshot names cannot escape control config
+- source/output overlap checks resolve prospective real filesystem paths, including missing descendants under symlinked ancestors, before creating directories
+- nested symlink-parent overlap is rejected without leaving directories inside source config
+- bundle content symlinks are rejected so a bundle cannot silently depend on another host path
+- existing bundle directories are never overwritten
+- emergency exporter CLI/library are included in the normal JS syntax gate
+- control-image CI verifies exporter CLI/library and bundled recovery runbook are physically present in the built image
+- tests cover live WAL state, preserved secrets, bundled runbook, corruption/tamper detection, manifest path traversal, database-name traversal, direct/symlinked/prospective overlap, existing-output refusal and symlink refusal
+- runbook documents a separate offline `docker image save` archive containing exact pinned control + generic-agent images so disaster recovery need not depend on GHCR or a separate utility image
 
-## Product gaps to close before asking for a real acceptance test
+Important recovery design decision: the first restored controller boot uses **disposable inspection volumes** on a loopback-only alternate port with no workers connected. Normal schedulers are not given a special recovery mode; if they mutate scheduler/job state during inspection, that state is thrown away. Production recovery volumes are recreated a second time from the unchanged verified emergency bundle before any worker reconnects.
 
-The aim is not merely green automated tests. Before telling the user the product is ready for a real end-to-end test, close/review these gates:
+The emergency bundle intentionally excludes backup payloads/source data/restore staging/disposable caches, workstation-local repository secrets and container image archives. It contains privileged secrets and must be stored encrypted off-host. Its SHA-256 manifest detects corruption/inventory changes relative to the manifest; it is not a cryptographic signature against an attacker able to replace both bundle contents and manifest.
 
-- finish and merge repository integrity/health PR #21
-- emergency recovery runbook: restore data when Nexus Backup itself is unavailable
+The runbook is not considered proven until the disposable recovery drill in the document has actually been performed, including offline image archive verification/load or equivalent proof that the exact images are independently available.
+
+## Product gaps before a real workstation acceptance test
+
+- finish final CI/review and merge PR #23
 - fresh deployment/install/acceptance docs for Unraid + Windows without relying on chat history
 - M9 architecture/security review with all high-severity findings resolved
 - final preflight review of the exact isolated acceptance procedure
@@ -122,7 +122,7 @@ Use a disposable `NexusBackup-Test` dataset and preferably an isolated test repo
 
 Only after that proof should a real workstation be cut over from PCWatch-backup. Cut over one workstation at a time; never run PCWatch and Nexus writes against the same Restic repository concurrently.
 
-## Remaining product roadmap after workstation proof
+## Remaining roadmap after workstation proof
 
 - migrate and prove Martin-PC -> Unraid workload
 - migrate and prove Unraid -> Google Drive backup workload
