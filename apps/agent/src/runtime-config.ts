@@ -265,6 +265,18 @@ function collectTelemetryRedactionValues(input: StaticAgentRuntimeConfigInput): 
       if (parsed.username && parsed.password) add(`${parsed.username}:${parsed.password}`);
     } catch {}
   };
+  const addSensitiveOptionParts = (value: unknown) => {
+    if (typeof value !== "string") return;
+    const sensitive = /(?:pass(?:word|wd)?|secret|token|credential|api[_-]?key|access[_-]?key|private[_-]?key|account[_-]?key)/i;
+    for (const match of value.matchAll(/(?:^|[,\s])(--?[A-Za-z0-9_-]+|[A-Za-z0-9_-]+)=([^,\s:]+)/g)) {
+      const name = match[1] ?? "";
+      const optionValue = match[2] ?? "";
+      if (sensitive.test(name)) {
+        add(optionValue);
+        add(`${name}=${optionValue}`);
+      }
+    }
+  };
 
   for (const repository of input.resticRepositories ?? []) {
     add(repository.repository);
@@ -274,6 +286,14 @@ function collectTelemetryRedactionValues(input: StaticAgentRuntimeConfigInput): 
       if (/(?:pass(?:word|wd)?|secret|token|credential|api[_-]?key|access[_-]?key|private[_-]?key|account[_-]?key)/i.test(name)) add(value);
     }
   }
+  for (const endpoint of input.rcloneEndpoints ?? []) {
+    add(endpoint.fs);
+    addUrlParts(endpoint.fs);
+    addSensitiveOptionParts(endpoint.fs);
+    for (const arg of endpoint.mount?.args ?? []) addSensitiveOptionParts(arg);
+  }
+  add(input.tools?.rcloneConfigPath);
+  for (const arg of input.tools?.rcloneArgs ?? []) addSensitiveOptionParts(arg);
   for (const gate of input.rtorrentGates ?? []) {
     add(gate.url);
     addUrlParts(gate.url);
