@@ -123,6 +123,21 @@ func (a *agent) report() error {
 	if err != nil {
 		return err
 	}
+
+	if response.DeviceToken != "" {
+		if !strings.HasPrefix(response.DeviceToken, "nxbdev_") || len(response.DeviceToken) < 24 {
+			return errors.New("server returned an invalid rotated device token")
+		}
+		// The enrollment token is intentionally one-shot. Persist the replacement
+		// before the agent depends on it for status/poll requests and future restarts.
+		a.cfg.DeviceToken = response.DeviceToken
+		a.client.setToken(response.DeviceToken)
+		if err := saveConfig(a.configPath, a.cfg); err != nil {
+			return fmt.Errorf("persist rotated device token: %w", err)
+		}
+		log.Printf("workstation enrollment credential rotated and persisted")
+	}
+
 	if response.Device.ID != "" {
 		a.mu.Lock()
 		a.state.DeviceID = response.Device.ID
@@ -322,6 +337,17 @@ func loadConfig(path string) (config, error) {
 		cfg.ReportSeconds = 60
 	}
 	return cfg, nil
+}
+
+func saveConfig(path string, cfg config) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o600)
 }
 
 func loadState(path string) (localState, error) {
