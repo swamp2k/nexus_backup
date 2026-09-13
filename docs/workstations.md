@@ -107,6 +107,32 @@ After a successful backup, retention is applied with plan-scoped workstation tag
 
 The agent reports bounded progress and results to Nexus: progress percentage/bytes/files/current path, final snapshot id, file counts, data added, duration and redacted error text. Repository URLs and the password-file path are redacted from errors before transmission.
 
+## Workstation recovery
+
+M7 adds recovery to the same workstation data plane. The browser never receives repository credentials and never supplies a Windows restore destination.
+
+The **Recovery** flow on the Workstations page is:
+
+1. refresh or use the cached snapshot inventory;
+2. browse one snapshot non-recursively and select the whole snapshot, a folder, or a file;
+3. run a real Restic dry-run preview;
+4. review the bounded change summary and type the confirmation phrase returned for that completed preview;
+5. restore into a newly generated workstation-local staging directory.
+
+The safety contract is deliberately stricter than a normal Restic restore:
+
+- the control plane accepts only paths already discovered through workstation recovery inventory/browse data;
+- the write restore must match the exact workstation, snapshot and path from a completed preview;
+- previews expire after 30 minutes;
+- only one workstation operation may be active at a time;
+- the browser cannot submit a target path, staging path, overwrite mode or delete option;
+- the workstation generates its own target below `restores/<run-id>` beside its Nexus configuration;
+- write restore always uses `--overwrite never` and never uses `--delete`;
+- an already-existing staging target is refused;
+- an interrupted write restore is not automatically retried.
+
+This means recovery is intentionally **staging-first**, not in-place. After a successful restore, inspect the recovered files on the workstation and copy/move them into their final location manually once they have been verified.
+
 ## Dashboard status
 
 The Workstations page shows:
@@ -119,7 +145,8 @@ The Workstations page shows:
 - current progress;
 - last run state/error;
 - sources/excludes/retention policy;
-- **Run now**.
+- **Run now**;
+- **Recovery** for online, storage-ready agents that advertise `workstation.recovery.v1`.
 
 ## Release/versioning
 
@@ -136,4 +163,4 @@ Those GitHub Release assets are a distribution convenience; the normal local `ir
 
 ## Current boundary
 
-Workstation backup is backup-only in M6. Workstation snapshot browsing/write restore is deliberately left for M7. Until then, use Restic directly with the workstation's local repository configuration for recovery testing.
+M7 provides workstation snapshot inventory, browsing, preview and staging-only restore. It does **not** restore directly over the live workstation filesystem and does not let the control plane choose a Windows destination. In-place replacement remains an explicit manual step after the staged recovery has been verified.
