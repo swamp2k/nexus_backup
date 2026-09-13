@@ -57,6 +57,9 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	if err := initializeAgentProcessTree(); err != nil {
+		log.Fatalf("initialize child process containment: %v", err)
+	}
 	statePath := filepath.Join(filepath.Dir(cfgPath), "workstation-state.json")
 	a := &agent{
 		cfg:        cfg,
@@ -129,8 +132,6 @@ func (a *agent) report() error {
 		if !strings.HasPrefix(response.DeviceToken, "nxbdev_") || len(response.DeviceToken) < 24 {
 			return errors.New("server returned an invalid rotated device token")
 		}
-		// The enrollment token is intentionally one-shot. Persist the replacement
-		// before the agent depends on it for status/poll requests and future restarts.
 		a.cfg.DeviceToken = response.DeviceToken
 		a.client.setToken(response.DeviceToken)
 		if err := saveConfig(a.configPath, a.cfg); err != nil {
@@ -214,10 +215,6 @@ func (a *agent) executeBackup(run workstationRun) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// A heartbeat failure alone must never stop local work: it may just be a
-	// transient network blip. Only an explicit stale-lease rejection (409)
-	// means the controller has moved on and this run must stop, so it cannot
-	// keep producing a backup/snapshot the controller no longer tracks.
 	onLeaseResponse := func(err error) {
 		if err == nil {
 			return
@@ -287,10 +284,6 @@ func (a *agent) executeBackup(run workstationRun) {
 
 	a.mu.Lock()
 	a.state.LastBackupAt = finished
-	// Successful local Restic completion is not authoritative until the
-	// controller accepts the exact leased run result. Otherwise a transient
-	// finish failure followed by status reporting could falsely advance
-	// last-success/snapshot state while the controller later requeues the run.
 	if status == "success" && finishErr == nil {
 		a.state.LastSuccessAt = finished
 		a.state.LastError = ""
