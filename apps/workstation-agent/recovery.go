@@ -93,13 +93,13 @@ func listRecoverySnapshots(parent context.Context, cfg config, deviceID string) 
 	if err := validateRepositoryConfig(cfg); err != nil {
 		return nil, redactBackupError(cfg, err)
 	}
+	ctx, cancel := context.WithTimeout(parent, 2*time.Minute)
+	defer cancel()
 	env := recoveryEnvironment(cfg)
-	if err := ensureRepository(cfg.ResticPath, env, cfg.Repository, false); err != nil {
+	if err := ensureRepositoryContext(ctx, cfg.ResticPath, env, cfg.Repository, false); err != nil {
 		return nil, redactBackupError(cfg, err)
 	}
 
-	ctx, cancel := context.WithTimeout(parent, 2*time.Minute)
-	defer cancel()
 	cmd := commandContextWithTree(ctx, cfg.ResticPath,
 		"snapshots", "--json", "--latest", fmt.Sprint(maxRecoverySnapshots), "--group-by", "", "--tag", "nexus-workstation:"+deviceID,
 	)
@@ -165,13 +165,13 @@ func browseRecoverySnapshot(parent context.Context, cfg config, snapshotID, snap
 	if err := validateRepositoryConfig(cfg); err != nil {
 		return browseResult{}, redactBackupError(cfg, err)
 	}
+	ctx, cancel := context.WithTimeout(parent, 2*time.Minute)
+	defer cancel()
 	env := recoveryEnvironment(cfg)
-	if err := ensureRepository(cfg.ResticPath, env, cfg.Repository, false); err != nil {
+	if err := ensureRepositoryContext(ctx, cfg.ResticPath, env, cfg.Repository, false); err != nil {
 		return browseResult{}, redactBackupError(cfg, err)
 	}
 
-	ctx, cancel := context.WithTimeout(parent, 2*time.Minute)
-	defer cancel()
 	cmd := commandContextWithTree(ctx, cfg.ResticPath, "ls", "--json", id, selectedPath)
 	cmd.Env = env
 	stdout, err := cmd.StdoutPipe()
@@ -274,8 +274,11 @@ func runRecoveryRestore(ctx context.Context, cfg config, restoreRoot, runID, sna
 		return started
 	}
 	env := recoveryEnvironment(cfg)
-	if err := ensureRepository(cfg.ResticPath, env, cfg.Repository, false); err != nil {
+	if err := ensureRepositoryContext(ctx, cfg.ResticPath, env, cfg.Repository, false); err != nil {
 		started.Err = redactBackupError(cfg, err)
+		if ctx.Err() != nil {
+			started.Cancelled = true
+		}
 		return started
 	}
 	if !dryRun {
