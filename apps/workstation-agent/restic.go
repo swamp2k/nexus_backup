@@ -56,7 +56,8 @@ func executeResticBackup(ctx context.Context, cfg config, run workstationRun, re
 		"RESTIC_REPOSITORY="+cfg.Repository,
 		"RESTIC_PASSWORD_FILE="+cfg.PasswordFile,
 	)
-	if err := ensureRepositoryContext(ctx, cfg.ResticPath, env, cfg.Repository, cfg.AutoInit); err != nil {
+	allowInit := cfg.AutoInit && (localRepositoryPath(cfg.Repository) != "" || isPinnedManagedRestRepository(cfg))
+	if err := ensureRepositoryContext(ctx, cfg.ResticPath, env, cfg.Repository, allowInit); err != nil {
 		result := backupResult{Duration: time.Since(started), Err: redactBackupError(cfg, err)}
 		if ctx.Err() != nil {
 			result.Cancelled = true
@@ -170,10 +171,6 @@ func runBackupCommand(ctx context.Context, resticPath string, env, args []string
 	waitErr := waitCommandTree(cmd)
 	stderrText := <-stderrDone
 	if ctx.Err() != nil {
-		// The context was cancelled (an explicit stale-lease rejection, not a
-		// timeout we set ourselves), so restic was killed intentionally.
-		// Restic guarantees the repository stays consistent when killed
-		// mid-backup; it simply never wrote the missing snapshot.
 		return backupResult{Cancelled: true, Err: fmt.Errorf("restic backup cancelled: %w", ctx.Err())}
 	}
 	if parseErr != nil {
@@ -209,9 +206,6 @@ func runBackupCommand(ctx context.Context, resticPath string, env, args []string
 	return result
 }
 
-// ensureRepository is retained for non-leased callers. Workstation leased work
-// must use ensureRepositoryContext so an explicit lease revocation can stop a
-// slow repository probe or initialization command as well as the backup itself.
 func ensureRepository(resticPath string, env []string, repository string, autoInit bool) error {
 	return ensureRepositoryContext(context.Background(), resticPath, env, repository, autoInit)
 }
@@ -246,8 +240,21 @@ func ensureRepositoryContext(ctx context.Context, resticPath string, env []strin
 	if ctx.Err() != nil {
 		return fmt.Errorf("open restic repository cancelled: %w", ctx.Err())
 	}
-	if err != nil {
+	if err == nil {
+		return nil
+	}
+	if !autoInit {
 		return fmt.Errorf("open restic repository: %s", boundedText(output, 4000))
+	}
+
+	initCmd := commandContextWithTree(ctx, resticPath, "init")
+	initCmd.Env = env
+	initOutput, initErr := combinedOutputTree(initCmd)
+	if ctx.Err() != nil {
+		return fmt.Errorf("initialize remote restic repository cancelled: %w", ctx.Err())
+	}
+	if initErr != nil {
+		return fmt.Errorf("initialize remote restic repository: %s", boundedText(initOutput, 4000))
 	}
 	return nil
 }
@@ -263,8 +270,6 @@ func localRepositoryPath(repository string) string {
 	return ""
 }
 
-// applyRetention is retained for non-leased callers. Workstation backup uses
-// applyRetentionContext so stale-lease cancellation also stops forget/prune.
 func applyRetention(resticPath string, env []string, tag string, retention retentionPolicy) error {
 	return applyRetentionContext(context.Background(), resticPath, env, tag, retention)
 }
@@ -332,7 +337,43 @@ func validateRepositoryConfig(cfg config) error {
 	if strings.TrimSpace(string(content)) == "" {
 		return errors.New("restic password file is empty")
 	}
+	if (strings.TrimSpace(cfg.RestUsername) == "") != (strings.TrimSpace(cfg.RestPassword) == "") {
+		return errors.New("REST transport username and password must be configured together")
+	}
+	if cfg.RestUsername != "" && !strings.HasPrefix(strings.ToLower(cfg.Repository), "rest:https://") {
+		return errors.New("REST transport credentials require a rest:https:// repository")
+	}
+	if cfg.CACertPath != "" {
+		info, statErr := os.Stat(cfg.CACertPath)
+		if statErr != nil {
+			return fmt.Errorf("read repository CA certificate: %w", statErr)
+		}
+		if info.IsDir() || info.Size() == 0 {
+			return errors.New("repository CA certificate must be a non-empty regular file")
+		}
+	}
+	return applyResticTransportEnvironment(cfg)
+}
+
+func applyResticTransportEnvironment(cfg config) error {
+	pairs := map[string]string{
+		"RESTIC_REST_USERNAME": cfg.RestUsername,
+		"RESTIC_REST_PASSWORD": cfg.RestPassword,
+		"RESTIC_CACERT":        cfg.CACertPath,
+	}
+	for name, value := range pairs {
+		if value == "" {
+			if err := os.Unsetenv(name); err != nil { return fmt.Errorf("clear %s: %w", name, err) }
+			continue
+		}
+		if err := os.Setenv(name, value); err != nil { return fmt.Errorf("set %s: %w", name, err) }
+	}
 	return nil
+}
+
+func isPinnedManagedRestRepository(cfg config) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(cfg.Repository)), "rest:https://") &&
+		strings.TrimSpace(cfg.RestUsername) != "" && strings.TrimSpace(cfg.RestPassword) != "" && strings.TrimSpace(cfg.CACertPath) != ""
 }
 
 func redactBackupError(cfg config, err error) error {
@@ -340,11 +381,16 @@ func redactBackupError(cfg config, err error) error {
 		return nil
 	}
 	text := err.Error()
-	if value := strings.TrimSpace(cfg.Repository); value != "" {
-		text = strings.ReplaceAll(text, value, "[repository]")
-	}
-	if value := strings.TrimSpace(cfg.PasswordFile); value != "" {
-		text = strings.ReplaceAll(text, value, "[password-file]")
+	for value, replacement := range map[string]string{
+		strings.TrimSpace(cfg.Repository):   "[repository]",
+		strings.TrimSpace(cfg.PasswordFile): "[password-file]",
+		strings.TrimSpace(cfg.RestUsername): "[rest-user]",
+		strings.TrimSpace(cfg.RestPassword): "[rest-password]",
+		strings.TrimSpace(cfg.CACertPath):   "[ca-cert]",
+	} {
+		if value != "" {
+			text = strings.ReplaceAll(text, value, replacement)
+		}
 	}
 	return errors.New(text)
 }
