@@ -4,18 +4,19 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
 
-func TestValidateRepositoryConfigAppliesPinnedRESTTransportLocally(t *testing.T) {
+func TestResticEnvironmentUsesLocalTransportConfigWithoutMutatingProcessEnvironment(t *testing.T) {
 	dir := t.TempDir()
 	passwordFile := filepath.Join(dir, "restic-password")
 	caFile := filepath.Join(dir, "repository-ca.pem")
 	if err := os.WriteFile(passwordFile, []byte("encryption-secret\n"), 0o600); err != nil { t.Fatal(err) }
 	if err := os.WriteFile(caFile, []byte("test-ca\n"), 0o600); err != nil { t.Fatal(err) }
 
+	t.Setenv("RESTIC_REPOSITORY", "stale-repository")
+	t.Setenv("RESTIC_PASSWORD_FILE", "stale-password-file")
 	t.Setenv("RESTIC_REST_USERNAME", "stale-user")
 	t.Setenv("RESTIC_REST_PASSWORD", "stale-password")
 	t.Setenv("RESTIC_CACERT", "stale-ca")
@@ -27,13 +28,22 @@ func TestValidateRepositoryConfigAppliesPinnedRESTTransportLocally(t *testing.T)
 		CACertPath:   caFile,
 	}
 	if err := validateRepositoryConfig(cfg); err != nil { t.Fatal(err) }
-	if got := os.Getenv("RESTIC_REST_USERNAME"); got != "balder-pc" { t.Fatalf("username env = %q", got) }
-	if got := os.Getenv("RESTIC_REST_PASSWORD"); got != "transport-secret" { t.Fatalf("password env = %q", got) }
-	if got := os.Getenv("RESTIC_CACERT"); got != caFile { t.Fatalf("cacert env = %q", got) }
-	if !isPinnedManagedRestRepository(cfg) { t.Fatal("expected pinned authenticated HTTPS repository to be managed") }
+	env := resticEnvironment(cfg)
+	for name, want := range map[string]string{
+		"RESTIC_REPOSITORY": cfg.Repository,
+		"RESTIC_PASSWORD_FILE": passwordFile,
+		"RESTIC_REST_USERNAME": "balder-pc",
+		"RESTIC_REST_PASSWORD": "transport-secret",
+		"RESTIC_CACERT": caFile,
+	} {
+		if got := envValue(env, name); got != want { t.Fatalf("%s child env = %q, want %q", name, got, want) }
+	}
+	if got := os.Getenv("RESTIC_REST_PASSWORD"); got != "stale-password" {
+		t.Fatalf("validation mutated process environment: %q", got)
+	}
 }
 
-func TestRepositoryTransportRequiresPairHTTPSAndPinnedCAForManagedInit(t *testing.T) {
+func TestRepositoryTransportRequiresCredentialPairAndHTTPS(t *testing.T) {
 	dir := t.TempDir()
 	passwordFile := filepath.Join(dir, "restic-password")
 	caFile := filepath.Join(dir, "repository-ca.pem")
@@ -53,11 +63,6 @@ func TestRepositoryTransportRequiresPairHTTPSAndPinnedCAForManagedInit(t *testin
 	if err := validateRepositoryConfig(plainHTTP); err == nil || !strings.Contains(err.Error(), "rest:https://") {
 		t.Fatalf("expected HTTPS rejection, got %v", err)
 	}
-	unpinned := base
-	unpinned.RestUsername = "user"
-	unpinned.RestPassword = "secret"
-	unpinned.CACertPath = ""
-	if isPinnedManagedRestRepository(unpinned) { t.Fatal("remote init must not be allowed without a pinned CA") }
 }
 
 func TestRepositoryTransportSecretsAreRedacted(t *testing.T) {
@@ -75,24 +80,37 @@ func TestRepositoryTransportSecretsAreRedacted(t *testing.T) {
 	}
 }
 
-func TestRemoteAutoInitOnlyRunsWhenExplicitlyAllowed(t *testing.T) {
-	if runtime.GOOS == "windows" { t.Skip("fixture uses a POSIX shell") }
+func TestRemoteRepositoryNeverAutoInitializesAtRuntime(t *testing.T) {
+	if os.PathSeparator == '\\' { t.Skip("fixture uses a POSIX shell") }
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "commands.log")
 	script := filepath.Join(dir, "fake-restic")
-	body := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '" + logPath + "'\nif [ \"$1\" = \"cat\" ]; then echo missing >&2; exit 1; fi\nif [ \"$1\" = \"init\" ]; then exit 0; fi\nexit 2\n"
+	body := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '" + logPath + "'\nif [ \"$1\" = \"cat\" ]; then echo unavailable >&2; exit 1; fi\nif [ \"$1\" = \"init\" ]; then exit 0; fi\nexit 2\n"
 	if err := os.WriteFile(script, []byte(body), 0o755); err != nil { t.Fatal(err) }
 	repository := "rest:https://backup.lan:8000/user/main"
 
-	if err := ensureRepository(script, os.Environ(), repository, false); err == nil { t.Fatal("expected missing remote repository to fail when auto-init is disabled") }
-	first, err := os.ReadFile(logPath)
-	if err != nil { t.Fatal(err) }
-	if strings.Contains(string(first), "init") { t.Fatalf("unsafe init happened with auto-init disabled: %s", first) }
-
-	if err := ensureRepository(script, os.Environ(), repository, true); err != nil { t.Fatalf("allowed remote init failed: %v", err) }
-	all, err := os.ReadFile(logPath)
-	if err != nil { t.Fatal(err) }
-	if !strings.Contains(string(all), "cat config") || !strings.Contains(string(all), "init") {
-		t.Fatalf("expected probe followed by init, got %s", all)
+	for _, autoInit := range []bool{false, true} {
+		if err := ensureRepository(script, os.Environ(), repository, autoInit); err == nil {
+			t.Fatalf("expected remote repository failure with autoInit=%t", autoInit)
+		}
 	}
+	commands, err := os.ReadFile(logPath)
+	if err != nil { t.Fatal(err) }
+	if strings.Contains(string(commands), "init") {
+		t.Fatalf("remote runtime failure triggered unsafe init: %s", commands)
+	}
+	if count := strings.Count(string(commands), "cat config"); count != 2 {
+		t.Fatalf("expected two read-only probes, got %d: %s", count, commands)
+	}
+}
+
+func envValue(env []string, name string) string {
+	prefix := strings.ToUpper(name) + "="
+	for i := len(env) - 1; i >= 0; i-- {
+		entry := env[i]
+		if strings.HasPrefix(strings.ToUpper(entry), prefix) {
+			return entry[len(name)+1:]
+		}
+	}
+	return ""
 }
