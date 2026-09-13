@@ -15,6 +15,7 @@ services:
     environment:
       NEXUS_BACKUP_AGENT_ID: local-agent
       NEXUS_BACKUP_AGENT_CONFIG: /agent-config/agent.json
+      NEXUS_BACKUP_PUBLIC_URL: ${NEXUS_BACKUP_PUBLIC_URL:-}
     volumes:
       - control-config:/config
       - runtime:/run/nexus-backup
