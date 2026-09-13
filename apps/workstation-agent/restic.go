@@ -94,7 +94,7 @@ func executeResticBackup(ctx context.Context, cfg config, run workstationRun, re
 }
 
 func runBackupCommand(ctx context.Context, resticPath string, env, args []string, report func(backupProgress)) backupResult {
-	cmd := exec.CommandContext(ctx, resticPath, args...)
+	cmd := commandContextWithTree(ctx, resticPath, args...)
 	cmd.Env = env
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
