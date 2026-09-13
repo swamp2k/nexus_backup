@@ -17,9 +17,10 @@ Browser
        - schedules/job state
 
 NexusBackup-Agent
-  - Restic/rclone/FUSE
+  - Restic/rclone
   - local storage mappings
   - local repository/rclone credentials
+  - optional FUSE only for remote-as-mounted-source backups
 
 Windows workstation agent
   - runs backup/recovery locally on Windows
@@ -37,12 +38,13 @@ Verify these prerequisites:
 
 - Docker is available on Unraid.
 - TCP 8787 is unused on the Unraid host.
-- `/dev/fuse` exists for the generic agent.
 - you have selected persistent host paths for Control config, shared runtime, Agent config, and Agent state.
 - you have selected **separate** host paths for any source data, backup repositories and restore staging.
 - the chosen source mapping does not contain the backup repository or restore-staging mapping beneath it.
 
-That final point is a hard safety rule. The current beta template deliberately maps `/data` to the narrow placeholder `/mnt/user/nexus-backup-source`, rather than all of `/mnt/user`. Replace that placeholder with the exact share/directory you intend to protect. Do not widen `/data` to `/mnt/user` and then configure `paths: ["/data"]` if `/backup` or `/restore` also map beneath `/mnt/user`, because the source tree could then see its own repository or restore staging through another container path.
+`/dev/fuse` is **not** a normal prerequisite. It is needed only if you deliberately use the optional `rclone-restic-backup` feature that mounts a remote rclone endpoint as a read-only Restic source. The default deployment does not grant `SYS_ADMIN` or `/dev/fuse`.
+
+That source/repository separation point is a hard safety rule. The current beta template deliberately maps `/data` to the narrow placeholder `/mnt/user/nexus-backup-source`, rather than all of `/mnt/user`. Replace that placeholder with the exact share/directory you intend to protect. Do not widen `/data` to `/mnt/user` and then configure `paths: ["/data"]` if `/backup` or `/restore` also map beneath `/mnt/user`, because the source tree could then see its own repository or restore staging through another container path.
 
 The repository templates contain convenience defaults, but host paths are deployment choices. Do not copy a default into production merely because it exists in XML.
 
@@ -98,12 +100,15 @@ The current contract is:
 | `/restore` | restore staging root | read/write |
 | `/downloads` | managed transfer destination root | read/write |
 
-Only Agent receives:
+The default Agent is deliberately **not** granted `SYS_ADMIN` or `/dev/fuse`. Normal local Restic backup/restore, integrity checks, inventory, rclone copy and managed transfers do not need those privileges.
+
+Only if you deliberately configure a mount-enabled rclone endpoint and use the `rclone-restic-backup` job type should you add these Docker extra parameters to Agent:
 
 ```text
---cap-add=SYS_ADMIN
---device=/dev/fuse
+--cap-add=SYS_ADMIN --device=/dev/fuse
 ```
+
+That is an explicit privilege expansion. Never add it to Control, and remove it when the mounted-source feature is no longer needed.
 
 With both containers on host networking, the Agent Control URL remains:
 
@@ -167,6 +172,8 @@ For a local source/repository pair, a minimal shape is:
 }
 ```
 
+A configured restore target is a **staging root**, not an in-place restore destination. Generic-Agent preview/write restores derive a fresh run-specific directory below that root. Write restore uses `--overwrite never`; an interrupted write tree is never silently reused for a later attempt.
+
 Before starting jobs, verify all of the following:
 
 - `/data/my-source` resolves only to the intended protected data.
@@ -174,6 +181,7 @@ Before starting jobs, verify all of the following:
 - the host path behind `/restore` is **not** below the protected source path.
 - Restic passwords and rclone credentials live under Agent config or another Agent-only local secret location, never in Control/API payloads.
 - destructive rclone move remains disabled unless a source endpoint explicitly opts in.
+- restore targets use `overwrite: "never"`; other overwrite modes are rejected by current Agent configuration validation.
 
 Validate the file inside the running Agent container:
 
@@ -210,6 +218,16 @@ $env:NEXUS_BACKUP_URL='http://nexus-host:8787';$env:NEXUS_BACKUP_TOKEN='nxbdev_.
 Run the generated command promptly as Administrator/System on the test workstation.
 
 The enrollment token is one-shot and expires after 15 minutes. It is not the durable workstation credential. The installer downloads the matching workstation executable, pinned Restic executable and checksums from the local Control image **before** consuming that one-shot credential, then exchanges it directly for a durable device token stored locally.
+
+The bundled SHA256 files detect corruption or mismatched assets, but when Nexus is served over plain HTTP they are delivered by the same server as the binaries and script. They are therefore **not an independent authenticity proof against a hostile LAN/MITM**. The beta direct-LAN HTTP deployment assumes the local network and Unraid host are trusted during installation.
+
+For deployments where transport authenticity is required, terminate HTTPS in front of Nexus and configure the exact clean external origin with:
+
+```text
+NEXUS_BACKUP_PUBLIC_URL=https://backup.example.test
+```
+
+Nexus intentionally ignores `X-Forwarded-Host` and `X-Forwarded-Proto` when constructing workstation installer commands; it does not implicitly trust arbitrary proxy headers. `NEXUS_BACKUP_PUBLIC_URL` is the explicit reverse-proxy trust configuration and must not contain credentials, a path, query or fragment.
 
 Normal install paths are:
 
@@ -268,6 +286,7 @@ Do not migrate a production workload yet. A fresh install is only ready to enter
 - Agent starts from an explicit config, not the worked example by accident.
 - `/data` maps only the intended source root, not all user shares by default.
 - source/repository/restore host paths cannot recurse into one another.
+- default Agent deployment has no `SYS_ADMIN`/`/dev/fuse` unless the optional mounted-source feature is deliberately part of the test.
 - workstation is online and storage-ready.
 - the workstation test repository is isolated from PCWatch and any production Nexus repository.
 - an emergency bundle has been created and verified.

@@ -9,12 +9,12 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: npm
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: apps/workstation-agent/go.mod
           cache-dependency-path: apps/workstation-agent/go.mod
@@ -94,10 +94,13 @@ jobs:
           control_extra = control.findtext("ExtraParams") or ""
           agent_extra = agent.findtext("ExtraParams") or ""
           assert "SYS_ADMIN" not in control_extra and "/dev/fuse" not in control_extra
-          assert "--cap-add=SYS_ADMIN" in agent_extra
-          assert "--device=/dev/fuse" in agent_extra
+          assert "SYS_ADMIN" not in agent_extra and "/dev/fuse" not in agent_extra
+          requires = agent.findtext("Requires") or ""
+          assert "Only add SYS_ADMIN and /dev/fuse manually" in requires
 
+          control_vars = {item.attrib["Target"]: item.attrib for item in control.findall("Config") if item.attrib.get("Type") == "Variable"}
           agent_vars = {item.attrib["Target"]: item.attrib for item in agent.findall("Config") if item.attrib.get("Type") == "Variable"}
+          assert control_vars["NEXUS_BACKUP_PUBLIC_URL"]["Required"] == "false"
           assert agent_vars["NEXUS_BACKUP_URL"]["Default"] == "http://127.0.0.1:8787"
           assert agent_vars["NEXUS_BACKUP_AGENT_TOKEN_FILE"]["Default"] == "/run/nexus-backup/agent-token"
 
@@ -108,8 +111,8 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: apps/workstation-agent/go.mod
           cache-dependency-path: apps/workstation-agent/go.mod
@@ -126,7 +129,7 @@ jobs:
     env:
       CI_VERSION: 0.0.0-ci
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Build control image
         run: docker build -f Dockerfile.local --build-arg NEXUS_BACKUP_VERSION="$CI_VERSION" --build-arg NEXUS_BACKUP_REVISION="$GITHUB_SHA" -t nexus-backup-local:ci .
       - name: Verify bundled workstation assets
@@ -177,10 +180,14 @@ jobs:
             docker image inspect "$image" --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -Fx "NEXUS_BACKUP_REVISION=$GITHUB_SHA"
           done
           docker image inspect nexus-backup-agent:ci --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -Fx "NEXUS_BACKUP_AGENT_VERSION=$CI_VERSION"
-      - name: Validate compose release tag wiring
+      - name: Validate compose release tag and privilege wiring
         shell: bash
         run: |
           set -euo pipefail
           NEXUS_BACKUP_IMAGE_TAG="$CI_VERSION" NEXUS_BACKUP_VERSION="$CI_VERSION" NEXUS_BACKUP_REVISION="$GITHUB_SHA" docker compose -f compose.yaml config > /tmp/compose.yml
           grep -F "image: ghcr.io/swamp2k/nexus-backup-control:$CI_VERSION" /tmp/compose.yml
           grep -F "image: ghcr.io/swamp2k/nexus-backup-agent:$CI_VERSION" /tmp/compose.yml
+          if grep -Eq 'SYS_ADMIN|/dev/fuse' /tmp/compose.yml; then
+            echo 'default compose must not grant FUSE/SYS_ADMIN' >&2
+            exit 1
+          fi

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { AgentRunner, HttpControlPlaneClient } from "../dist/index.js";
+import { AgentRunner, HttpControlPlaneClient, redactTelemetryText } from "../dist/index.js";
 
 function job() {
   return {
@@ -49,6 +49,32 @@ test("runner marks execution errors as failed", async () => {
     ["running", undefined],
     ["failed", "boom"],
   ]);
+});
+
+test("runner redacts local secrets from failed-state reporting and rethrown errors", async () => {
+  const transitions = [];
+  const secret = "repo-password";
+  const repository = `rest:https://backup-user:${secret}@backup.example/private/repo`;
+  const controlPlane = {
+    async claim() { return { job: job(), leaseToken: "lease-token", leaseTtlMs: 60_000 }; },
+    async heartbeat() {},
+    async transition(_jobId, _agentId, _token, state, error) { transitions.push([state, error]); },
+  };
+  const executor = { async execute() { throw new Error(`cannot open ${repository}; password=${secret}`); } };
+  const redactMessage = (message) => redactTelemetryText(message, [repository, secret]);
+  const runner = new AgentRunner({ agentId: "agent-a", controlPlane, executor, redactMessage });
+
+  let thrown;
+  try { await runner.runOne(); } catch (error) { thrown = error; }
+  assert.ok(thrown instanceof Error);
+  assert.equal(thrown.message.includes(secret), false);
+  assert.equal(thrown.message.includes(repository), false);
+  assert.match(thrown.message, /\[REDACTED\]/);
+  const failed = transitions.at(-1);
+  assert.equal(failed[0], "failed");
+  assert.equal(failed[1].includes(secret), false);
+  assert.equal(failed[1].includes(repository), false);
+  assert.match(failed[1], /\[REDACTED\]/);
 });
 
 test("runner heartbeats before a short lease expires", async () => {

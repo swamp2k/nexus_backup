@@ -4,6 +4,7 @@ const JOB_STATES = new Set([
   "queued", "leased", "preparing", "running", "finalizing",
   "completed", "partial", "failed", "cancelled", "interrupted",
 ]);
+const KNOWN_STORAGE_KINDS = new Set(["local", "sftp", "rest", "s3", "azure", "gs", "rclone", "swift", "b2", "opendal"]);
 
 export async function listJobs(db, { limit = 100, state } = {}) {
   const normalizedLimit = clampInteger(limit, 1, 500, 100);
@@ -121,7 +122,7 @@ function sanitizeRepositories(value) {
     .filter(isRecord)
     .map((repository) => ({
       id: stringOrEmpty(repository.id),
-      repository: stringOrEmpty(repository.repository),
+      kind: storageKind(repository.repository),
       passwordProtected: typeof repository.passwordFile === "string" && repository.passwordFile.trim().length > 0,
       cacheConfigured: isRecord(repository.environment)
         && typeof repository.environment.RESTIC_CACHE_DIR === "string"
@@ -161,7 +162,7 @@ function sanitizeEndpoints(value) {
         : { enabled: false };
       return {
         id: stringOrEmpty(endpoint.id),
-        fs: stringOrEmpty(endpoint.fs),
+        kind: storageKind(endpoint.fs),
         allowMove: endpoint.allowMove === true,
         mount,
       };
@@ -178,6 +179,17 @@ function sanitizeRtorrentGates(value) {
       required: gate.required === true,
     }))
     .filter((gate) => gate.id);
+}
+
+function storageKind(value) {
+  const location = stringOrEmpty(value);
+  if (!location) return "unknown";
+  if (location.startsWith("/") || location.startsWith("./") || location.startsWith("../")) return "local";
+  const inline = location.match(/^:([A-Za-z][A-Za-z0-9+.-]*)(?:,|:)/);
+  if (inline) return KNOWN_STORAGE_KINDS.has(inline[1].toLowerCase()) ? inline[1].toLowerCase() : "remote";
+  const scheme = location.match(/^([A-Za-z][A-Za-z0-9+.-]*):/);
+  if (scheme) return KNOWN_STORAGE_KINDS.has(scheme[1].toLowerCase()) ? scheme[1].toLowerCase() : "remote";
+  return "local";
 }
 
 function rowToJob(row) {

@@ -119,11 +119,14 @@ function requireConfiguredRepository(id, repositories) {
 function requireWriteTarget(id, targets) {
   const target = (targets ?? []).find((candidate) => candidate.id === id);
   if (!target) throw statusError(404, `Restore target not found: ${id}`);
+  if ((target.overwrite ?? "never") !== "never") {
+    throw statusError(409, `Restore target ${id} is unsafe: overwrite must be never for staging-only restores`);
+  }
   if (target.writeEnabled !== true) throw statusError(403, `Restore target is preview-only: ${id}`);
   return target;
 }
 
-function publicTarget(target) { return { id: target.id, label: target.label ?? target.id, overwrite: target.overwrite ?? "never", writeEnabled: true }; }
+function publicTarget(target) { return { id: target.id, label: target.label ?? target.id, overwrite: "never", writeEnabled: true }; }
 function normalizeScope(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new RangeError("restore scope must be an object");
   return {

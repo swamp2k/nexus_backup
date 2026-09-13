@@ -33,17 +33,19 @@ test("write restore requires an exact recent completed preview",async()=>{
   }finally{db.close();await rm(dir,{recursive:true,force:true})}
 });
 
-test("queue restore only accepts write-enabled configured targets and known snapshot paths",async()=>{
+test("queue restore only accepts staging-safe write targets and known snapshot paths",async()=>{
   const dir=await mkdtemp(join(tmpdir(),"nexus-restore-queue-"));const db=await openSqliteD1({filename:join(dir,"db.sqlite"),migrationsDir});const calls=[];
   try{
     await seed(db);
     const common={repositoryId:"repo-main",snapshotId:SNAPSHOT,targetId:"restore-staging",path:"/data/file.txt",repositories,restoreTargets:targets,enqueueJob:async input=>{calls.push(input);return{id:"restore-job",state:"queued"}},now:()=>new Date("2026-09-12T10:20:00Z"),id:()=>"fixed"};
     const result=await queueRestoreExecution(db,common);
     assert.equal(result.job.id,"restore-job");
+    assert.equal(result.target.overwrite,"never");
     assert.equal(calls[0].type,"restic-restore");
     assert.deepEqual(calls[0].payload,{repositoryId:"repo-main",snapshotId:SNAPSHOT,targetId:"restore-staging",path:"/data/file.txt"});
     assert.equal(JSON.stringify(calls[0]).includes("/restore"),false);
     await assert.rejects(()=>queueRestoreExecution(db,{...common,restoreTargets:[{...targets[0],writeEnabled:false}]}),/preview-only/);
+    await assert.rejects(()=>queueRestoreExecution(db,{...common,restoreTargets:[{...targets[0],overwrite:"always"}]}),/overwrite must be never/);
     await assert.rejects(()=>queueRestoreExecution(db,{...common,path:"/data/not-seen"}),/has not been discovered/);
   }finally{db.close();await rm(dir,{recursive:true,force:true})}
 });

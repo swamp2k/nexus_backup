@@ -12,6 +12,7 @@ interface CleanupPayload {
   destinationPath: string;
   relPath: string;
   expectedSize: number;
+  expectedModTime: string;
   objectKey: string;
   cleanupAttempt: number;
 }
@@ -40,6 +41,11 @@ export class ManagedCleanupExecutor implements JobExecutor {
     if (actual !== payload.expectedSize) {
       throw new Error(`cleanup refused modified destination: expected ${payload.expectedSize} bytes, got ${actual}`);
     }
+    const actualModTime = isoTime(value?.ModTime ?? value?.modTime);
+    if (actualModTime === undefined) throw new Error("cleanup provenance check did not return a valid modification time");
+    if (Date.parse(actualModTime) !== Date.parse(payload.expectedModTime)) {
+      throw new Error(`cleanup refused modified destination: expected modification time ${payload.expectedModTime}, got ${actualModTime}`);
+    }
 
     await this.#runRclone(["deletefile", target], signal);
     this.#events.emit({
@@ -51,6 +57,7 @@ export class ManagedCleanupExecutor implements JobExecutor {
         objectKey: payload.objectKey,
         relPath: payload.relPath,
         expectedSize: payload.expectedSize,
+        expectedModTime: payload.expectedModTime,
         cleanupAttempt: payload.cleanupAttempt,
         deleted: true,
       },
@@ -74,12 +81,15 @@ function parsePayload(value: unknown): CleanupPayload {
   if (!isRecord(value)) throw new Error("managed cleanup payload must be an object");
   const expectedSize = Number(value.expectedSize);
   if (!Number.isSafeInteger(expectedSize) || expectedSize < 0) throw new Error("expectedSize must be a non-negative integer");
+  const expectedModTime = isoTime(value.expectedModTime);
+  if (expectedModTime === undefined) throw new Error("expectedModTime must be a valid timestamp");
   return {
     ruleId: requireId(value.ruleId, "ruleId"),
     destinationEndpointId: requireId(value.destinationEndpointId, "destinationEndpointId"),
     destinationPath: normalizeBase(value.destinationPath, "destinationPath"),
     relPath: normalizeObjectPath(value.relPath),
     expectedSize,
+    expectedModTime,
     objectKey: requireHex(value.objectKey, "objectKey"),
     cleanupAttempt: positiveInteger(value.cleanupAttempt, "cleanupAttempt"),
   };
@@ -94,4 +104,5 @@ function positiveInteger(value: unknown, name: string): number { const number = 
 function parseJson(value: string): Record<string, unknown> | null { try { const parsed = JSON.parse(value) as unknown; return isRecord(parsed) ? parsed : null; } catch { return null; } }
 function compactLog(line: string): string { const parsed = parseJson(line); if (typeof parsed?.msg === "string") return parsed.msg; return line.length > 4000 ? `${line.slice(0, 4000)}…` : line; }
 function numberValue(value: unknown): number | undefined { return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined; }
+function isoTime(value: unknown): string | undefined { if (typeof value !== "string") return undefined; const parsed = Date.parse(value); return Number.isFinite(parsed) ? new Date(parsed).toISOString() : undefined; }
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }

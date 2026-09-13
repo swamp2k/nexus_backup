@@ -15,6 +15,7 @@ services:
     environment:
       NEXUS_BACKUP_AGENT_ID: local-agent
       NEXUS_BACKUP_AGENT_CONFIG: /agent-config/agent.json
+      NEXUS_BACKUP_PUBLIC_URL: ${NEXUS_BACKUP_PUBLIC_URL:-}
     volumes:
       - control-config:/config
       - runtime:/run/nexus-backup
@@ -37,10 +38,6 @@ services:
     depends_on:
       control:
         condition: service_healthy
-    cap_add:
-      - SYS_ADMIN
-    devices:
-      - /dev/fuse:/dev/fuse
     environment:
       NEXUS_BACKUP_URL: http://control:8787
       NEXUS_BACKUP_AGENT_ID: local-agent

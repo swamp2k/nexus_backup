@@ -7,6 +7,7 @@ export interface AgentRunnerOptions {
   controlPlane: ControlPlaneClient;
   executor: JobExecutor;
   maxHeartbeatMs?: number;
+  redactMessage?(message: string): string;
 }
 
 interface HeartbeatLoop {
@@ -20,12 +21,14 @@ export class AgentRunner {
   readonly #controlPlane: ControlPlaneClient;
   readonly #executor: JobExecutor;
   readonly #maxHeartbeatMs: number;
+  readonly #redactMessage: (message: string) => string;
 
   constructor(options: AgentRunnerOptions) {
     this.#agentId = options.agentId;
     this.#controlPlane = options.controlPlane;
     this.#executor = options.executor;
     this.#maxHeartbeatMs = options.maxHeartbeatMs ?? 5_000;
+    this.#redactMessage = options.redactMessage ?? ((message) => message);
   }
 
   async runOne(signal: AbortSignal = new AbortController().signal): Promise<BackupJob | null> {
@@ -54,7 +57,11 @@ export class AgentRunner {
       executionController.abort(error);
       heartbeat.stop();
       await heartbeat.done.catch(() => undefined);
-      const message = error instanceof Error ? error.message : String(error);
+      const originalMessage = error instanceof Error ? error.message : String(error);
+      const message = this.#redactMessage(originalMessage);
+      const safeError = message === originalMessage
+        ? error
+        : new Error(message, { cause: error });
       try {
         await this.#controlPlane.transition(
           grant.job.id,
@@ -64,9 +71,9 @@ export class AgentRunner {
           message,
         );
       } catch (reportError) {
-        throw new AggregateError([error, reportError], `Job ${grant.job.id} failed and its failure state could not be reported`);
+        throw new AggregateError([safeError, reportError], `Job ${grant.job.id} failed and its failure state could not be reported`);
       }
-      throw error;
+      throw safeError;
     } finally {
       signal.removeEventListener("abort", abortExecution);
     }

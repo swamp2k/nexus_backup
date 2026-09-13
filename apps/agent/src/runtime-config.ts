@@ -10,7 +10,7 @@ export interface LocalResticRepository {
   environment?: Readonly<Record<string, string>>;
 }
 
-export type RestoreOverwriteMode = "always" | "if-changed" | "if-newer" | "never";
+export type RestoreOverwriteMode = "never";
 
 export interface LocalRestoreTarget {
   id: string;
@@ -71,6 +71,8 @@ export interface AgentRuntimeConfig {
   rcloneEndpoint(id: string): LocalRcloneEndpoint;
   rtorrentGate(id: string): LocalRtorrentGate;
   tools: AgentToolConfig;
+  /** Local-only values that must be scrubbed before tool telemetry leaves the agent. */
+  telemetryRedactionValues?: readonly string[];
 }
 
 export interface StaticAgentRuntimeConfigInput {
@@ -89,6 +91,7 @@ export class StaticAgentRuntimeConfig implements AgentRuntimeConfig {
   readonly #rcloneEndpoints: Map<string, LocalRcloneEndpoint>;
   readonly #rtorrentGates: Map<string, LocalRtorrentGate>;
   readonly tools: AgentToolConfig;
+  readonly telemetryRedactionValues: readonly string[];
 
   constructor(input: StaticAgentRuntimeConfigInput = {}) {
     this.#sources = indexById(
@@ -130,6 +133,7 @@ export class StaticAgentRuntimeConfig implements AgentRuntimeConfig {
       (item) => normalizeRtorrentGate(item),
     );
     this.tools = normalizeTools(input.tools ?? {});
+    this.telemetryRedactionValues = Object.freeze(collectTelemetryRedactionValues(input));
   }
 
   source(id: string): LocalBackupSource {
@@ -169,14 +173,18 @@ function indexById<T extends { id: string }>(
 
 function normalizeRestoreTarget(input: LocalRestoreTarget): LocalRestoreTarget {
   const overwrite = input.overwrite ?? "never";
-  if (!["always", "if-changed", "if-newer", "never"].includes(overwrite)) {
-    throw new Error(`Unsupported restore overwrite mode: ${overwrite}`);
+  if (overwrite !== "never") {
+    throw new Error("Restore targets must use overwrite=never; write restores are staging-only");
+  }
+  const path = requireNonEmpty(input.path, "restore target path");
+  if (!path.startsWith("/") || path.includes("\0") || path.split("/").some((segment) => segment === "." || segment === "..")) {
+    throw new Error("restore target path must be an absolute local path without dot segments");
   }
   return Object.freeze({
     id: requireNonEmpty(input.id, "restore target id"),
-    path: requireNonEmpty(input.path, "restore target path"),
+    path: path.length > 1 ? path.replace(/\/+$/, "") : path,
     ...(input.label === undefined ? {} : { label: requireNonEmpty(input.label, "restore target label") }),
-    overwrite,
+    overwrite: "never" as const,
     allowWrite: input.allowWrite === true,
   });
 }
@@ -234,6 +242,64 @@ function normalizeTools(input: AgentToolConfig): AgentToolConfig {
     }),
     ...(input.unmountTimeoutMs === undefined ? {} : { unmountTimeoutMs: input.unmountTimeoutMs }),
   });
+}
+
+function collectTelemetryRedactionValues(input: StaticAgentRuntimeConfigInput): string[] {
+  const values = new Set<string>();
+  const add = (value: unknown) => {
+    if (typeof value !== "string") return;
+    const normalized = value.trim();
+    if (normalized.length >= 1) values.add(normalized);
+  };
+  const addUrlParts = (value: unknown) => {
+    if (typeof value !== "string") return;
+    const marker = value.indexOf("://");
+    if (marker < 0) return;
+    const schemeStart = value.lastIndexOf(":", marker - 1) + 1;
+    const candidate = value.slice(schemeStart);
+    try {
+      const parsed = new URL(candidate);
+      add(candidate);
+      add(parsed.username);
+      add(parsed.password);
+      if (parsed.username && parsed.password) add(`${parsed.username}:${parsed.password}`);
+    } catch {}
+  };
+  const addSensitiveOptionParts = (value: unknown) => {
+    if (typeof value !== "string") return;
+    const sensitive = /(?:pass(?:word|wd)?|secret|token|credential|api[_-]?key|access[_-]?key|private[_-]?key|account[_-]?key)/i;
+    for (const match of value.matchAll(/(?:^|[,\s])(--?[A-Za-z0-9_-]+|[A-Za-z0-9_-]+)=([^,\s:]+)/g)) {
+      const name = match[1] ?? "";
+      const optionValue = match[2] ?? "";
+      if (sensitive.test(name)) {
+        add(optionValue);
+        add(`${name}=${optionValue}`);
+      }
+    }
+  };
+
+  for (const repository of input.resticRepositories ?? []) {
+    add(repository.repository);
+    addUrlParts(repository.repository);
+    add(repository.passwordFile);
+    for (const [name, value] of Object.entries(repository.environment ?? {})) {
+      if (/(?:pass(?:word|wd)?|secret|token|credential|api[_-]?key|access[_-]?key|private[_-]?key|account[_-]?key)/i.test(name)) add(value);
+    }
+  }
+  for (const endpoint of input.rcloneEndpoints ?? []) {
+    add(endpoint.fs);
+    addUrlParts(endpoint.fs);
+    addSensitiveOptionParts(endpoint.fs);
+    for (const arg of endpoint.mount?.args ?? []) addSensitiveOptionParts(arg);
+  }
+  add(input.tools?.rcloneConfigPath);
+  for (const arg of input.tools?.rcloneArgs ?? []) addSensitiveOptionParts(arg);
+  for (const gate of input.rtorrentGates ?? []) {
+    add(gate.url);
+    addUrlParts(gate.url);
+    add(gate.password);
+  }
+  return [...values].sort((left, right) => right.length - left.length || left.localeCompare(right));
 }
 
 function requireNonEmpty(value: string, name: string): string {

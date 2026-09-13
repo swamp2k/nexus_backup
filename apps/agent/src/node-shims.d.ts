@@ -28,3 +28,7 @@ declare module "node:child_process" {
     },
   ): ChildProcessLike;
 }
+
+declare module "node:fs/promises" {
+  export function mkdir(path: string, options?: { mode?: number; recursive?: false }): Promise<string | undefined>;
+}

@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { loadSanitizedAgentConfig } from "../lib/dashboard-data.mjs";
 import { confirmationPhrase, createLocalAuth } from "../lib/local-auth.mjs";
 import { createManagedDeviceService } from "../lib/managed-devices.mjs";
+import { resolvePublicOrigin } from "../lib/public-origin.mjs";
 import { assertRecentRestorePreview, normalizeRestoreScope, queueRestoreExecution } from "../lib/restore-execution.mjs";
 import { openSqliteD1 } from "../lib/sqlite-d1.mjs";
 import { createTransferCleanupService } from "../lib/transfer-cleanup.mjs";
@@ -25,6 +26,9 @@ const webDir = process.env.NEXUS_BACKUP_WEB_DIR?.trim() || fileURLToPath(new URL
 const agentConfigPath = process.env.NEXUS_BACKUP_AGENT_CONFIG?.trim() || "/agent-config/agent.json";
 const transferSchedulerIntervalMs = positiveInteger(process.env.NEXUS_BACKUP_TRANSFER_INTERVAL_MS ?? "15000", "NEXUS_BACKUP_TRANSFER_INTERVAL_MS");
 const workstationSchedulerIntervalMs = positiveInteger(process.env.NEXUS_BACKUP_WORKSTATION_INTERVAL_MS ?? "15000", "NEXUS_BACKUP_WORKSTATION_INTERVAL_MS");
+const configuredPublicOrigin = process.env.NEXUS_BACKUP_PUBLIC_URL?.trim()
+  ? resolvePublicOrigin({ configured: process.env.NEXUS_BACKUP_PUBLIC_URL, host: null, fallbackHost: null })
+  : null;
 
 process.env.NEXUS_BACKUP_HOST = "127.0.0.1";
 process.env.NEXUS_BACKUP_PORT = String(internalPort);
@@ -58,7 +62,7 @@ async function runTransferScheduler() {
 
     const cleanup = await transferCleanupService.runDue();
     if (cleanup.queued > 0 || cleanup.reconciled > 0) log("info", "transfer cleanup scheduler updated work", { queued: cleanup.queued, reconciled: cleanup.reconciled });
-    for (const failure of cleanup.failures) log("error", "transfer cleanup action failed", failure);
+    for (const failure of cleanup.failures) log("error", "transfer cleanup scheduler action failed", failure);
   } catch (error) {
     log("error", "transfer scheduler failed", { error: serializeError(error) });
   } finally {
@@ -200,7 +204,11 @@ const gateway = createServer(async (request, response) => {
     if (path === "/v1/local/workstations/enroll" && request.method === "POST") {
       const body = await readJsonBody(request);
       const created = await deviceService.create({ name: body.name, kind: "workstation" });
-      const origin = requestOrigin(request, url);
+      const origin = resolvePublicOrigin({
+        configured: configuredPublicOrigin,
+        host: singleHeader(request.headers.host),
+        fallbackHost: `127.0.0.1:${publicPort}`,
+      });
       sendJson(response, 201, { ...created, installCommand: workstationInstallCommand(origin, created.token) });
       return;
     }
@@ -289,6 +297,7 @@ const gateway = createServer(async (request, response) => {
       const restoreAuthorization = singleHeader(request.headers["x-nexus-restore-authorization"]);
       auth.consumeRestoreGrant(session, restoreAuthorization, scope);
       const localConfig = await loadRestoreConfig(agentConfigPath);
+      requireWriteTarget(scope.targetId, localConfig.restoreTargets);
       sendJson(response, 202, await queueRestoreExecution(db, {
         ...scope,
         repositories: localConfig.repositories,
@@ -366,13 +375,19 @@ async function loadRestoreConfig(path) {
     ? parsed.restoreTargets.filter(isRecord).map((item) => ({
         id: stringId(item.id),
         label: typeof item.label === "string" && item.label.trim() ? item.label.trim() : stringId(item.id),
-        overwrite: ["always", "if-changed", "if-newer", "never"].includes(item.overwrite) ? item.overwrite : "never",
+        overwrite: typeof item.overwrite === "string" && item.overwrite.trim() ? item.overwrite.trim() : "never",
         writeEnabled: item.allowWrite === true,
       })).filter((item) => item.id)
     : [];
   return { repositories, restoreTargets };
 }
-function requireWriteTarget(id, targets) { const target = targets.find((candidate) => candidate.id === id); if (!target) throw statusError(404, `Restore target not found: ${id}`); if (!target.writeEnabled) throw statusError(403, `Restore target is preview-only: ${id}`); return target; }
+function requireWriteTarget(id, targets) {
+  const target = targets.find((candidate) => candidate.id === id);
+  if (!target) throw statusError(404, `Restore target not found: ${id}`);
+  if (target.overwrite !== "never") throw statusError(409, `Restore target ${id} is unsafe: overwrite must be never for staging-only restores`);
+  if (!target.writeEnabled) throw statusError(403, `Restore target is preview-only: ${id}`);
+  return target;
+}
 
 async function servePublic(path, response) {
   const [file, contentType] = PUBLIC_FILES.get(path);
@@ -418,7 +433,6 @@ function acceptsHtml(request) { const accept = singleHeader(request.headers.acce
 function isMutation(method) { return !["GET", "HEAD", "OPTIONS"].includes(method || "GET"); }
 function singleHeader(value) { return Array.isArray(value) ? value[0] : typeof value === "string" ? value : null; }
 function requireBearerToken(request) { const value = singleHeader(request.headers.authorization); const match = typeof value === "string" ? value.match(/^Bearer\s+(.+)$/i) : null; if (!match?.[1]) throw statusError(401, "Device bearer token is required"); return match[1]; }
-function requestOrigin(request, url) { const proto = singleHeader(request.headers["x-forwarded-proto"])?.split(",")[0]?.trim() || url.protocol.replace(":", ""); const host = singleHeader(request.headers["x-forwarded-host"])?.split(",")[0]?.trim() || singleHeader(request.headers.host) || url.host; return `${proto}://${host}`; }
 function decodePathPart(value) { try { return decodeURIComponent(value); } catch { return value; } }
 function positiveInteger(value, name) { const parsed = Number(value); if (!Number.isInteger(parsed) || parsed <= 0) throw new Error(`${name} must be a positive integer`); return parsed; }
 function stringId(value) { return typeof value === "string" ? value.trim() : ""; }

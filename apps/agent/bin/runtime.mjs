@@ -4,6 +4,7 @@ import {
   HttpControlPlaneClient,
   StaticAgentRuntimeConfig,
   createDefaultJobExecutor,
+  redactTelemetryText,
 } from "../dist/index.js";
 
 export async function loadRuntimeConfig(configPath) {
@@ -68,10 +69,12 @@ export async function createAgentRuntime(options, { log = defaultLog } = {}) {
       }
     },
   };
+  const redactMessage = (message) => redactTelemetryText(message, config.telemetryRedactionValues ?? []);
   const runner = new AgentRunner({
     agentId: options.agentId,
     controlPlane,
     executor,
+    redactMessage,
   });
   return { config, controlPlane, executor, runner, telemetry };
 }
