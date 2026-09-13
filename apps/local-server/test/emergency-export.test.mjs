@@ -133,6 +133,14 @@ test("emergency export refuses overlapping destinations and existing bundles", a
         /must not overlap control config/,
       );
     }
+
+    const linkedParent = join(f.root, "linked-control");
+    await symlink(f.configDir, linkedParent);
+    await assert.rejects(
+      () => createEmergencyBundle({ configDir: f.configDir, agentConfigDir: f.agentConfigDir, outputDir: join(linkedParent, "bundle") }),
+      /must not overlap control config/,
+    );
+
     const existing = join(f.root, "existing");
     await mkdir(existing);
     await assert.rejects(
