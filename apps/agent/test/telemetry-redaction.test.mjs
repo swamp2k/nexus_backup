@@ -24,6 +24,16 @@ function job() {
   };
 }
 
+function rcloneJob() {
+  return {
+    ...job(),
+    id:"rclone-redaction",
+    operationKey:"op-rclone-redaction",
+    type:"rclone-transfer",
+    payload:{sourceEndpointId:"source",destinationEndpointId:"destination",mode:"copy"},
+  };
+}
+
 class FakeRunner {
   constructor(lines=[]) { this.lines=lines; }
   async run(_spec,_signal,handlers={}) {
@@ -32,7 +42,8 @@ class FakeRunner {
   }
 }
 
-test("runtime config derives redaction values from local repository and secret environment settings",()=>{
+test("runtime config derives redaction values from local repository, rclone and secret environment settings",()=>{
+  const rcloneFs=":sftp,user=backup-user,pass=rclone-super-secret:backup.example/private";
   const config=new StaticAgentRuntimeConfig({
     resticRepositories:[{
       id:"repo-main",
@@ -43,6 +54,8 @@ test("runtime config derives redaction values from local repository and secret e
         RESTIC_CACHE_DIR:"/state/restic-cache",
       },
     }],
+    rcloneEndpoints:[{id:"source",fs:rcloneFs}],
+    tools:{rcloneConfigPath:"/config/secrets/rclone.conf",rcloneArgs:["--password-command=local-rclone-command-secret"]},
     rtorrentGates:[{
       id:"seedbox",
       url:"https://seed.example/RPC2",
@@ -57,6 +70,10 @@ test("runtime config derives redaction values from local repository and secret e
   assert.ok(values.includes("repo-password"));
   assert.ok(values.includes("/config/secrets/restic-password"));
   assert.ok(values.includes("aws-super-secret"));
+  assert.ok(values.includes(rcloneFs));
+  assert.ok(values.includes("rclone-super-secret"));
+  assert.ok(values.includes("/config/secrets/rclone.conf"));
+  assert.ok(values.includes("local-rclone-command-secret"));
   assert.ok(values.includes("torrent-secret"));
   assert.equal(values.includes("/state/restic-cache"),false);
 });
@@ -86,6 +103,27 @@ test("default executor redacts repository URLs and credentials before tool logs 
   for(const secret of [repository,"backup-user","repo-password",passwordFile,envSecret]) {
     assert.equal(encoded.includes(secret),false,`telemetry leaked ${secret}`);
   }
+  assert.match(encoded,/\[REDACTED\]/);
+});
+
+test("rclone fs and inline credentials are redacted before rclone output leaves the agent",async()=>{
+  const sourceFs=":sftp,user=backup-user,pass=rclone-super-secret:backup.example/private";
+  const config=new StaticAgentRuntimeConfig({
+    rcloneEndpoints:[
+      {id:"source",fs:sourceFs},
+      {id:"destination",fs:"/downloads"},
+    ],
+  });
+  const events=[];
+  const runner=new FakeRunner([
+    JSON.stringify({level:"error",msg:`failed to open ${sourceFs}; pass=rclone-super-secret`}),
+  ]);
+  const executor=createDefaultJobExecutor(config,{emit:event=>events.push(event)},runner);
+  const result=await executor.execute(rcloneJob(),new AbortController().signal);
+  assert.equal(result.status,"completed");
+  const encoded=JSON.stringify(events);
+  assert.equal(encoded.includes(sourceFs),false);
+  assert.equal(encoded.includes("rclone-super-secret"),false);
   assert.match(encoded,/\[REDACTED\]/);
 });
 
