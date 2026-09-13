@@ -113,7 +113,7 @@ func runBackupCommand(ctx context.Context, resticPath string, env, args []string
 	if err != nil {
 		return backupResult{Err: err}
 	}
-	if err := cmd.Start(); err != nil {
+	if err := startCommandTree(cmd); err != nil {
 		return backupResult{Err: err}
 	}
 
@@ -167,7 +167,7 @@ func runBackupCommand(ctx context.Context, resticPath string, env, args []string
 	if err := scanner.Err(); err != nil {
 		parseErr = err
 	}
-	waitErr := cmd.Wait()
+	waitErr := waitCommandTree(cmd)
 	stderrText := <-stderrDone
 	if ctx.Err() != nil {
 		// The context was cancelled (an explicit stale-lease rejection, not a
@@ -226,7 +226,7 @@ func ensureRepositoryContext(ctx context.Context, resticPath string, env []strin
 			}
 			initCmd := commandContextWithTree(ctx, resticPath, "init")
 			initCmd.Env = env
-			output, err := initCmd.CombinedOutput()
+			output, err := combinedOutputTree(initCmd)
 			if ctx.Err() != nil {
 				return fmt.Errorf("initialize local restic repository cancelled: %w", ctx.Err())
 			}
@@ -242,7 +242,7 @@ func ensureRepositoryContext(ctx context.Context, resticPath string, env []strin
 
 	check := commandContextWithTree(ctx, resticPath, "cat", "config")
 	check.Env = env
-	output, err := check.CombinedOutput()
+	output, err := combinedOutputTree(check)
 	if ctx.Err() != nil {
 		return fmt.Errorf("open restic repository cancelled: %w", ctx.Err())
 	}
@@ -285,7 +285,7 @@ func applyRetentionContext(ctx context.Context, resticPath string, env []string,
 	}
 	cmd := commandContextWithTree(ctx, resticPath, args...)
 	cmd.Env = env
-	output, err := cmd.CombinedOutput()
+	output, err := combinedOutputTree(cmd)
 	if ctx.Err() != nil {
 		return fmt.Errorf("restic forget/prune cancelled: %w", ctx.Err())
 	}
