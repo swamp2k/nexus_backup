@@ -10,6 +10,7 @@ import { RcloneTransferExecutor } from "./rclone-executor.js";
 import { RcloneMountedResticExecutor } from "./rclone-mounted-restic-executor.js";
 import { ResticBackupExecutor } from "./restic-executor.js";
 import { ResticBrowseExecutor } from "./restic-browse-executor.js";
+import { ResticCheckExecutor } from "./restic-check-executor.js";
 import { ResticInventoryExecutor } from "./restic-inventory-executor.js";
 import { ResticMaintenanceExecutor } from "./restic-maintenance-executor.js";
 import { ResticRepositoryGate, ResticRepositoryLockedExecutor } from "./restic-repository-lock.js";
@@ -35,6 +36,7 @@ export function createDefaultJobExecutor(
     "rclone-restic-backup": withRepositoryLock(new RcloneMountedResticExecutor(config, runner, events)),
     "restic-maintenance": withRepositoryLock(new ResticMaintenanceExecutor(config, runner, events)),
     "restic-inventory": withRepositoryLock(new ResticInventoryExecutor(config, runner, events)),
+    "restic-check": withRepositoryLock(new ResticCheckExecutor(config, runner, events)),
     "restic-browse": withRepositoryLock(new ResticBrowseExecutor(config, runner, events)),
     "restic-restore-preview": withRepositoryLock(new ResticRestorePreviewExecutor(config, runner, events)),
     "restic-restore": withRepositoryLock(new ResticRestoreExecutor(config, runner, events)),

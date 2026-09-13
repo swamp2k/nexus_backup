@@ -13,6 +13,7 @@ export * from "./rclone-mount-manager.js";
 export * from "./rclone-mounted-restic-executor.js";
 export * from "./restic-executor.js";
 export * from "./restic-browse-executor.js";
+export * from "./restic-check-executor.js";
 export * from "./restic-inventory-executor.js";
 export * from "./restic-maintenance-executor.js";
 export * from "./restic-repository-lock.js";
