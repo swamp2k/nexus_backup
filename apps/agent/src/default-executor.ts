@@ -17,28 +17,34 @@ import { ResticRepositoryGate, ResticRepositoryLockedExecutor } from "./restic-r
 import { ResticRestoreExecutor } from "./restic-restore-executor.js";
 import { ResticRestorePreviewExecutor } from "./restic-restore-preview-executor.js";
 import type { AgentRuntimeConfig } from "./runtime-config.js";
+import { createRedactingExecutionEventSink } from "./telemetry-redaction.js";
 
 export function createDefaultJobExecutor(
   config: AgentRuntimeConfig,
   events: ExecutionEventSink = noopExecutionEventSink,
   runner: CommandRunner = new NodeCommandRunner(),
 ): CompositeJobExecutor {
+  // Tool output is untrusted with respect to local-only credentials: Restic/rclone
+  // may echo repository URLs, credential-file paths or secret environment values
+  // while reporting failures. Scrub those values before any runtime event can be
+  // persisted by the controller or displayed in the browser.
+  const safeEvents = createRedactingExecutionEventSink(events, config.telemetryRedactionValues ?? []);
   const repositoryGate = new ResticRepositoryGate();
   const withRepositoryLock = (executor: JobExecutor) =>
-    new ResticRepositoryLockedExecutor(executor, repositoryGate, events);
+    new ResticRepositoryLockedExecutor(executor, repositoryGate, safeEvents);
 
   return new CompositeJobExecutor({
-    "restic-backup": withRepositoryLock(new ResticBackupExecutor(config, runner, events)),
-    "rclone-transfer": new RcloneTransferExecutor(config, runner, events),
-    "rclone-discovery": new RcloneDiscoveryExecutor(config, runner, events),
-    "managed-transfer": new ManagedTransferExecutor(config, runner, events),
-    "managed-cleanup": new ManagedCleanupExecutor(config, runner, events),
-    "rclone-restic-backup": withRepositoryLock(new RcloneMountedResticExecutor(config, runner, events)),
-    "restic-maintenance": withRepositoryLock(new ResticMaintenanceExecutor(config, runner, events)),
-    "restic-inventory": withRepositoryLock(new ResticInventoryExecutor(config, runner, events)),
-    "restic-check": withRepositoryLock(new ResticCheckExecutor(config, runner, events)),
-    "restic-browse": withRepositoryLock(new ResticBrowseExecutor(config, runner, events)),
-    "restic-restore-preview": withRepositoryLock(new ResticRestorePreviewExecutor(config, runner, events)),
-    "restic-restore": withRepositoryLock(new ResticRestoreExecutor(config, runner, events)),
+    "restic-backup": withRepositoryLock(new ResticBackupExecutor(config, runner, safeEvents)),
+    "rclone-transfer": new RcloneTransferExecutor(config, runner, safeEvents),
+    "rclone-discovery": new RcloneDiscoveryExecutor(config, runner, safeEvents),
+    "managed-transfer": new ManagedTransferExecutor(config, runner, safeEvents),
+    "managed-cleanup": new ManagedCleanupExecutor(config, runner, safeEvents),
+    "rclone-restic-backup": withRepositoryLock(new RcloneMountedResticExecutor(config, runner, safeEvents)),
+    "restic-maintenance": withRepositoryLock(new ResticMaintenanceExecutor(config, runner, safeEvents)),
+    "restic-inventory": withRepositoryLock(new ResticInventoryExecutor(config, runner, safeEvents)),
+    "restic-check": withRepositoryLock(new ResticCheckExecutor(config, runner, safeEvents)),
+    "restic-browse": withRepositoryLock(new ResticBrowseExecutor(config, runner, safeEvents)),
+    "restic-restore-preview": withRepositoryLock(new ResticRestorePreviewExecutor(config, runner, safeEvents)),
+    "restic-restore": withRepositoryLock(new ResticRestoreExecutor(config, runner, safeEvents)),
   });
 }
