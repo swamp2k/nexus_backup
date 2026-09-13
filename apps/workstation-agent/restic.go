@@ -52,6 +52,10 @@ func executeResticBackup(ctx context.Context, cfg config, run workstationRun, re
 	if err := validateRepositoryConfig(cfg); err != nil {
 		return backupResult{Duration: time.Since(started), Err: redactBackupError(cfg, err)}
 	}
+	deviceTag, runTag, completeTag, err := backupRunTags(run)
+	if err != nil {
+		return backupResult{Duration: time.Since(started), Err: err}
+	}
 	env := append(os.Environ(),
 		"RESTIC_REPOSITORY="+cfg.Repository,
 		"RESTIC_PASSWORD_FILE="+cfg.PasswordFile,
@@ -64,9 +68,36 @@ func executeResticBackup(ctx context.Context, cfg config, run workstationRun, re
 		return result
 	}
 
+	// A controller outage may happen after Restic has committed a snapshot but
+	// before the agent can deliver finish(). Re-leased runs therefore probe for
+	// the exact run tag before writing anything new. Only a snapshot carrying
+	// the explicit completion marker is safe to reconcile automatically.
+	reconciledSnapshot, err := reconcileBackupRunSnapshotContext(ctx, cfg.ResticPath, env, runTag, completeTag)
+	if err != nil {
+		result := backupResult{Duration: time.Since(started), Err: redactBackupError(cfg, err)}
+		if ctx.Err() != nil {
+			result.Cancelled = true
+		}
+		return result
+	}
+	if reconciledSnapshot != "" {
+		result := backupResult{SnapshotID: reconciledSnapshot, Duration: time.Since(started)}
+		if report != nil {
+			report(backupProgress{Phase: "reconciling", Percent: 100})
+		}
+		if err := applyRetentionContext(ctx, cfg.ResticPath, env, deviceTag, run.Retention); err != nil {
+			if ctx.Err() != nil {
+				result.Cancelled = true
+				result.Err = fmt.Errorf("retention cancelled: %w", ctx.Err())
+				return result
+			}
+			result.Err = redactBackupError(cfg, fmt.Errorf("retention: %w", err))
+		}
+		return result
+	}
+
 	hostname, _ := os.Hostname()
-	tag := "nexus-workstation:" + run.DeviceID
-	args := []string{"backup", "--json", "--host", hostname, "--tag", tag}
+	args := []string{"backup", "--json", "--host", hostname, "--tag", deviceTag, "--tag", runTag}
 	if runtime.GOOS == "windows" {
 		args = append(args, "--use-fs-snapshot")
 	}
@@ -84,6 +115,21 @@ func executeResticBackup(ctx context.Context, cfg config, run workstationRun, re
 		result.Err = redactBackupError(cfg, result.Err)
 		return result
 	}
+	// A successful Restic backup first gets a durable completion marker. The
+	// tag operation changes the snapshot ID, so the helper returns the current
+	// ID that must be reported to the controller and saved locally.
+	confirmedSnapshot, err := confirmBackupRunSnapshotContext(ctx, cfg.ResticPath, env, result.SnapshotID, runTag, completeTag)
+	if err != nil {
+		if ctx.Err() != nil {
+			result.Cancelled = true
+			result.Err = fmt.Errorf("backup completion marker cancelled: %w", ctx.Err())
+			return result
+		}
+		result.Err = redactBackupError(cfg, err)
+		return result
+	}
+	result.SnapshotID = confirmedSnapshot
+
 	// A stale lease can still arrive between the backup finishing and retention
 	// starting; skip retention rather than risk pruning under a revoked lease.
 	if ctx.Err() != nil {
@@ -91,7 +137,7 @@ func executeResticBackup(ctx context.Context, cfg config, run workstationRun, re
 		result.Err = fmt.Errorf("run cancelled: %w", ctx.Err())
 		return result
 	}
-	if err := applyRetentionContext(ctx, cfg.ResticPath, env, tag, run.Retention); err != nil {
+	if err := applyRetentionContext(ctx, cfg.ResticPath, env, deviceTag, run.Retention); err != nil {
 		if ctx.Err() != nil {
 			result.Cancelled = true
 			result.Err = fmt.Errorf("retention cancelled: %w", ctx.Err())
