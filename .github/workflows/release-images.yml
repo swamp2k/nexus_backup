@@ -43,6 +43,9 @@ jobs:
           - name: agent
             image: ghcr.io/swamp2k/nexus-backup-agent
             dockerfile: Dockerfile.agent
+          - name: repository
+            image: ghcr.io/swamp2k/nexus-backup-repository
+            dockerfile: Dockerfile.repository
     steps:
       - uses: actions/checkout@v6
 
