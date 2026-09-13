@@ -42,7 +42,7 @@ Verify these prerequisites:
 - you have selected **separate** host paths for any source data, backup repositories and restore staging.
 - the chosen source mapping does not contain the backup repository or restore-staging mapping beneath it.
 
-That final point is a hard safety rule. For example, a broad source mapping such as `/data -> /mnt/user` can also expose a repository stored under `/mnt/user/backups/...` through the `/data` tree. Do not configure a source path that can descend into its own repository or restore staging. Prefer mapping `/data` directly to the narrow share/directory that is intended to be protected.
+That final point is a hard safety rule. The current beta template deliberately maps `/data` to the narrow placeholder `/mnt/user/nexus-backup-source`, rather than all of `/mnt/user`. Replace that placeholder with the exact share/directory you intend to protect. Do not widen `/data` to `/mnt/user` and then configure `paths: ["/data"]` if `/backup` or `/restore` also map beneath `/mnt/user`, because the source tree could then see its own repository or restore staging through another container path.
 
 The repository templates contain convenience defaults, but host paths are deployment choices. Do not copy a default into production merely because it exists in XML.
 
@@ -93,7 +93,7 @@ The current contract is:
 | `/config` | `agent.json`, Restic passwords, rclone config | read/write |
 | `/run/nexus-backup` | local-agent token from Control | read-only |
 | `/state` | Restic/rclone cache/runtime state | read/write |
-| `/data` | protected source root(s) | read-only |
+| `/data` | protected source root(s); template default `/mnt/user/nexus-backup-source` | read-only |
 | `/backup` | local repository root(s) | read/write |
 | `/restore` | restore staging root | read/write |
 | `/downloads` | managed transfer destination root | read/write |
@@ -266,6 +266,7 @@ Do not migrate a production workload yet. A fresh install is only ready to enter
 - local admin login works.
 - local Agent is online with valid config.
 - Agent starts from an explicit config, not the worked example by accident.
+- `/data` maps only the intended source root, not all user shares by default.
 - source/repository/restore host paths cannot recurse into one another.
 - workstation is online and storage-ready.
 - the workstation test repository is isolated from PCWatch and any production Nexus repository.
