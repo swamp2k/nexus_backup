@@ -22,3 +22,4 @@ export * from "./restic-restore-preview-executor.js";
 export * from "./rtorrent-client.js";
 export * from "./runner.js";
 export * from "./runtime-config.js";
+export * from "./telemetry-redaction.js";
