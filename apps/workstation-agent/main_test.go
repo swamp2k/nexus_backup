@@ -41,6 +41,7 @@ func backupTestConfig(t *testing.T, scriptBody string) config {
 // finish and produce an untracked/duplicate snapshot.
 func TestExecuteBackupCancelsResticOnExplicitStaleLease(t *testing.T) {
 	cfg := backupTestConfig(t, `if [ "$1" = "cat" ]; then exit 0; fi
+if [ "$1" = "snapshots" ]; then printf '%s\n' '[]'; exit 0; fi
 printf '%s\n' '{"message_type":"status","percent_done":0.1,"total_bytes":100,"bytes_done":10}'
 sleep 5
 printf '%s\n' '{"message_type":"summary","snapshot_id":"deadbeef00001111","files_new":1,"files_changed":0,"files_unmodified":0,"data_added":10}'
@@ -100,7 +101,17 @@ exit 0`)
 // treated the same as an explicit stale-lease rejection - the backup must run
 // to completion.
 func TestExecuteBackupSurvivesTransientHeartbeatFailure(t *testing.T) {
-	cfg := backupTestConfig(t, `if [ "$1" = "cat" ]; then exit 0; fi
+	cfg := backupTestConfig(t, `STATE="$0.confirmed"
+if [ "$1" = "cat" ]; then exit 0; fi
+if [ "$1" = "snapshots" ]; then
+  if [ -f "$STATE" ]; then
+    printf '%s\n' '[{"id":"feedface22223333","tags":["nexus-workstation:device-1","nexus-run:run-2","nexus-run-complete:run-2"]}]'
+  else
+    printf '%s\n' '[]'
+  fi
+  exit 0
+fi
+if [ "$1" = "tag" ]; then touch "$STATE"; exit 0; fi
 printf '%s\n' '{"message_type":"status","percent_done":0.5,"total_bytes":100,"bytes_done":50}'
 printf '%s\n' '{"message_type":"summary","snapshot_id":"deadbeef00001111","files_new":1,"files_changed":0,"files_unmodified":0,"data_added":10}'
 exit 0`)
