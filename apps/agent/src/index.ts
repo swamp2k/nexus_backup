@@ -19,6 +19,7 @@ export * from "./restic-maintenance-executor.js";
 export * from "./restic-repository-lock.js";
 export * from "./restic-restore-executor.js";
 export * from "./restic-restore-preview-executor.js";
+export * from "./restore-staging.js";
 export * from "./rtorrent-client.js";
 export * from "./runner.js";
 export * from "./runtime-config.js";
