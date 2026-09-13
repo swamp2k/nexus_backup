@@ -31,7 +31,7 @@ export function redactTelemetryText(text: string, values: readonly string[]): st
 }
 
 function normalizeValues(values: readonly string[]): string[] {
-  return [...new Set(values.filter((value) => typeof value === "string").map((value) => value.trim()).filter((value) => value.length >= 4))]
+  return [...new Set(values.filter((value) => typeof value === "string").map((value) => value.trim()).filter(Boolean))]
     .sort((left, right) => right.length - left.length || left.localeCompare(right));
 }
 
@@ -39,7 +39,15 @@ function redactText(text: string, needles: readonly string[]): string {
   let result = text;
   for (const needle of needles) {
     if (!result.includes(needle)) continue;
-    result = result.split(needle).join(REDACTED);
+    if (needle.length >= 4) {
+      result = result.split(needle).join(REDACTED);
+      continue;
+    }
+    // Very short passwords/tokens are still secrets, but replacing every matching
+    // character would destroy otherwise harmless logs. Redact short values only
+    // when they occur as delimited tokens (for example `password=x` or `:x@`).
+    const pattern = new RegExp(`(^|[^A-Za-z0-9])${escapeRegExp(needle)}(?=$|[^A-Za-z0-9])`, "g");
+    result = result.replace(pattern, (_match, prefix: string) => `${prefix}${REDACTED}`);
   }
   return result;
 }
@@ -52,4 +60,8 @@ function redactValue(value: unknown, needles: readonly string[], depth: number):
     return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactValue(item, needles, depth + 1)]));
   }
   return value;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
