@@ -89,10 +89,12 @@ test("emergency verification rejects a tampered secret file", async () => {
 test("emergency export refuses overlapping destinations and existing bundles", async () => {
   const f = await fixture();
   try {
-    await assert.rejects(
-      () => createEmergencyBundle({ configDir: f.configDir, agentConfigDir: f.agentConfigDir, outputDir: join(f.configDir, "bundle") }),
-      /must not overlap control config/,
-    );
+    for (const overlapping of [join(f.configDir, "bundle"), join(f.configDir, "..bundle")]) {
+      await assert.rejects(
+        () => createEmergencyBundle({ configDir: f.configDir, agentConfigDir: f.agentConfigDir, outputDir: overlapping }),
+        /must not overlap control config/,
+      );
+    }
     const existing = join(f.root, "existing");
     await mkdir(existing);
     await assert.rejects(
