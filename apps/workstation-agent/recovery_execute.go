@@ -76,6 +76,15 @@ func (a *agent) executeRecovery(run workstationRun, operation string) {
 
 func (a *agent) runRecoveryOperation(ctx context.Context, run workstationRun, operation string) (map[string]any, error) {
 	switch operation {
+	case "check":
+		if err := checkWorkstationRepository(ctx, a.cfg); err != nil {
+			return map[string]any{"operation": operation}, err
+		}
+		return map[string]any{
+			"operation": operation,
+			"integrity": "ok",
+		}, nil
+
 	case "inventory":
 		snapshots, err := listRecoverySnapshots(ctx, a.cfg, run.DeviceID)
 		if err != nil { return map[string]any{"operation": operation}, err }
