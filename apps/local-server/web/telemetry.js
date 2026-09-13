@@ -324,3 +324,154 @@ function progressJobName(job) {
   if (source && destination) return `${source} → ${destination}`;
   return job.operationKey || job.type || job.id;
 }
+
+// Repository integrity is intentionally separate from inventory. A successful
+// inventory proves that snapshot metadata can be read; only a completed
+// restic-check is presented as integrity OK.
+const repositoryCheckActiveStates = new Set(["queued", "leased", "preparing", "running", "finalizing"]);
+let repositoryCheckJobs = [];
+let repositoryCheckRefreshBusy = false;
+
+const repositoryCheckObserver = new MutationObserver(() => {
+  if (isRepositoryView()) queueMicrotask(() => decorateRepositoryIntegrity(repositoryCheckJobs));
+});
+repositoryCheckObserver.observe(document.querySelector("#content"), { childList: true, subtree: true });
+window.addEventListener("hashchange", () => {
+  if (isRepositoryView()) void refreshRepositoryIntegrity();
+});
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && isRepositoryView()) void refreshRepositoryIntegrity();
+});
+document.addEventListener("click", (event) => {
+  const button = event.target.closest?.("[data-repository-check]");
+  if (!button || !isRepositoryView()) return;
+  event.preventDefault();
+  event.stopPropagation();
+  void queueRepositoryIntegrityCheck(button.dataset.repositoryCheck, button);
+}, true);
+setInterval(() => {
+  if (isRepositoryView()) void refreshRepositoryIntegrity();
+}, 2500);
+if (isRepositoryView()) void refreshRepositoryIntegrity();
+
+function isRepositoryView() {
+  return (location.hash.replace(/^#/, "") || "overview") === "repositories";
+}
+
+async function refreshRepositoryIntegrity() {
+  if (repositoryCheckRefreshBusy || document.hidden || !isRepositoryView()) return;
+  repositoryCheckRefreshBusy = true;
+  try {
+    const response = await fetch("/v1/local/jobs?limit=500", {
+      headers: { accept: "application/json" },
+      cache: "no-store",
+    });
+    if (!response.ok) throw new Error(`Integrity status request failed (${response.status})`);
+    const data = await response.json();
+    repositoryCheckJobs = (Array.isArray(data.jobs) ? data.jobs : [])
+      .filter((job) => job.type === "restic-check" && typeof job.payload?.repositoryId === "string");
+    decorateRepositoryIntegrity(repositoryCheckJobs);
+  } catch (error) {
+    decorateRepositoryIntegrityError(error);
+  } finally {
+    repositoryCheckRefreshBusy = false;
+  }
+}
+
+function decorateRepositoryIntegrity(jobs) {
+  if (!isRepositoryView()) return;
+  const byRepository = new Map();
+  for (const job of jobs) {
+    const repositoryId = job.payload?.repositoryId;
+    if (!byRepository.has(repositoryId)) byRepository.set(repositoryId, []);
+    byRepository.get(repositoryId).push(job);
+  }
+
+  document.querySelectorAll("#repository-inventory-view [data-repo]").forEach((card) => {
+    const repositoryId = card.dataset.repo;
+    const candidates = byRepository.get(repositoryId) ?? [];
+    const active = candidates.find((job) => repositoryCheckActiveStates.has(job.state)) ?? null;
+    const latest = candidates[0] ?? null;
+    const state = repositoryIntegrityState(active, latest);
+    let controls = card.querySelector(".repo-integrity-controls");
+    if (!controls) {
+      controls = document.createElement("div");
+      controls.className = "repo-integrity-controls";
+      card.querySelector(".repo-actions")?.append(controls);
+    }
+    controls.innerHTML = `<span class="badge ${state.tone}">${escapeHtml(state.label)}</span><button class="button ghost" data-repository-check="${escapeHtml(repositoryId)}" ${active ? "disabled" : ""}>${active ? "Checking…" : "Run integrity check"}</button>`;
+
+    card.querySelector(".repo-integrity-error")?.remove();
+    if (!active && latest && ["failed", "partial", "cancelled", "interrupted"].includes(latest.state)) {
+      const failure = document.createElement("div");
+      failure.className = "repo-error repo-integrity-error";
+      failure.innerHTML = `<strong>Repository integrity check failed</strong><span>${escapeHtml(latest.lastError || "restic check did not complete successfully. Review the job log before trusting this repository.")}</span>`;
+      card.querySelector(".repo-head")?.insertAdjacentElement("afterend", failure);
+    }
+
+    let meta = card.querySelector(".repo-integrity-meta");
+    if (!meta) {
+      meta = document.createElement("span");
+      meta.className = "repo-integrity-meta";
+      card.querySelector(".repo-meta")?.append(meta);
+    }
+    meta.textContent = active
+      ? `Integrity check ${active.state}`
+      : latest?.state === "completed"
+        ? `Integrity checked ${relativeTime(latest.finishedAt || latest.updatedAt)}`
+        : latest
+          ? `Last integrity check ${latest.state} ${relativeTime(latest.finishedAt || latest.updatedAt)}`
+          : "Integrity not checked";
+  });
+}
+
+function repositoryIntegrityState(active, latest) {
+  if (active) return { label: "Checking integrity", tone: "blue" };
+  if (!latest) return { label: "Integrity not checked", tone: "warn" };
+  if (latest.state === "completed") return { label: "Integrity OK", tone: "success" };
+  if (["failed", "partial", "cancelled", "interrupted"].includes(latest.state)) return { label: "Integrity failed", tone: "danger" };
+  return { label: "Integrity unknown", tone: "warn" };
+}
+
+async function queueRepositoryIntegrityCheck(repositoryId, button) {
+  if (!repositoryId || button.disabled) return;
+  button.disabled = true;
+  button.textContent = "Queueing…";
+  try {
+    const response = await fetch("/v1/local/jobs", {
+      method: "POST",
+      headers: { accept: "application/json", "content-type": "application/json" },
+      body: JSON.stringify({
+        operationKey: `repository:${repositoryId}:check:${new Date().toISOString()}:${crypto.randomUUID()}`,
+        type: "restic-check",
+        payload: { repositoryId },
+      }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.message || data.code || `Integrity check enqueue failed (${response.status})`);
+    await refreshRepositoryIntegrity();
+  } catch (error) {
+    button.disabled = false;
+    button.textContent = "Run integrity check";
+    let failure = button.closest("[data-repo]")?.querySelector(".repo-integrity-error");
+    if (!failure) {
+      failure = document.createElement("div");
+      failure.className = "repo-error repo-integrity-error";
+      button.closest("[data-repo]")?.querySelector(".repo-head")?.insertAdjacentElement("afterend", failure);
+    }
+    if (failure) failure.innerHTML = `<strong>Could not start integrity check</strong><span>${escapeHtml(error.message || String(error))}</span>`;
+  }
+}
+
+function decorateRepositoryIntegrityError(error) {
+  if (!isRepositoryView()) return;
+  document.querySelectorAll("#repository-inventory-view [data-repo]").forEach((card) => {
+    let meta = card.querySelector(".repo-integrity-meta");
+    if (!meta) {
+      meta = document.createElement("span");
+      meta.className = "repo-integrity-meta";
+      card.querySelector(".repo-meta")?.append(meta);
+    }
+    meta.textContent = `Integrity status unavailable: ${error.message || String(error)}`;
+  });
+}
