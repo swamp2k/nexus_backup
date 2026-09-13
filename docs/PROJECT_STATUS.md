@@ -12,7 +12,7 @@ Existing PCWatch-backup and standalone Copyarr are fallbacks. Do not modify or r
 
 ## Current milestone
 
-**Final acceptance preflight – self-contained Windows -> Unraid Repository path**
+**Final acceptance preflight – publish an exact coordinated RC image set**
 
 Merged on `main`:
 
@@ -23,16 +23,17 @@ Merged on `main`:
 - emergency recovery kit, PR #23: `9eb2e5c3fddb801fcfc464eeeb17675b0ecf839f`
 - fresh install + isolated acceptance runbook, PR #24: `3963a17104689ad8bbd63d5d1c7325cf3965df86`
 - M9 architecture/security hardening, PR #25: `e375ae4919ebe589be228c399cd133db849ce04b`
+- self-contained workstation Repository endpoint, PR #26: `33e06ad6b5ae24eaaf6301fbcfce4fcc64917cf1`
 
-Active branch: `self-contained-repository-endpoint`
+PR #26 final-head CI #252 was green, including real authenticated TLS Restic init/open against the built Repository image. The post-merge `main` CI #253 is also fully green on `33e06ad6...` across Node/typecheck, Linux Go, native Windows Go, installer/templates and all image/Repository integration gates.
 
-Active draft PR: **#26 – Self-contained workstation Repository endpoint**.
+Active branch: `acceptance-release-preflight`
 
-M9 is complete. The final preflight of the merged architecture found one genuine product gap: the generic Agent `/backup` mapping is not a Windows-accessible repository service, so the intended Balder-PC -> Unraid path still depended on an external service. PR #26 closes that gap with NexusBackup-Repository rather than documenting around it.
+Current preflight finding: there is no GitHub release yet, and the release-image workflow was tag-only. The code path is therefore proven, but the Unraid acceptance procedure still lacks an exact coordinated published Control + Agent + Repository image set that can be pinned and recorded by digest.
 
-Do not call the product ready for real-machine acceptance until #26 final-head CI, security/diff review and a repeated acceptance preflight are complete.
+Do not call the product ready for real-machine acceptance until this distribution gate is closed and the final runbook preflight is repeated against the published RC identity.
 
-## Architecture after PR #26
+## Architecture now on main
 
 The local Unraid product consists of three coordinated containers:
 
@@ -54,7 +55,7 @@ Repository exposes only the TLS Restic service on port 8000 by default. There is
 
 REST transport credentials remain local to Repository + workstation. The separate Restic encryption password remains workstation-local. Control receives neither.
 
-## Current PR #26 safety rules
+## Repository / workstation safety rules now on main
 
 - Repository `/data` defaults to `/mnt/user/backups/nexus-backup/workstations`.
 - generic Agent `/backup` defaults to `/mnt/user/backups/nexus-backup/generic`.
@@ -68,26 +69,25 @@ REST transport credentials remain local to Repository + workstation. The separat
 - Restic child processes receive authoritative local REST/TLS env; stale process `RESTIC_*` values are removed.
 - normal workstation runtime **never auto-initializes a remote repository after a failed probe**.
 - remote Repository initialization happens only during explicit installer provisioning of the exact CA-pinned/authenticated endpoint; afterward remote `autoInit=false`.
-- repository/auth/TLS/network failures therefore fail closed.
-- Repository URL/username/password/CA path/encryption password must remain absent from Control/browser-visible telemetry/errors.
+- repository/auth/TLS/network failures fail closed.
+- Repository URL/username/password/CA path/encryption password remain absent from Control/browser-visible telemetry/errors.
 
-## Current CI state for PR #26
+## Acceptance RC publishing preflight
 
-Earlier PR heads proved Node/typecheck, Linux Go, native Windows Go, PowerShell installer parse, Unraid template validation and all three image builds.
+The active branch adds a guarded manual path to `.github/workflows/release-images.yml` for acceptance images without changing normal tag-release semantics.
 
-The first live Repository integration attempt exposed a narrow startup defect: Alpine's BusyBox build did not include the `httpd` applet used by the original CA bootstrap design (`httpd: applet not found`, exit 127). Rather than adding another web server, #26 removed that entire service and reduced Repository to one TLS port.
+Manual acceptance publishing must:
 
-The current CI contract now requires:
+- run from `main` only;
+- receive the exact expected 40-character source SHA and reject a mismatch;
+- use a SemVer prerelease such as `0.7.0-rc.1`;
+- force `stable=false`, so a manual acceptance publish cannot move `latest`;
+- publish Control, Agent and Repository with the same version/source revision;
+- record each image digest in the GitHub Actions step summary.
 
-- Repository image build with pinned rest-server 0.14.0;
-- one-port Repository startup on TLS/8000;
-- CA certificate obtained only from the local helper's base64 output;
-- SHA-256 equality between helper CA, decoded CI CA and Repository's actual TLS certificate;
-- real authenticated `restic init` followed by `restic cat config` over TLS using that CA;
-- rejection of invalid credentials;
-- no CA bootstrap URL/port in installer, Unraid template or generated Compose config.
+The identity decision lives in `.github/scripts/resolve-release-version.sh` and is covered by the normal Node test suite for allowed and rejected cases. Third-party release Actions remain pinned to commit SHAs.
 
-Do not treat the Repository path as implemented until this contract is green on the final PR head.
+Normal `v*` tag releases continue to determine stable/prerelease status from the tag and can move `latest` only for a stable SemVer tag.
 
 ## Completed M9 security review
 
@@ -99,9 +99,9 @@ Do not treat the Repository path as implemented until this contract is green on 
 - forwarded Host/Proto are not trusted for installer/public-origin security decisions;
 - destructive managed cleanup requires exact size + modification-time provenance;
 - default Agent no longer gets SYS_ADMIN/FUSE;
-- CI action dependencies used by the main CI workflow are commit-pinned.
+- main and release workflow third-party Actions used in the current paths are pinned to reviewed commit SHAs.
 
-There were no known open HIGH findings when #25 merged. Re-evaluate if #26 creates a new boundary regression.
+There were no known open HIGH findings when #25 merged. PR #26 final sensitive-diff review found no new open HIGH finding.
 
 ## Non-negotiable recovery/restore invariants
 
@@ -122,13 +122,13 @@ There were no known open HIGH findings when #25 merged. Re-evaluate if #26 creat
 
 `docs/fresh-install.md` documents Control + Agent + Repository deployment and per-workstation Repository onboarding through local CA base64/hash transfer, with no HTTP bootstrap service.
 
-`docs/acceptance-test.md` tests the actual intended path:
+`docs/acceptance-test.md` tests the intended path:
 
 ```text
 Balder-PC -> TLS -> NexusBackup-Repository -> isolated Unraid storage
 ```
 
-Required real proof still includes normal backup, inventory/browse, repository integrity, dry-run, real fresh staging restore, independent byte/hash verification, Control/Agent/Repository/workstation restarts, temporary Control-path loss, Repository outage, interrupted write restore and a final post-fault staging restore/hash PASS.
+Required real proof includes normal backup, inventory/browse, repository integrity, dry-run, real fresh staging restore, independent byte/hash verification, Control/Agent/Repository/workstation restarts, temporary Control-path loss, Repository outage, interrupted write restore and a final post-fault staging restore/hash PASS.
 
 CI is only a prerequisite; it does not replace this real restore proof.
 
@@ -139,12 +139,13 @@ These are not silently treated as solved:
 - plain-HTTP Control-hosted workstation installation assumes a trusted LAN/host; HTTPS + explicit `NEXUS_BACKUP_PUBLIC_URL` is stronger. Repository traffic itself is TLS/CA-pinned from local helper output.
 - first-run Control setup token is visible to privileged container logs until setup, then removed.
 - Control/Agent/Repository run as root inside non-privileged containers; default mounts/capabilities are constrained. Non-root runtime remains later Unraid-compatibility hardening.
-- base/build image tags are not all digest-pinned; acceptance must record exact built image digests.
+- base/build image tags are not all digest-pinned; acceptance must record the exact published RC image digests.
 - generic FUSE/SYS_ADMIN remains explicit opt-in only for the optional mounted remote-source feature.
+- GHCR package visibility/pullability from the actual Unraid host must be verified after the first RC image publish; do not assume a successful workflow push means anonymous Unraid pull works.
 
 ### Production recovery-key gate
 
-PR #26 deliberately keeps workstation encryption secrets out of Control. That means total workstation loss cannot be recovered solely from the existing Control/generic-Agent emergency bundle.
+Nexus deliberately keeps workstation encryption secrets out of Control. Total workstation loss therefore cannot be recovered solely from the current Control/generic-Agent emergency bundle.
 
 Before **production cutover**, Nexus still needs and must prove an off-host recovery procedure for:
 
@@ -156,11 +157,11 @@ The isolated acceptance test may use disposable secrets/repositories, but passin
 
 ## Remaining gates before “Nu tester vi”
 
-1. require #26 final-head CI green, including real TLS/authenticated Restic init/open against the single-port NexusBackup-Repository;
-2. complete stale-reference/sensitive-diff review and clear review threads;
-3. merge #26;
-4. rerun the complete acceptance-preflight against merged `main` and the exact coordinated image set;
-5. only then invite the isolated real-machine acceptance drill.
+1. finish and merge the guarded manual RC-publish preflight;
+2. publish one exact prerelease image set from the then-current merged `main` SHA without moving `latest`;
+3. verify Control, Agent and Repository can all be pulled by the actual Unraid deployment path and record their immutable digests;
+4. rerun the final acceptance runbook preflight against those exact image identities;
+5. only then start the isolated real-machine acceptance drill.
 
 ## Roadmap after isolated workstation proof
 
@@ -174,4 +175,4 @@ The isolated acceptance test may use disposable secrets/repositories, but passin
 
 ## Working rule
 
-Update this file on every substantial milestone, merge, newly discovered blocker or changed next step. Keep it factual; do not let green CI or an implemented feature imply real-world proof that has not happened.
+Update this file on every substantial milestone, merge, newly discovered blocker or changed next step. Keep it factual; do not let green CI, a published image or an implemented feature imply real-world proof that has not happened.
