@@ -30,8 +30,10 @@ Cloudflare is optional remote control, never a requirement for normal operation 
 M6 adds Nexus-owned Windows workstation backup without routing backup bytes or repository credentials through the control plane:
 
 - Windows x64 workstation agent with a direct one-line PowerShell `irm` installer
-- idempotent install/repair/update flow using the latest stable Nexus GitHub Release
-- release checksum verification for the workstation executable and pinned Restic binary
+- self-contained install/repair/update flow served by the local Nexus control container
+- the control image bundles the matching workstation executable, pinned Restic binary and SHA-256 checksums
+- target workstations do not need GitHub or Internet access to install/repair the agent
+- one-shot 15-minute enrollment credentials rotate directly to durable workstation credentials on first contact
 - workstation policy in Nexus: source paths, excludes, schedule, timezone and retention
 - Restic executes on the workstation and uses VSS filesystem snapshots on Windows
 - repository location and Restic password remain only in `C:\ProgramData\NexusBackup`
@@ -87,8 +89,9 @@ See `docs/devices.md` for the device trust boundary.
 - control and agent tokens are generated automatically and persisted locally
 - the agent token is shared through a private runtime volume
 - migrations are applied automatically at startup
+- the control image carries the matching Windows workstation payload used by local `irm` installs
 - coordinated releases use immutable SemVer tags plus a stable `latest` Docker update channel
-- the same SemVer release publishes the Windows workstation executable as a GitHub Release asset
+- SemVer releases may also publish the Windows workstation executable as a GitHub Release asset for standalone distribution; local installs do not depend on it
 - beta Unraid templates preserve the control/agent security boundary and track the coordinated `latest` images
 - storage paths remain parameterized; real deployment paths remain editable
 
@@ -129,7 +132,7 @@ npm run typecheck
 cd apps/workstation-agent && go test ./...
 ```
 
-CI validates Node tests/typecheck, the Windows workstation cross-build, the PowerShell installer, both Docker images, release metadata and the beta Unraid template contracts.
+CI validates Node tests/typecheck, the Windows workstation cross-build, the PowerShell installer, bundled workstation payload checksums, both Docker images, release metadata and the beta Unraid template contracts.
 
 ## Remote control
 
