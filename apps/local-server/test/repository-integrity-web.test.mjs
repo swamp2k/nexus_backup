@@ -15,5 +15,7 @@ test("repository integrity UI parses and keeps inventory separate from restic ch
   assert.match(source,/Integrity not checked/);
   assert.match(source,/Integrity OK/);
   assert.match(source,/Integrity failed/);
-  assert.match(source,/successful\s+inventory\s+proves[\s\S]*only\s+a\s+completed[\s\S]*restic-check/i);
+  assert.match(source,/Repository integrity is intentionally separate from inventory/i);
+  assert.match(source,/inventory proves that snapshot metadata can be read/i);
+  assert.match(source,/only a completed[\s\S]*restic-check is presented as integrity OK/i);
 });
