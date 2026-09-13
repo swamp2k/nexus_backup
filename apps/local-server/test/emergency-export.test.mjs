@@ -52,14 +52,17 @@ test("emergency export snapshots live SQLite state and local secrets into a veri
     assert.equal(manifest.containsSecrets, true);
     assert.equal(manifest.nexusBackup.version, "0.8.0");
     assert.equal(manifest.nexusBackup.revision, "deadbeef");
+    assert.equal(manifest.recoveryRunbook, "EMERGENCY-RECOVERY.md");
     assert.deepEqual(manifest.database.integrityCheck, ["ok"]);
     assert.equal(manifest.database.migrations.at(-1).name, "0014_workstation_integrity.sql");
+    assert.ok(manifest.files.some((entry) => entry.path === "EMERGENCY-RECOVERY.md"));
     assert.ok(manifest.files.some((entry) => entry.path === "control/nexus-backup.sqlite"));
     assert.ok(manifest.files.some((entry) => entry.path === "control/control-token"));
     assert.ok(manifest.files.some((entry) => entry.path === "control/agent-token"));
     assert.ok(manifest.files.some((entry) => entry.path === "agent-config/secrets/restic-password"));
     assert.ok(manifest.files.some((entry) => entry.path === "agent-config/rclone/rclone.conf"));
     assert.equal(manifest.files.some((entry) => entry.path.endsWith("-wal") || entry.path.endsWith("-shm")), false);
+    assert.match(await readFile(join(outputDir, "EMERGENCY-RECOVERY.md"), "utf8"), /^# Emergency recovery:/);
 
     const snapshot = new DatabaseSync(join(outputDir, "control", "nexus-backup.sqlite"), { readOnly: true });
     try {
