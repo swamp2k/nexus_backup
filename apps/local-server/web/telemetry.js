@@ -475,3 +475,162 @@ function decorateRepositoryIntegrityError(error) {
     meta.textContent = `Integrity status unavailable: ${error.message || String(error)}`;
   });
 }
+
+// Workstation integrity is executed by the Windows agent against its locally
+// configured repository. Repository location and password stay on the workstation;
+// the browser/controller only sees bounded run state and result metadata.
+const workstationCheckActiveStates = new Set(["queued", "leased", "running"]);
+let workstationIntegrity = new Map();
+let workstationIntegrityRefreshBusy = false;
+
+const workstationIntegrityObserver = new MutationObserver(() => {
+  if (isWorkstationView()) queueMicrotask(() => decorateWorkstationIntegrity(workstationIntegrity));
+});
+workstationIntegrityObserver.observe(document.querySelector("#content"), { childList: true });
+window.addEventListener("hashchange", () => {
+  if (isWorkstationView()) void refreshWorkstationIntegrity();
+});
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && isWorkstationView()) void refreshWorkstationIntegrity();
+});
+document.addEventListener("click", (event) => {
+  const button = event.target.closest?.("[data-workstation-check]");
+  if (!button || !isWorkstationView()) return;
+  event.preventDefault();
+  event.stopPropagation();
+  void queueWorkstationIntegrityCheck(button.dataset.workstationCheck, button);
+}, true);
+setInterval(() => {
+  if (isWorkstationView()) void refreshWorkstationIntegrity();
+}, 2500);
+if (isWorkstationView()) void refreshWorkstationIntegrity();
+
+function isWorkstationView() {
+  return (location.hash.replace(/^#/, "") || "overview") === "workstations";
+}
+
+async function refreshWorkstationIntegrity() {
+  if (workstationIntegrityRefreshBusy || document.hidden || !isWorkstationView()) return;
+  workstationIntegrityRefreshBusy = true;
+  try {
+    const response = await fetch("/v1/local/workstations", {
+      headers: { accept: "application/json" },
+      cache: "no-store",
+    });
+    if (!response.ok) throw new Error(`Workstation integrity status request failed (${response.status})`);
+    const data = await response.json();
+    const workstations = Array.isArray(data.workstations) ? data.workstations : [];
+    const entries = await Promise.all(workstations.map(async (workstation) => {
+      const capable = workstation.capabilities?.includes("workstation.integrity.v1") === true;
+      if (!capable) return [workstation.id, { workstation, check: null }];
+      const checkResponse = await fetch(`/v1/local/workstations/${encodeURIComponent(workstation.id)}/recovery/check`, {
+        headers: { accept: "application/json" },
+        cache: "no-store",
+      });
+      if (!checkResponse.ok) throw new Error(`Workstation integrity result request failed (${checkResponse.status})`);
+      const checkData = await checkResponse.json();
+      return [workstation.id, { workstation, check: checkData.check ?? null }];
+    }));
+    workstationIntegrity = new Map(entries);
+    decorateWorkstationIntegrity(workstationIntegrity);
+  } catch (error) {
+    decorateWorkstationIntegrityError(error);
+  } finally {
+    workstationIntegrityRefreshBusy = false;
+  }
+}
+
+function decorateWorkstationIntegrity(byDevice) {
+  if (!isWorkstationView()) return;
+  document.querySelectorAll("#workstations-view .workstation-card[data-ws]").forEach((card) => {
+    const entry = byDevice.get(card.dataset.ws);
+    if (!entry) return;
+    const { workstation, check } = entry;
+    const capable = workstation.capabilities?.includes("workstation.integrity.v1") === true;
+    const active = check && workstationCheckActiveStates.has(check.state);
+    const state = workstationIntegrityState(capable, check);
+    const busy = Boolean(workstation.status?.currentRunId) || active;
+    const canRun = capable && workstation.enabled && workstation.online && workstation.status?.repositoryConfigured && !busy;
+
+    let controls = card.querySelector(".ws-integrity-controls");
+    if (!controls) {
+      controls = document.createElement("div");
+      controls.className = "ws-integrity-controls";
+      card.querySelector(".transfer-actions")?.append(controls);
+    }
+    const buttonText = !capable ? "Update agent" : active ? "Checking…" : busy ? "Busy" : "Run integrity check";
+    controls.innerHTML = `<span class="badge ${state.tone}">${escapeHtml(state.label)}</span><button class="button ghost compact" data-workstation-check="${escapeHtml(workstation.id)}" ${canRun ? "" : "disabled"}>${escapeHtml(buttonText)}</button>`;
+
+    card.querySelector(".ws-integrity-error")?.remove();
+    if (!active && check?.state === "failed") {
+      const failure = document.createElement("div");
+      failure.className = "repo-error ws-integrity-error";
+      failure.innerHTML = `<strong>Repository integrity check failed</strong><span>${escapeHtml(check.error || "restic check did not complete successfully. Do not treat this repository as healthy until the failure is resolved.")}</span>`;
+      card.querySelector(".transfer-head")?.insertAdjacentElement("afterend", failure);
+    }
+
+    let meta = card.querySelector(".ws-integrity-meta");
+    if (!meta) {
+      meta = document.createElement("span");
+      meta.className = "ws-integrity-meta";
+      card.querySelector(".transfer-meta.filters")?.append(meta);
+    }
+    meta.textContent = !capable
+      ? "Integrity: agent update required"
+      : active
+        ? `Integrity check ${check.state}`
+        : check?.state === "completed"
+          ? `Integrity checked ${relativeTime(check.finishedAt || check.updatedAt)}`
+          : check
+            ? `Last integrity check ${check.state} ${relativeTime(check.finishedAt || check.updatedAt)}`
+            : "Integrity not checked";
+  });
+}
+
+function workstationIntegrityState(capable, check) {
+  if (!capable) return { label: "Integrity unavailable", tone: "warn" };
+  if (!check) return { label: "Integrity not checked", tone: "warn" };
+  if (workstationCheckActiveStates.has(check.state)) return { label: "Checking integrity", tone: "blue" };
+  if (check.state === "completed" && check.result?.integrity === "ok") return { label: "Integrity OK", tone: "success" };
+  if (check.state === "failed") return { label: "Integrity failed", tone: "danger" };
+  return { label: "Integrity unknown", tone: "warn" };
+}
+
+async function queueWorkstationIntegrityCheck(deviceId, button) {
+  if (!deviceId || button.disabled) return;
+  button.disabled = true;
+  button.textContent = "Queueing…";
+  try {
+    const response = await fetch(`/v1/local/workstations/${encodeURIComponent(deviceId)}/recovery/check`, {
+      method: "POST",
+      headers: { accept: "application/json", "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.message || data.code || `Workstation integrity check enqueue failed (${response.status})`);
+    await refreshWorkstationIntegrity();
+  } catch (error) {
+    button.disabled = false;
+    button.textContent = "Run integrity check";
+    let failure = button.closest("[data-ws]")?.querySelector(".ws-integrity-error");
+    if (!failure) {
+      failure = document.createElement("div");
+      failure.className = "repo-error ws-integrity-error";
+      button.closest("[data-ws]")?.querySelector(".transfer-head")?.insertAdjacentElement("afterend", failure);
+    }
+    if (failure) failure.innerHTML = `<strong>Could not start integrity check</strong><span>${escapeHtml(error.message || String(error))}</span>`;
+  }
+}
+
+function decorateWorkstationIntegrityError(error) {
+  if (!isWorkstationView()) return;
+  document.querySelectorAll("#workstations-view .workstation-card[data-ws]").forEach((card) => {
+    let meta = card.querySelector(".ws-integrity-meta");
+    if (!meta) {
+      meta = document.createElement("span");
+      meta.className = "ws-integrity-meta";
+      card.querySelector(".transfer-meta.filters")?.append(meta);
+    }
+    meta.textContent = `Integrity status unavailable: ${error.message || String(error)}`;
+  });
+}
