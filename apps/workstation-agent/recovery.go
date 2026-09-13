@@ -432,7 +432,7 @@ func validateSnapshotPath(value string) (string, error) {
 }
 
 func recoveryEnvironment(cfg config) []string {
-	return append(os.Environ(), "RESTIC_REPOSITORY="+cfg.Repository, "RESTIC_PASSWORD_FILE="+cfg.PasswordFile)
+	return resticEnvironment(cfg)
 }
 
 func readBoundedAsync(reader io.Reader, limit int64) <-chan string {

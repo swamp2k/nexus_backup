@@ -41,6 +41,16 @@ jobs:
           gateway=apps/local-server/bin/gateway.mjs
           grep -F '$serverUrl/workstation/nexus-backup-workstation-windows-amd64.exe' "$installer"
           grep -F '$serverUrl/workstation/restic.exe' "$installer"
+          grep -F 'NEXUS_BACKUP_REST_USERNAME' "$installer"
+          grep -F 'NEXUS_BACKUP_REST_PASSWORD' "$installer"
+          grep -F 'NEXUS_BACKUP_REPOSITORY_CA_B64' "$installer"
+          grep -F 'NEXUS_BACKUP_REPOSITORY_CA_SHA256' "$installer"
+          grep -F 'Pinned Repository CA checksum mismatch' "$installer"
+          grep -F 'Invoke-PinnedRepositoryProvision' "$installer"
+          if grep -Fq 'NEXUS_BACKUP_REPOSITORY_CA_URL' "$installer"; then
+            echo 'installer must not depend on a Repository HTTP CA bootstrap URL' >&2
+            exit 1
+          fi
           if grep -Fq 'api.github.com/repos/swamp2k/nexus_backup/releases/latest' "$installer"; then
             echo 'installer must not depend on GitHub Releases' >&2
             exit 1
@@ -62,26 +72,27 @@ jobs:
         run: |
           python - <<'PY'
           import xml.etree.ElementTree as ET
-          from pathlib import Path
+          from pathlib import Path, PurePosixPath
 
-          control_path = Path("unraid/templates/nexus-backup-control.xml")
-          agent_path = Path("unraid/templates/nexus-backup-agent.xml")
-          control = ET.parse(control_path).getroot()
-          agent = ET.parse(agent_path).getroot()
+          control = ET.parse(Path("unraid/templates/nexus-backup-control.xml")).getroot()
+          agent = ET.parse(Path("unraid/templates/nexus-backup-agent.xml")).getroot()
+          repository = ET.parse(Path("unraid/templates/nexus-backup-repository.xml")).getroot()
 
-          assert control.tag == agent.tag == "Container"
-          assert control.attrib.get("version") == agent.attrib.get("version") == "2"
+          assert control.tag == agent.tag == repository.tag == "Container"
+          assert control.attrib.get("version") == agent.attrib.get("version") == repository.attrib.get("version") == "2"
           assert control.findtext("Repository") == "ghcr.io/swamp2k/nexus-backup-control:latest"
           assert agent.findtext("Repository") == "ghcr.io/swamp2k/nexus-backup-agent:latest"
-          assert control.findtext("Network") == agent.findtext("Network") == "host"
-          assert control.findtext("Privileged") == agent.findtext("Privileged") == "false"
-          assert control.findtext("Beta") == agent.findtext("Beta") == "True"
+          assert repository.findtext("Repository") == "ghcr.io/swamp2k/nexus-backup-repository:latest"
+          assert control.findtext("Network") == agent.findtext("Network") == repository.findtext("Network") == "host"
+          assert control.findtext("Privileged") == agent.findtext("Privileged") == repository.findtext("Privileged") == "false"
+          assert control.findtext("Beta") == agent.findtext("Beta") == repository.findtext("Beta") == "True"
 
           def configs(root):
               return {item.attrib["Target"]: item.attrib for item in root.findall("Config")}
 
           cc = configs(control)
           ac = configs(agent)
+          rc = configs(repository)
           assert cc["/run/nexus-backup"]["Default"] == ac["/run/nexus-backup"]["Default"]
           assert cc["/agent-config"]["Default"] == ac["/config"]["Default"]
           assert cc["/agent-config"]["Mode"] == "ro"
@@ -90,19 +101,32 @@ jobs:
           assert ac["/data"]["Mode"] == "ro"
           assert ac["/data"]["Default"] == "/mnt/user/nexus-backup-source"
           assert ac["/data"]["Default"] != "/mnt/user"
+          assert ac["/backup"]["Default"] == "/mnt/user/backups/nexus-backup/generic"
+          assert rc["/config"]["Mode"] == "rw"
+          assert rc["/data"]["Mode"] == "rw"
+          assert rc["/data"]["Default"] == "/mnt/user/backups/nexus-backup/workstations"
 
-          control_extra = control.findtext("ExtraParams") or ""
-          agent_extra = agent.findtext("ExtraParams") or ""
-          assert "SYS_ADMIN" not in control_extra and "/dev/fuse" not in control_extra
-          assert "SYS_ADMIN" not in agent_extra and "/dev/fuse" not in agent_extra
+          generic_root = PurePosixPath(ac["/backup"]["Default"])
+          workstation_root = PurePosixPath(rc["/data"]["Default"])
+          assert generic_root != workstation_root
+          assert generic_root not in workstation_root.parents
+          assert workstation_root not in generic_root.parents
+
+          for root in (control, agent, repository):
+              extra = root.findtext("ExtraParams") or ""
+              assert "SYS_ADMIN" not in extra and "/dev/fuse" not in extra
           requires = agent.findtext("Requires") or ""
           assert "Only add SYS_ADMIN and /dev/fuse manually" in requires
 
           control_vars = {item.attrib["Target"]: item.attrib for item in control.findall("Config") if item.attrib.get("Type") == "Variable"}
           agent_vars = {item.attrib["Target"]: item.attrib for item in agent.findall("Config") if item.attrib.get("Type") == "Variable"}
+          repository_vars = {item.attrib["Target"]: item.attrib for item in repository.findall("Config") if item.attrib.get("Type") == "Variable"}
           assert control_vars["NEXUS_BACKUP_PUBLIC_URL"]["Required"] == "false"
           assert agent_vars["NEXUS_BACKUP_URL"]["Default"] == "http://127.0.0.1:8787"
           assert agent_vars["NEXUS_BACKUP_AGENT_TOKEN_FILE"]["Default"] == "/run/nexus-backup/agent-token"
+          assert repository_vars["NEXUS_BACKUP_REPOSITORY_HOST"]["Required"] == "true"
+          assert repository_vars["NEXUS_BACKUP_REPOSITORY_PORT"]["Default"] == "8000"
+          assert "NEXUS_BACKUP_REPOSITORY_PUBLIC_PORT" not in repository_vars
 
           print("Unraid templates are well-formed and shared-path/security contracts match")
           PY
@@ -169,17 +193,99 @@ jobs:
             }
             if (!c.tools || Object.keys(c.tools).length !== 0) throw new Error("tools must be empty");
           '
+      - name: Build Repository image
+        run: docker build -f Dockerfile.repository --build-arg NEXUS_BACKUP_VERSION="$CI_VERSION" --build-arg NEXUS_BACKUP_REVISION="$GITHUB_SHA" -t nexus-backup-repository:ci .
+      - name: Exercise Repository TLS/auth with real Restic
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker volume create nexus-repository-config-ci >/dev/null
+          docker volume create nexus-repository-data-ci >/dev/null
+          cleanup() {
+            docker rm -f nexus-repository-ci >/dev/null 2>&1 || true
+            docker volume rm nexus-repository-config-ci nexus-repository-data-ci >/dev/null 2>&1 || true
+            rm -f /tmp/repository-ca.pem /tmp/restic-password
+          }
+          trap cleanup EXIT
+          docker run -d --name nexus-repository-ci \
+            -e NEXUS_BACKUP_REPOSITORY_HOST=127.0.0.1 \
+            -e NEXUS_BACKUP_REPOSITORY_INITIAL_USER=ci-user \
+            -p 18000:8000 \
+            -v nexus-repository-config-ci:/config \
+            -v nexus-repository-data-ci:/data \
+            nexus-backup-repository:ci >/dev/null
+
+          ready=0
+          for _ in $(seq 1 30); do
+            if curl -ksS -o /dev/null https://127.0.0.1:18000/; then
+              ready=1
+              break
+            fi
+            if [ "$(docker inspect -f '{{.State.Running}}' nexus-repository-ci 2>/dev/null || true)" != "true" ]; then
+              break
+            fi
+            sleep 1
+          done
+          if [ "$ready" != "1" ]; then
+            echo '--- Repository container state ---' >&2
+            docker inspect nexus-repository-ci --format '{{json .State}}' >&2 || true
+            echo '--- Repository container logs ---' >&2
+            docker logs nexus-repository-ci >&2 || true
+            echo '--- rest-server --help from built image ---' >&2
+            docker run --rm --entrypoint /usr/local/bin/rest-server nexus-backup-repository:ci --help >&2 || true
+            exit 1
+          fi
+
+          helper="$(docker exec nexus-repository-ci nexus-repository-client ci-user main)"
+          expected_ca_sha="$(printf '%s\n' "$helper" | sed -n "s/.*NEXUS_BACKUP_REPOSITORY_CA_SHA256='\([^']*\)'.*/\1/p")"
+          ca_b64="$(printf '%s\n' "$helper" | sed -n "s/.*NEXUS_BACKUP_REPOSITORY_CA_B64='\([^']*\)'.*/\1/p")"
+          transport_password="$(docker exec nexus-repository-ci cat /config/clients/ci-user.password)"
+          test -n "$ca_b64"
+          test "$expected_ca_sha" != ""
+          if printf '%s\n' "$helper" | grep -Fq 'NEXUS_BACKUP_REPOSITORY_CA_URL'; then
+            echo 'Repository helper must not emit an HTTP CA bootstrap URL' >&2
+            exit 1
+          fi
+          printf '%s' "$ca_b64" | base64 -d > /tmp/repository-ca.pem
+          actual_ca_sha="$(sha256sum /tmp/repository-ca.pem | awk '{print $1}')"
+          test "$actual_ca_sha" = "$expected_ca_sha"
+          docker exec nexus-repository-ci sha256sum /config/repository-tls.crt | grep -F "$expected_ca_sha"
+
+          printf '%s\n' 'ci-restic-encryption-password' > /tmp/restic-password
+          docker run --rm --network host --entrypoint restic \
+            -e RESTIC_REPOSITORY=rest:https://127.0.0.1:18000/ci-user/main \
+            -e RESTIC_REST_USERNAME=ci-user \
+            -e RESTIC_REST_PASSWORD="$transport_password" \
+            -e RESTIC_PASSWORD_FILE=/secrets/restic-password \
+            -e RESTIC_CACERT=/secrets/repository-ca.pem \
+            -v /tmp/restic-password:/secrets/restic-password:ro \
+            -v /tmp/repository-ca.pem:/secrets/repository-ca.pem:ro \
+            nexus-backup-agent:ci init
+          docker run --rm --network host --entrypoint restic \
+            -e RESTIC_REPOSITORY=rest:https://127.0.0.1:18000/ci-user/main \
+            -e RESTIC_REST_USERNAME=ci-user \
+            -e RESTIC_REST_PASSWORD="$transport_password" \
+            -e RESTIC_PASSWORD_FILE=/secrets/restic-password \
+            -e RESTIC_CACERT=/secrets/repository-ca.pem \
+            -v /tmp/restic-password:/secrets/restic-password:ro \
+            -v /tmp/repository-ca.pem:/secrets/repository-ca.pem:ro \
+            nexus-backup-agent:ci cat config >/dev/null
+          if curl -kfsS -u wrong:wrong https://127.0.0.1:18000/ci-user/main/config >/dev/null 2>&1; then
+            echo 'Repository accepted invalid credentials' >&2
+            exit 1
+          fi
       - name: Verify image version metadata
         shell: bash
         run: |
           set -euo pipefail
-          for image in nexus-backup-local:ci nexus-backup-agent:ci; do
+          for image in nexus-backup-local:ci nexus-backup-agent:ci nexus-backup-repository:ci; do
             test "$(docker image inspect "$image" --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')" = "$CI_VERSION"
             test "$(docker image inspect "$image" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = "$GITHUB_SHA"
             docker image inspect "$image" --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -Fx "NEXUS_BACKUP_VERSION=$CI_VERSION"
             docker image inspect "$image" --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -Fx "NEXUS_BACKUP_REVISION=$GITHUB_SHA"
           done
           docker image inspect nexus-backup-agent:ci --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -Fx "NEXUS_BACKUP_AGENT_VERSION=$CI_VERSION"
+          test "$(docker image inspect nexus-backup-repository:ci --format '{{ index .Config.Labels "org.opencontainers.image.vendor.rest-server.version" }}')" = "0.14.0"
       - name: Validate compose release tag and privilege wiring
         shell: bash
         run: |
@@ -187,6 +293,11 @@ jobs:
           NEXUS_BACKUP_IMAGE_TAG="$CI_VERSION" NEXUS_BACKUP_VERSION="$CI_VERSION" NEXUS_BACKUP_REVISION="$GITHUB_SHA" docker compose -f compose.yaml config > /tmp/compose.yml
           grep -F "image: ghcr.io/swamp2k/nexus-backup-control:$CI_VERSION" /tmp/compose.yml
           grep -F "image: ghcr.io/swamp2k/nexus-backup-agent:$CI_VERSION" /tmp/compose.yml
+          grep -F "image: ghcr.io/swamp2k/nexus-backup-repository:$CI_VERSION" /tmp/compose.yml
+          if grep -Fq '8001' /tmp/compose.yml; then
+            echo 'default compose must expose only the Repository TLS port, not a CA bootstrap port' >&2
+            exit 1
+          fi
           if grep -Eq 'SYS_ADMIN|/dev/fuse' /tmp/compose.yml; then
             echo 'default compose must not grant FUSE/SYS_ADMIN' >&2
             exit 1

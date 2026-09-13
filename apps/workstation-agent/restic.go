@@ -52,11 +52,13 @@ func executeResticBackup(ctx context.Context, cfg config, run workstationRun, re
 	if err := validateRepositoryConfig(cfg); err != nil {
 		return backupResult{Duration: time.Since(started), Err: redactBackupError(cfg, err)}
 	}
-	env := append(os.Environ(),
-		"RESTIC_REPOSITORY="+cfg.Repository,
-		"RESTIC_PASSWORD_FILE="+cfg.PasswordFile,
-	)
-	if err := ensureRepositoryContext(ctx, cfg.ResticPath, env, cfg.Repository, cfg.AutoInit); err != nil {
+	env := resticEnvironment(cfg)
+	// Runtime auto-initialization is deliberately local-only. A failed remote
+	// probe may mean auth, TLS or network failure and must never be treated as
+	// permission to create/initialize a remote repository. Managed Nexus REST
+	// repositories are provisioned explicitly by the workstation installer.
+	allowInit := cfg.AutoInit && localRepositoryPath(cfg.Repository) != ""
+	if err := ensureRepositoryContext(ctx, cfg.ResticPath, env, cfg.Repository, allowInit); err != nil {
 		result := backupResult{Duration: time.Since(started), Err: redactBackupError(cfg, err)}
 		if ctx.Err() != nil {
 			result.Cancelled = true
@@ -170,10 +172,6 @@ func runBackupCommand(ctx context.Context, resticPath string, env, args []string
 	waitErr := waitCommandTree(cmd)
 	stderrText := <-stderrDone
 	if ctx.Err() != nil {
-		// The context was cancelled (an explicit stale-lease rejection, not a
-		// timeout we set ourselves), so restic was killed intentionally.
-		// Restic guarantees the repository stays consistent when killed
-		// mid-backup; it simply never wrote the missing snapshot.
 		return backupResult{Cancelled: true, Err: fmt.Errorf("restic backup cancelled: %w", ctx.Err())}
 	}
 	if parseErr != nil {
@@ -209,9 +207,6 @@ func runBackupCommand(ctx context.Context, resticPath string, env, args []string
 	return result
 }
 
-// ensureRepository is retained for non-leased callers. Workstation leased work
-// must use ensureRepositoryContext so an explicit lease revocation can stop a
-// slow repository probe or initialization command as well as the backup itself.
 func ensureRepository(resticPath string, env []string, repository string, autoInit bool) error {
 	return ensureRepositoryContext(context.Background(), resticPath, env, repository, autoInit)
 }
@@ -263,8 +258,6 @@ func localRepositoryPath(repository string) string {
 	return ""
 }
 
-// applyRetention is retained for non-leased callers. Workstation backup uses
-// applyRetentionContext so stale-lease cancellation also stops forget/prune.
 func applyRetention(resticPath string, env []string, tag string, retention retentionPolicy) error {
 	return applyRetentionContext(context.Background(), resticPath, env, tag, retention)
 }
@@ -332,7 +325,54 @@ func validateRepositoryConfig(cfg config) error {
 	if strings.TrimSpace(string(content)) == "" {
 		return errors.New("restic password file is empty")
 	}
+	if (strings.TrimSpace(cfg.RestUsername) == "") != (strings.TrimSpace(cfg.RestPassword) == "") {
+		return errors.New("REST transport username and password must be configured together")
+	}
+	if cfg.RestUsername != "" && !strings.HasPrefix(strings.ToLower(cfg.Repository), "rest:https://") {
+		return errors.New("REST transport credentials require a rest:https:// repository")
+	}
+	if cfg.CACertPath != "" {
+		info, statErr := os.Stat(cfg.CACertPath)
+		if statErr != nil {
+			return fmt.Errorf("read repository CA certificate: %w", statErr)
+		}
+		if info.IsDir() || info.Size() == 0 {
+			return errors.New("repository CA certificate must be a non-empty regular file")
+		}
+	}
 	return nil
+}
+
+func resticEnvironment(cfg config) []string {
+	blocked := map[string]struct{}{
+		"RESTIC_REPOSITORY":    {},
+		"RESTIC_PASSWORD_FILE": {},
+		"RESTIC_REST_USERNAME": {},
+		"RESTIC_REST_PASSWORD": {},
+		"RESTIC_CACERT":        {},
+	}
+	env := make([]string, 0, len(os.Environ())+5)
+	for _, entry := range os.Environ() {
+		name, _, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		if _, skip := blocked[strings.ToUpper(name)]; skip {
+			continue
+		}
+		env = append(env, entry)
+	}
+	env = append(env,
+		"RESTIC_REPOSITORY="+cfg.Repository,
+		"RESTIC_PASSWORD_FILE="+cfg.PasswordFile,
+	)
+	if cfg.RestUsername != "" {
+		env = append(env, "RESTIC_REST_USERNAME="+cfg.RestUsername, "RESTIC_REST_PASSWORD="+cfg.RestPassword)
+	}
+	if cfg.CACertPath != "" {
+		env = append(env, "RESTIC_CACERT="+cfg.CACertPath)
+	}
+	return env
 }
 
 func redactBackupError(cfg config, err error) error {
@@ -340,11 +380,16 @@ func redactBackupError(cfg config, err error) error {
 		return nil
 	}
 	text := err.Error()
-	if value := strings.TrimSpace(cfg.Repository); value != "" {
-		text = strings.ReplaceAll(text, value, "[repository]")
-	}
-	if value := strings.TrimSpace(cfg.PasswordFile); value != "" {
-		text = strings.ReplaceAll(text, value, "[password-file]")
+	for value, replacement := range map[string]string{
+		strings.TrimSpace(cfg.Repository):   "[repository]",
+		strings.TrimSpace(cfg.PasswordFile): "[password-file]",
+		strings.TrimSpace(cfg.RestUsername): "[rest-user]",
+		strings.TrimSpace(cfg.RestPassword): "[rest-password]",
+		strings.TrimSpace(cfg.CACertPath):   "[ca-cert]",
+	} {
+		if value != "" {
+			text = strings.ReplaceAll(text, value, replacement)
+		}
 	}
 	return errors.New(text)
 }

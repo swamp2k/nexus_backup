@@ -51,8 +51,28 @@ services:
       - ${NEXUS_BACKUP_RESTORE_PATH:-./.local/restore}:/restore
       - ${NEXUS_BACKUP_TRANSFER_PATH:-./.local/downloads}:/downloads
 
+  repository:
+    image: ghcr.io/swamp2k/nexus-backup-repository:${NEXUS_BACKUP_IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: Dockerfile.repository
+      args:
+        NEXUS_BACKUP_VERSION: ${NEXUS_BACKUP_VERSION:-dev}
+        NEXUS_BACKUP_REVISION: ${NEXUS_BACKUP_REVISION:-unknown}
+    restart: unless-stopped
+    ports:
+      - "${NEXUS_BACKUP_REPOSITORY_PORT:-8000}:${NEXUS_BACKUP_REPOSITORY_PORT:-8000}"
+    environment:
+      NEXUS_BACKUP_REPOSITORY_HOST: ${NEXUS_BACKUP_REPOSITORY_HOST:-localhost}
+      NEXUS_BACKUP_REPOSITORY_PORT: ${NEXUS_BACKUP_REPOSITORY_PORT:-8000}
+      NEXUS_BACKUP_REPOSITORY_INITIAL_USER: ${NEXUS_BACKUP_REPOSITORY_INITIAL_USER:-nexus-workstation}
+    volumes:
+      - repository-config:/config
+      - ${NEXUS_BACKUP_WORKSTATION_REPOSITORY_PATH:-./.local/workstation-repositories}:/data
+
 volumes:
   control-config:
   runtime:
   agent-config:
   agent-state:
+  repository-config:

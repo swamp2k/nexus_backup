@@ -18,9 +18,76 @@ function Download-VerifiedAsset([string]$Url, [string]$ChecksumUrl, [string]$Des
   }
 }
 
+function Write-PinnedBase64Asset([string]$Base64, [string]$ExpectedSha256, [string]$Destination) {
+  $expected = $ExpectedSha256.Trim().ToLowerInvariant()
+  if ($expected -notmatch '^[0-9a-f]{64}$') { Fail 'Pinned Repository CA SHA-256 must contain exactly 64 hexadecimal characters.' }
+  if ([string]::IsNullOrWhiteSpace($Base64)) { Fail 'Pinned Repository CA payload is empty.' }
+  try {
+    $bytes = [Convert]::FromBase64String($Base64.Trim())
+  } catch {
+    Fail 'Pinned Repository CA payload is not valid base64.'
+  }
+  if ($bytes.Length -eq 0) { Fail 'Pinned Repository CA payload decoded to an empty file.' }
+  [IO.File]::WriteAllBytes($Destination, $bytes)
+  $actual = (Get-FileHash -Algorithm SHA256 -Path $Destination).Hash.ToLowerInvariant()
+  if ($actual -ne $expected) { Fail 'Pinned Repository CA checksum mismatch.' }
+}
+
 function Write-WorkstationConfig([string]$Path, [System.Collections.IDictionary]$Config) {
   $json = $Config | ConvertTo-Json -Depth 4
   [IO.File]::WriteAllText($Path, $json, (New-Object Text.UTF8Encoding($false)))
+}
+
+function Short-NativeOutput($Value) {
+  $text = (($Value | Out-String).Trim())
+  if ($text.Length -gt 1200) { return $text.Substring(0, 1200) + ' [truncated]' }
+  return $text
+}
+
+function Invoke-PinnedRepositoryProvision([string]$ResticExe, [System.Collections.IDictionary]$Config) {
+  $repository = ([string]$Config['repository']).Trim()
+  $username = ([string]$Config['restUsername']).Trim()
+  $transportPassword = ([string]$Config['restPassword']).Trim()
+  $passwordFile = ([string]$Config['passwordFile']).Trim()
+  $caFile = ([string]$Config['caCertPath']).Trim()
+  if ($repository -notmatch '^rest:https://' -or [string]::IsNullOrWhiteSpace($username) -or [string]::IsNullOrWhiteSpace($transportPassword) -or [string]::IsNullOrWhiteSpace($caFile)) {
+    return
+  }
+  if (-not (Test-Path -LiteralPath $passwordFile -PathType Leaf)) { Fail 'Pinned Repository provisioning requires the local Restic encryption password file.' }
+  if (-not (Test-Path -LiteralPath $caFile -PathType Leaf)) { Fail 'Pinned Repository provisioning requires the verified local CA certificate.' }
+
+  $names = @('RESTIC_REPOSITORY','RESTIC_PASSWORD_FILE','RESTIC_REST_USERNAME','RESTIC_REST_PASSWORD','RESTIC_CACERT')
+  $previous = @{}
+  foreach ($name in $names) { $previous[$name] = [Environment]::GetEnvironmentVariable($name, 'Process') }
+  try {
+    $env:RESTIC_REPOSITORY = $repository
+    $env:RESTIC_PASSWORD_FILE = $passwordFile
+    $env:RESTIC_REST_USERNAME = $username
+    $env:RESTIC_REST_PASSWORD = $transportPassword
+    $env:RESTIC_CACERT = $caFile
+
+    Write-Host 'Nexus Backup: provisioning pinned Repository endpoint...'
+    $initOutput = & $ResticExe init 2>&1
+    $initExit = $LASTEXITCODE
+    if ($initExit -ne 0) {
+      # An already initialized repository is expected on reinstall. Prove that the
+      # exact pinned endpoint can be opened with this encryption key. Auth/TLS/network
+      # failures fail installation here and are never converted into runtime init.
+      $probeOutput = & $ResticExe cat config 2>&1
+      if ($LASTEXITCODE -ne 0) {
+        Fail "Pinned Repository could neither be initialized nor opened. init: $(Short-NativeOutput $initOutput); probe: $(Short-NativeOutput $probeOutput)"
+      }
+      Write-Host 'Nexus Backup: existing pinned Repository verified.'
+    } else {
+      $probeOutput = & $ResticExe cat config 2>&1
+      if ($LASTEXITCODE -ne 0) {
+        Fail "Pinned Repository was initialized but could not be reopened: $(Short-NativeOutput $probeOutput)"
+      }
+      Write-Host 'Nexus Backup: new pinned Repository initialized and verified.'
+    }
+  } finally {
+    foreach ($name in $names) { [Environment]::SetEnvironmentVariable($name, $previous[$name], 'Process') }
+  }
 }
 
 $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
@@ -40,14 +107,16 @@ $installDir = Join-Path $env:ProgramFiles 'Nexus Backup Workstation'
 $dataDir = Join-Path $env:ProgramData 'NexusBackup'
 $configPath = Join-Path $dataDir 'workstation.json'
 $passwordPath = Join-Path $dataDir 'restic-password'
+$caCertPath = Join-Path $dataDir 'repository-ca.pem'
 $agentPath = Join-Path $installDir 'nexus-backup-workstation.exe'
 $resticPath = Join-Path $installDir 'restic.exe'
 $taskName = 'NexusBackupWorkstation'
 New-Item -ItemType Directory -Path $installDir -Force | Out-Null
 New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
 
-# Device credentials and the Restic password live below ProgramData. Do not inherit
-# ordinary Users read access; retain only SYSTEM and local Administrators.
+# Device credentials, REST transport credentials and the Restic encryption password
+# live below ProgramData. Do not inherit ordinary Users read access; retain only
+# SYSTEM and local Administrators.
 & icacls.exe $dataDir '/inheritance:r' '/grant:r' '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '/T' '/C' | Out-Null
 if ($LASTEXITCODE -ne 0) { Fail 'Could not secure the local NexusBackup data directory ACL.' }
 
@@ -66,6 +135,7 @@ if (Test-Path $configPath) {
 # consuming a one-shot enrollment credential. The target PC needs no Internet access.
 $tmpAgent = Join-Path $env:TEMP ("nexus-backup-workstation-{0}.exe" -f [guid]::NewGuid().ToString('N'))
 $tmpRestic = Join-Path $env:TEMP ("nexus-backup-restic-{0}.exe" -f [guid]::NewGuid().ToString('N'))
+$tmpCa = Join-Path $env:TEMP ("nexus-backup-repository-ca-{0}.pem" -f [guid]::NewGuid().ToString('N'))
 try {
   Write-Host 'Nexus Backup: downloading workstation agent from local Nexus...'
   Download-VerifiedAsset `
@@ -110,25 +180,67 @@ try {
     repository = ''
     passwordFile = $passwordPath
     resticPath = $resticPath
+    restUsername = ''
+    restPassword = ''
+    caCertPath = ''
     pollSeconds = 15
     reportSeconds = 60
     autoInit = $true
   }
   if ($null -ne $old) {
-    foreach ($name in @('repository','passwordFile','resticPath','pollSeconds','reportSeconds','autoInit')) {
+    foreach ($name in @('repository','passwordFile','resticPath','restUsername','restPassword','caCertPath','pollSeconds','reportSeconds','autoInit')) {
       if ($null -ne $old.$name) { $config[$name] = $old.$name }
     }
   }
   if (-not [string]::IsNullOrWhiteSpace([string]$env:NEXUS_BACKUP_REPOSITORY)) {
-    $config['repository'] = [string]$env:NEXUS_BACKUP_REPOSITORY
+    $config['repository'] = ([string]$env:NEXUS_BACKUP_REPOSITORY).Trim()
   }
+
+  $restUsername = ([string]$env:NEXUS_BACKUP_REST_USERNAME).Trim()
+  $restPassword = ([string]$env:NEXUS_BACKUP_REST_PASSWORD).Trim()
+  if ([string]::IsNullOrWhiteSpace($restUsername) -xor [string]::IsNullOrWhiteSpace($restPassword)) {
+    Fail 'NEXUS_BACKUP_REST_USERNAME and NEXUS_BACKUP_REST_PASSWORD must be supplied together.'
+  }
+  if (-not [string]::IsNullOrWhiteSpace($restUsername)) {
+    if ([string]$config['repository'] -notmatch '^rest:https://') {
+      Fail 'REST transport credentials are only accepted for a rest:https:// repository.'
+    }
+    $config['restUsername'] = $restUsername
+    $config['restPassword'] = $restPassword
+  }
+
+  $caB64 = ([string]$env:NEXUS_BACKUP_REPOSITORY_CA_B64).Trim()
+  $caSha = ([string]$env:NEXUS_BACKUP_REPOSITORY_CA_SHA256).Trim()
+  if ([string]::IsNullOrWhiteSpace($caB64) -xor [string]::IsNullOrWhiteSpace($caSha)) {
+    Fail 'NEXUS_BACKUP_REPOSITORY_CA_B64 and NEXUS_BACKUP_REPOSITORY_CA_SHA256 must be supplied together.'
+  }
+  if (-not [string]::IsNullOrWhiteSpace($caB64)) {
+    Write-Host 'Nexus Backup: decoding and verifying Repository CA certificate from local onboarding values...'
+    Write-PinnedBase64Asset $caB64 $caSha $tmpCa
+    Move-Item -Force $tmpCa $caCertPath
+    $config['caCertPath'] = $caCertPath
+  }
+
   if (-not [string]::IsNullOrWhiteSpace([string]$env:NEXUS_BACKUP_RESTIC_PASSWORD)) {
     [IO.File]::WriteAllText($passwordPath, [string]$env:NEXUS_BACKUP_RESTIC_PASSWORD, (New-Object Text.UTF8Encoding($false)))
   }
 
-  # Persist the permanent token before touching the existing installation. If a later
-  # file replacement fails, rerunning the same installer can repair it without needing
-  # the already-consumed bootstrap token.
+  $isPinnedRest = [string]$config['repository'] -match '^rest:https://' -and -not [string]::IsNullOrWhiteSpace([string]$config['restUsername'])
+  if ($isPinnedRest -and [string]::IsNullOrWhiteSpace([string]$config['caCertPath'])) {
+    Fail 'Authenticated Nexus Repository setup requires a locally supplied and SHA-256-verified CA certificate.'
+  }
+
+  # A Nexus-managed REST repository is initialized/verified only during this explicit
+  # local provisioning step. Normal Agent runtime never initializes a remote repository
+  # after a failed auth/TLS/network probe.
+  if ($isPinnedRest) {
+    Invoke-PinnedRepositoryProvision $tmpRestic $config
+    $config['autoInit'] = $false
+  }
+
+  # Persist the permanent token and local repository credentials before touching the
+  # existing installation. If a later file replacement fails, rerunning the installer
+  # can repair it without needing the already-consumed bootstrap token.
   Write-WorkstationConfig $configPath $config
   & icacls.exe $dataDir '/inheritance:r' '/grant:r' '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '/T' '/C' | Out-Null
   if ($LASTEXITCODE -ne 0) { Fail 'Could not protect Nexus Backup workstation configuration.' }
@@ -151,5 +263,6 @@ try {
     Write-Host 'Storage is not configured yet; Nexus will show this workstation as Needs storage setup.'
   }
 } finally {
-  Remove-Item $tmpAgent,$tmpRestic -Force -ErrorAction SilentlyContinue
+  Remove-Item $tmpAgent,$tmpRestic,$tmpCa -Force -ErrorAction SilentlyContinue
+  Remove-Item Env:NEXUS_BACKUP_TOKEN,Env:NEXUS_BACKUP_REPOSITORY,Env:NEXUS_BACKUP_REST_USERNAME,Env:NEXUS_BACKUP_REST_PASSWORD,Env:NEXUS_BACKUP_REPOSITORY_CA_B64,Env:NEXUS_BACKUP_REPOSITORY_CA_SHA256,Env:NEXUS_BACKUP_RESTIC_PASSWORD -ErrorAction SilentlyContinue
 }

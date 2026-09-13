@@ -24,6 +24,9 @@ type config struct {
 	Repository    string `json:"repository"`
 	PasswordFile  string `json:"passwordFile"`
 	ResticPath    string `json:"resticPath"`
+	RestUsername  string `json:"restUsername,omitempty"`
+	RestPassword  string `json:"restPassword,omitempty"`
+	CACertPath    string `json:"caCertPath,omitempty"`
 	PollSeconds   int    `json:"pollSeconds"`
 	ReportSeconds int    `json:"reportSeconds"`
 	AutoInit      bool   `json:"autoInit"`
@@ -304,15 +307,7 @@ func (a *agent) executeBackup(run workstationRun) {
 }
 
 func (a *agent) repositoryReady() bool {
-	if strings.TrimSpace(a.cfg.Repository) == "" || strings.TrimSpace(a.cfg.PasswordFile) == "" {
-		return false
-	}
-	info, err := os.Stat(a.cfg.PasswordFile)
-	if err != nil || info.IsDir() {
-		return false
-	}
-	content, err := os.ReadFile(a.cfg.PasswordFile)
-	return err == nil && strings.TrimSpace(string(content)) != ""
+	return validateRepositoryConfig(a.cfg) == nil
 }
 
 func configPathFromArgs(args []string) string {
@@ -345,11 +340,20 @@ func loadConfig(path string) (config, error) {
 	cfg.Repository = strings.TrimSpace(cfg.Repository)
 	cfg.PasswordFile = strings.TrimSpace(cfg.PasswordFile)
 	cfg.ResticPath = strings.TrimSpace(cfg.ResticPath)
+	cfg.RestUsername = strings.TrimSpace(cfg.RestUsername)
+	cfg.RestPassword = strings.TrimSpace(cfg.RestPassword)
+	cfg.CACertPath = strings.TrimSpace(cfg.CACertPath)
 	if cfg.ServerURL == "" || (!strings.HasPrefix(cfg.ServerURL, "http://") && !strings.HasPrefix(cfg.ServerURL, "https://")) {
 		return config{}, errors.New("serverUrl must be http(s)")
 	}
 	if len(cfg.DeviceToken) < 24 {
 		return config{}, errors.New("deviceToken is missing or invalid")
+	}
+	if (cfg.RestUsername == "") != (cfg.RestPassword == "") {
+		return config{}, errors.New("REST transport username and password must be configured together")
+	}
+	if cfg.CACertPath != "" && !filepath.IsAbs(cfg.CACertPath) {
+		return config{}, errors.New("caCertPath must be an absolute local path")
 	}
 	if cfg.ResticPath == "" {
 		cfg.ResticPath = "restic.exe"
