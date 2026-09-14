@@ -9,6 +9,7 @@ import { createBackupPlanService } from "../lib/backup-plans.mjs";
 import { createPlanMaintenanceService, enrichPlanJob } from "../lib/plan-maintenance.mjs";
 import { listAgents, listJobs, loadSanitizedAgentConfig } from "../lib/dashboard-data.mjs";
 import { listRepositoryInventories, queueRepositoryInventory } from "../lib/repository-inventory.mjs";
+import { createRepositorySettingsService } from "../lib/repository-settings.mjs";
 import { getRuntimeTelemetry, recordRuntimeEvents } from "../lib/runtime-telemetry.mjs";
 import { getSnapshotBrowse, queueRestorePreview, queueSnapshotBrowse } from "../lib/snapshot-restore.mjs";
 import { openSqliteD1 } from "../lib/sqlite-d1.mjs";
@@ -76,6 +77,7 @@ const planService = createBackupPlanService({
   loadAgentConfig: () => loadSanitizedAgentConfig(agentConfigPath),
 });
 const maintenanceService = createPlanMaintenanceService({ db, enqueueJob });
+const repositorySettingsService = createRepositorySettingsService();
 
 const recoveryTimer = setInterval(() => {
   api.recover(env).catch((error) => log("error", "lease recovery failed", { error: serializeError(error) }));
@@ -116,6 +118,7 @@ const STATIC_FILES = new Map([
   ["/plans.js", ["plans.js", "text/javascript; charset=utf-8"]],
   ["/maintenance.js", ["maintenance.js", "text/javascript; charset=utf-8"]],
   ["/repository-inventory.js", ["repository-inventory.js", "text/javascript; charset=utf-8"]],
+  ["/repository-settings.js", ["repository-settings.js", "text/javascript; charset=utf-8"]],
   ["/transfers.js", ["transfers.js", "text/javascript; charset=utf-8"]],
   ["/styles.css", ["styles.css", "text/css; charset=utf-8"]],
   ["/telemetry.css", ["telemetry.css", "text/css; charset=utf-8"]],
@@ -156,6 +159,15 @@ const server = createServer(async (request, response) => {
 
     if (path === "/v1/local/config" && request.method === "GET") {
       sendJson(response, 200, await loadSanitizedAgentConfig(agentConfigPath));
+      return;
+    }
+
+    if (path === "/v1/local/repository-settings" && request.method === "GET") {
+      sendJson(response, 200, await repositorySettingsService.get());
+      return;
+    }
+    if (path === "/v1/local/repository-settings" && request.method === "PUT") {
+      sendJson(response, 200, await repositorySettingsService.update(await readJsonBody(request)));
       return;
     }
 
