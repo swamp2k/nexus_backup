@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Container version="2">
+  <Beta>True</Beta>
+  <Name>NexusBackup</Name>
+  <Repository>ghcr.io/swamp2k/nexus-backup:latest</Repository>
+  <Registry>https://github.com/users/swamp2k/packages/container/nexus-backup</Registry>
+  <Network>host</Network>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/swamp2k/nexus_backup/issues</Support>
+  <Project>https://github.com/swamp2k/nexus_backup</Project>
+  <Overview>Nexus Backup is a self-contained local-first backup, recovery and transfer appliance for Unraid. One container runs the dashboard/control plane, local execution agent and TLS Restic workstation repository endpoint as coordinated internal services. Normal operation does not require privileged mode, SYS_ADMIN, FUSE or a separate companion app.</Overview>
+  <Category>Backup: Tools:</Category>
+  <WebUI>http://[IP]:8787/</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/swamp2k/nexus_backup/main/unraid/templates/nexus-backup.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/swamp2k/nexus_backup/main/apps/local-server/web/favicon.svg</Icon>
+  <ExtraParams></ExtraParams>
+  <PostArgs/>
+  <Requires>Set Repository host to the LAN DNS name or IPv4 address Windows workstations use to reach this Unraid host. Review the source, backup, restore and download mappings before enabling jobs. Only add SYS_ADMIN and /dev/fuse manually if you deliberately enable the optional rclone-mounted remote-source feature.</Requires>
+
+  <Config Name="Appdata" Target="/config" Default="/mnt/user/appdata/nexus-backup" Mode="rw" Description="Persistent Nexus configuration. Internally separated into Control, Agent and Repository subdirectories. Repository TLS keys and transport credentials under this path are secrets." Type="Path" Display="always" Required="true" Mask="false"/>
+  <Config Name="Agent state/cache" Target="/state" Default="/mnt/user/appdata/nexus-backup-state" Mode="rw" Description="Persistent rclone VFS, mount state and Restic cache. May be placed on cache storage." Type="Path" Display="advanced" Required="true" Mask="false"/>
+  <Config Name="Backup source root" Target="/data" Default="/mnt/user/nexus-backup-source" Mode="ro" Description="Read-only host data visible to generic Nexus backup jobs. Point this at the specific share/directory to protect; avoid mapping the whole /mnt/user tree unless deliberately required." Type="Path" Display="always" Required="true" Mask="false"/>
+  <Config Name="Backup repository root" Target="/backup" Default="/mnt/user/backups/nexus-backup" Mode="rw" Description="Nexus-managed backup storage. Generic repositories use /backup/generic and Windows workstation repositories use /backup/workstations." Type="Path" Display="always" Required="true" Mask="false"/>
+  <Config Name="Restore staging root" Target="/restore" Default="/mnt/user/restore/nexus-backup" Mode="rw" Description="Host staging area for restore jobs. Nexus writes only fresh generated staging directories here; restores are never in-place." Type="Path" Display="always" Required="true" Mask="false"/>
+  <Config Name="Transfer destination root" Target="/downloads" Default="/mnt/user/downloads" Mode="rw" Description="Default local destination root for managed Copyarr-style transfers. Change this to the intended import/download share." Type="Path" Display="always" Required="true" Mask="false"/>
+
+  <Config Name="Repository host" Target="NEXUS_BACKUP_REPOSITORY_HOST" Default="" Description="LAN DNS name or IPv4 address used by Windows workstations, for example tower.local or 192.168.1.20. Used in the self-signed Repository TLS certificate." Type="Variable" Display="always" Required="true" Mask="false"/>
+  <Config Name="Repository TLS port" Target="NEXUS_BACKUP_REPOSITORY_PORT" Default="8000" Description="TLS Restic REST port exposed by this same Nexus Backup container." Type="Variable" Display="always" Required="true" Mask="false"/>
+  <Config Name="Initial workstation user" Target="NEXUS_BACKUP_REPOSITORY_INITIAL_USER" Default="nexus-workstation" Description="Creates one initial private REST transport principal if missing. Additional per-workstation users can be created from the NexusBackup container console with nexus-repository-client." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Agent ID" Target="NEXUS_BACKUP_AGENT_ID" Default="local-agent" Description="Internal local execution-agent identity." Type="Variable" Display="advanced" Required="true" Mask="false"/>
+  <Config Name="Public URL" Target="NEXUS_BACKUP_PUBLIC_URL" Default="" Description="Optional explicit external http(s) origin when Nexus is behind a trusted reverse proxy. Forwarded Host/Proto headers are intentionally ignored." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+</Container>

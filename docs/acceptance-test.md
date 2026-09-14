@@ -2,72 +2,70 @@
 
 This is the required real-machine proof before moving a workstation backup workload from PCWatch-backup to Nexus Backup.
 
-The procedure is deliberately destructive only to **disposable test data, a dedicated NexusBackup-Repository namespace and Nexus-generated restore staging**. It must not modify, repoint, disable or share storage with PCWatch-backup or any existing production backup.
+The procedure is destructive only to **disposable test data, a dedicated workstation Repository namespace and Nexus-generated restore staging**. PCWatch-backup and standalone Copyarr remain unchanged throughout.
 
-Passing automated CI is a prerequisite, not a substitute for this test.
+Automated CI and a published image are prerequisites, not substitutes for this test.
 
 ## 1. Hard safety boundaries
 
-Use all of the following:
+Use:
 
 ```text
 Windows source:       C:\NexusBackup-Test
 Reference manifest:   C:\NexusBackup-Test-reference.json   (outside source root)
-Repository transport: NexusBackup-Repository over TLS
-Repository namespace: a brand-new per-workstation acceptance namespace
+Repository transport: Nexus Backup port 8000 over pinned TLS
+Repository namespace: brand-new per-workstation acceptance namespace
 Restore destination:  Nexus-generated workstation staging only
 ```
 
-NexusBackup-Agent `/backup` is **not** the workstation endpoint. The intended proof is:
+The intended proof is:
 
 ```text
-Balder-PC Restic -> TLS -> NexusBackup-Repository -> isolated Unraid storage
+Balder-PC Restic -> TLS -> NexusBackup appliance Repository process -> /backup/workstations
 ```
 
-Keep PCWatch-backup and standalone Copyarr running exactly as they were. They must not touch the acceptance repository.
+Keep PCWatch-backup and standalone Copyarr running exactly as they were.
 
-### Stop immediately if
+Stop immediately if:
 
-- the Repository container is mapped to a PCWatch/production repository tree;
-- the workstation Repository URL/namespace is not unquestionably the disposable acceptance namespace;
-- snapshot inventory contains unexpected old/production snapshots before the first test backup;
-- the Recovery UI offers an arbitrary destination, overwrite control or delete option;
-- a write restore targets anything except a newly generated staging directory;
+- `/backup` points at a PCWatch/production repository tree;
+- the workstation namespace is not unquestionably disposable;
+- snapshot inventory contains unexpected production snapshots before the first test backup;
+- Recovery offers an arbitrary destination, overwrite control or delete option;
+- a write restore targets anything except a fresh generated staging directory;
 - a failed/partial operation replaces the recorded last successful snapshot;
-- generic Agent and workstation Repository storage overlap;
 - any step requires exposing Repository transport credentials or the Restic encryption password to Control/browser/API.
 
 ## 2. Record the test identity
 
-Before creating data, record:
+Before creating data record only non-secret identity/evidence:
 
 - date/time;
-- Nexus Control image version/digest;
-- Nexus Agent image version/digest;
-- Nexus Repository image version/digest;
+- exact Nexus Backup appliance version and immutable image digest;
+- image `org.opencontainers.image.revision`;
 - Windows workstation-agent version;
 - workstation/device name shown by Nexus;
-- dedicated Repository principal + repository name **without the password**;
-- Repository LAN host and TLS port, without credentials;
+- Repository principal + namespace **without password**;
+- Repository LAN host and TLS port;
 - current last-success/snapshot state, if any.
 
-Control, Agent and Repository should be the same coordinated Nexus release. The workstation payload must be the one served by that Control release.
+The workstation payload must be the one bundled by that exact appliance image.
 
-## 3. Provision the isolated Nexus Repository namespace
+## 3. Provision the isolated Repository namespace
 
-Repository must already be installed as described in `docs/fresh-install.md` and use dedicated workstation storage such as:
+The single `NexusBackup` container must already be installed according to `docs/fresh-install.md`, with workstation storage beneath:
 
 ```text
-/mnt/user/backups/nexus-backup/workstations
+/backup/workstations
 ```
 
-For this test create/reuse only the dedicated Balder acceptance principal/namespace from the Repository container console:
+Create/reuse only the dedicated acceptance principal from the **NexusBackup container console**:
 
 ```sh
 nexus-repository-client balder-pc acceptance
 ```
 
-The command prints local PowerShell environment lines containing:
+It prints local PowerShell environment values for:
 
 ```text
 NEXUS_BACKUP_REPOSITORY
@@ -77,29 +75,27 @@ NEXUS_BACKUP_REPOSITORY_CA_B64
 NEXUS_BACKUP_REPOSITORY_CA_SHA256
 ```
 
-Do **not** put those values in the acceptance report. The public CA is carried directly in the local helper output; Repository exposes no HTTP bootstrap port. The installer decodes that exact CA and refuses it unless `NEXUS_BACKUP_REPOSITORY_CA_SHA256` matches.
+Do not put those secret-bearing values in the acceptance report.
 
-In the same elevated PowerShell that will run the Nexus workstation installer, paste those environment lines and add a new disposable Restic encryption password:
+In the same elevated PowerShell used for installation, paste the helper output and add a new disposable Restic encryption password:
 
 ```powershell
 $env:NEXUS_BACKUP_RESTIC_PASSWORD='<new disposable acceptance encryption password>'
 ```
 
-Then use Nexus **Add workstation** and run its generated one-line install/enrollment command.
+Then use Nexus **Add workstation** and run the generated one-line installer.
 
-The install is acceptable only if it:
+Pass provisioning only if it:
 
-- decodes and verifies the locally supplied CA SHA before trusting Repository TLS;
-- initializes the exact new acceptance namespace or verifies it if already initialized;
+- verifies the locally supplied CA SHA before trusting Repository TLS;
+- initializes/verifies the exact acceptance namespace;
 - leaves remote runtime `autoInit=false`;
-- stores Repository transport + encryption secrets locally below `%ProgramData%\NexusBackup` with SYSTEM/Admin-only ACL;
-- brings the workstation online as storage-ready without exposing those secrets to Control.
+- stores transport + encryption secrets only below `%ProgramData%\NexusBackup` with SYSTEM/Admin ACL;
+- brings the workstation online/storage-ready without exposing those secrets to Control.
 
-If Repository auth/TLS/network provisioning fails, fix the provisioning problem. Do not loosen runtime auto-init or switch to a production repository.
+## 4. Create deterministic source data and independent reference
 
-## 4. Create deterministic source data and independent reference manifest
-
-Run PowerShell on the workstation. This replaces only the disposable source/reference paths:
+Run on the workstation:
 
 ```powershell
 $root = 'C:\NexusBackup-Test'
@@ -128,9 +124,9 @@ $manifest | ConvertTo-Json -Depth 3 | Set-Content -Encoding UTF8 $reference
 Get-Content $reference
 ```
 
-Keep the reference outside the source root so the backup cannot restore its own expected-answer file.
+The reference stays outside the source root so backup cannot restore its own expected answer.
 
-## 5. Configure the workstation policy for test data only
+## 5. Configure only the disposable source
 
 The only acceptance source is:
 
@@ -138,34 +134,23 @@ The only acceptance source is:
 C:\NexusBackup-Test
 ```
 
-Use **Run now** so timing is explicit. Before starting verify:
-
-- workstation is online and storage-ready;
-- Repository container is healthy;
-- the namespace is `balder-pc/acceptance` (or your explicitly recorded equivalent);
-- no other workstation operation is active;
-- there are no unexpected snapshots;
-- no normal user/profile/application path has been added.
+Use **Run now**. Before starting verify workstation online/storage-ready, no unrelated operation active, correct disposable namespace, and no unexpected snapshots.
 
 ## 6. Baseline backup
 
-Choose **Run now**.
+Run backup and require:
 
-Pass conditions:
+- `completed`, not `partial`/`failed`;
+- snapshot ID recorded;
+- last-success points at that run;
+- `/backup/workstations` receives the isolated repository data;
+- no Repository URL/username/password/CA path/encryption password appears in Control-visible telemetry/errors.
 
-- run reaches `completed`, not `partial` or `failed`;
-- a snapshot ID is recorded;
-- last-success points to this completed backup;
-- the isolated Repository namespace receives the snapshot;
-- no Repository URL, username, transport password, CA path or encryption password appears in Control/browser-visible telemetry/errors.
+Record only run ID and snapshot ID.
 
-Record only the run ID and snapshot ID as evidence.
+## 7. Inventory, browse and integrity
 
-## 7. Snapshot inventory and browse
-
-Refresh Recovery snapshot inventory and verify the new snapshot belongs to this test workstation. Browse until the `NexusBackup-Test` tree is identifiable.
-
-Verify at least:
+Refresh workstation Recovery inventory and find:
 
 ```text
 alpha.txt
@@ -174,50 +159,24 @@ nested/beta.txt
 binary-zero-1MiB.bin
 ```
 
-Any unrelated snapshot/production path is a stop condition.
+Then run workstation **repository integrity check**. Require **Integrity OK** while previous successful backup/snapshot state remains unchanged.
 
-## 8. Repository integrity
+`restic check` is consistency evidence only; continue to a real restore.
 
-Run workstation **repository integrity check**.
+## 8. Dry-run preview and real staging restore
 
-Pass conditions:
+Run a dry-run preview for the test tree. Verify no browser-provided destination, overwrite or delete control exists.
 
-- operation completes successfully;
-- UI reports **Integrity OK**;
-- prior successful backup/snapshot remains unchanged;
-- telemetry remains secret-free.
+After the preview completes, enter the exact confirmation phrase and start write restore. Require:
 
-`restic check` is consistency evidence only. Continue to real restore proof.
-
-## 9. Dry-run restore preview
-
-Select the complete test source tree (or whole acceptance snapshot if needed) and run dry-run preview.
-
-Verify:
-
-- it is explicitly dry-run;
-- snapshot/path scope matches expectation;
-- no browser-provided Windows destination is requested;
-- no overwrite/delete control exists;
-- confirmation is available only after the preview completes.
-
-## 10. Real staging restore
-
-Enter the exact confirmation phrase and start the real restore.
-
-Pass conditions:
-
-- a **new** workstation-generated staging path is used;
+- a fresh workstation-generated staging path;
 - live `C:\NexusBackup-Test` is never an output destination;
-- restore completes;
-- `--overwrite never` remains in force;
-- result reports the staging target.
+- `--overwrite never` and no `--delete`;
+- restore completes and reports the staging target.
 
-Locate the restored `NexusBackup-Test` directory beneath that staging target; do not assume an internal drive/path layout.
+## 9. Independent byte/hash verification
 
-## 11. Independent byte/hash/content verification
-
-Set `$restoredRoot` to the restored test directory and run:
+Set `$restoredRoot` to the restored test directory beneath the reported staging target:
 
 ```powershell
 $restoredRoot = '<restored NexusBackup-Test directory beneath the reported staging target>'
@@ -234,7 +193,6 @@ $actual = Get-ChildItem $restoredRoot -File -Recurse | ForEach-Object {
 
 $actualByPath = @{}
 foreach ($item in $actual) { $actualByPath[$item.Path] = $item }
-
 $failures = New-Object System.Collections.Generic.List[string]
 foreach ($item in $expected) {
     if (-not $actualByPath.ContainsKey($item.Path)) {
@@ -245,46 +203,35 @@ foreach ($item in $expected) {
     if ([int64]$got.Length -ne [int64]$item.Length) { $failures.Add("length mismatch: $($item.Path)") }
     if ($got.Sha256 -ne $item.Sha256) { $failures.Add("sha256 mismatch: $($item.Path)") }
 }
-
 $expectedPaths = @($expected | ForEach-Object { $_.Path })
 foreach ($item in $actual) {
     if ($expectedPaths -notcontains $item.Path) { $failures.Add("unexpected file: $($item.Path)") }
 }
-
 if ($failures.Count -gt 0) {
     $failures | ForEach-Object { Write-Error $_ }
     throw 'Nexus Backup acceptance restore verification FAILED'
 }
-
 Write-Host 'Nexus Backup acceptance restore verification PASSED'
 ```
 
 This is the core acceptance gate. Do not continue to resilience tests unless it passes.
 
-## 12. Idle Control restart
+## 10. Whole-appliance restart
 
-With no operation active restart only `NexusBackup-Control`.
+With no operation active, restart **NexusBackup** once from Unraid.
 
-Verify local admin login, device/policy/history, last-success state and workstation reconnect all survive. No Repository/encryption secret may need to be entered into Control.
+Require all of the following after the same single container returns:
 
-## 13. Generic Agent restart
+- local admin login and Control history/policies preserved;
+- internal Agent returns online with its inert/explicit config intact;
+- Repository TLS certificate/CA SHA is unchanged because `/config/repository` persisted;
+- acceptance namespace and snapshots remain present;
+- workstation reconnects without reprovisioning;
+- integrity check returns **Integrity OK**.
 
-Restart `NexusBackup-Agent` while idle. Verify its token/config survive and dashboard metadata stays sanitized. Workstation backup bytes do not pass through this Agent.
+If an ordinary appliance restart changes Repository CA with the same `/config`, fail/investigate.
 
-## 14. Repository restart
-
-Restart **only** `NexusBackup-Repository` while idle.
-
-Verify:
-
-- TLS certificate/CA SHA remains unchanged because Repository `/config` persisted;
-- workstation repository operations work without reprovisioning;
-- acceptance namespace/snapshot remain present;
-- generic Agent state is unaffected.
-
-If the CA changes after an ordinary restart with the same `/config`, fail/investigate.
-
-## 15. Workstation-agent restart
+## 11. Workstation-agent restart
 
 With no workstation operation active:
 
@@ -294,11 +241,11 @@ Start-Sleep -Seconds 5
 Start-ScheduledTask -TaskName NexusBackupWorkstation
 ```
 
-Verify it returns online using durable local credentials and prior successful state remains intact.
+Require durable local credential reconnect and unchanged prior successful state.
 
-## 16. Temporary Control-path outage during active backup
+## 12. Temporary Control-path outage during active backup
 
-If the baseline dataset finishes too quickly, add a disposable deterministic pseudo-random file:
+If baseline data is too small, add a deterministic disposable 512 MiB file:
 
 ```powershell
 $path = 'C:\NexusBackup-Test\resilience-random.bin'
@@ -315,130 +262,115 @@ try {
 } finally { $stream.Dispose() }
 ```
 
-Regenerate the reference manifest if this snapshot will later be verified.
+Regenerate the reference manifest before any later verified snapshot.
 
-Start **Run now** and wait for active progress. Block **only Control 8787** from the workstation; Repository TLS 8000 must remain reachable:
+Start **Run now**, wait for active progress, then block **only port 8787** from Windows. Repository port 8000 must remain reachable:
 
 ```powershell
-$controlIp = '<Unraid/Nexus Control IP>'
+$nexusIp = '<Unraid/Nexus IP>'
 New-NetFirewallRule -DisplayName 'NexusBackup-Acceptance-Block-Control' `
-    -Direction Outbound -Action Block -Protocol TCP -RemoteAddress $controlIp -RemotePort 8787
+    -Direction Outbound -Action Block -Protocol TCP -RemoteAddress $nexusIp -RemotePort 8787
+try { Start-Sleep -Seconds 15 }
+finally { Remove-NetFirewallRule -DisplayName 'NexusBackup-Acceptance-Block-Control' -ErrorAction SilentlyContinue }
+```
+
+Require Repository traffic to continue, no fabricated success, and previous known-good success preserved if the run ultimately fails.
+
+## 13. Repository-path outage without stopping the appliance
+
+Because Control/Agent/Repository now share one container, do **not** stop a separate Repository container; none exists.
+
+Instead block only Repository port 8000 from the workstation while leaving Control 8787 reachable:
+
+```powershell
+$nexusIp = '<Unraid/Nexus IP>'
+New-NetFirewallRule -DisplayName 'NexusBackup-Acceptance-Block-Repository' `
+    -Direction Outbound -Action Block -Protocol TCP -RemoteAddress $nexusIp -RemotePort 8000
 try {
-    Start-Sleep -Seconds 15
+    # While this rule exists, request workstation repository integrity from Nexus.
+    Start-Sleep -Seconds 30
 } finally {
-    Remove-NetFirewallRule -DisplayName 'NexusBackup-Acceptance-Block-Control' -ErrorAction SilentlyContinue
+    Remove-NetFirewallRule -DisplayName 'NexusBackup-Acceptance-Block-Repository' -ErrorAction SilentlyContinue
 }
 ```
 
-Pass conditions:
+Require:
 
-- local Restic backup is not immediately killed by transient Control loss;
-- Repository traffic continues over 8000;
-- after Control returns, result is truthful — completed/ACKed or failed, never fabricated success;
-- previous known-good success remains if this run fails.
-
-## 17. Repository unavailable
-
-Stop **only the disposable `NexusBackup-Repository` container**. Do not alter `/config` or `/data`, and do not touch PCWatch storage.
-
-Run workstation repository integrity while Repository is stopped.
-
-Pass conditions:
-
-- check fails clearly;
+- integrity operation fails clearly while 8000 is blocked;
 - no remote `restic init` is attempted;
 - last successful backup/snapshot stays unchanged;
-- failure text visible through Control is redacted of repository/credential details.
+- failure text remains secret-redacted;
+- after removing the rule, a new integrity run returns **Integrity OK** without reprovisioning.
 
-Start Repository again and require a new integrity run to return **Integrity OK** without workstation reprovisioning.
+This isolates Repository-path failure without destroying the one-appliance process model.
 
-## 18. Interrupted write restore
+## 14. Interrupted write restore
 
-Use a snapshot large enough to keep staging restore active long enough to interrupt.
+Use a snapshot large enough to keep restore active:
 
 1. complete a fresh dry-run preview;
-2. type the exact confirmation and start write restore;
-3. while active stop the workstation task:
-
-```powershell
-Stop-ScheduledTask -TaskName NexusBackupWorkstation
-```
-
+2. confirm and start write restore;
+3. while active run `Stop-ScheduledTask -TaskName NexusBackupWorkstation`;
 4. allow lease/recovery logic to observe interruption;
-5. restart:
+5. restart with `Start-ScheduledTask -TaskName NexusBackupWorkstation`.
 
-```powershell
-Start-ScheduledTask -TaskName NexusBackupWorkstation
-```
+Require interrupted restore never becomes completed, is never auto-replayed, prior success remains intact, and a fresh preview/retry receives a **different staging target**.
 
-Pass conditions:
+## 15. Final post-fault proof
 
-- interrupted restore never becomes completed;
-- it is not auto-requeued/replayed;
-- orphaned partial staging is disposable evidence only;
-- last successful backup remains unchanged;
-- fresh retry requires a current preview/confirmation;
-- fresh retry gets a **different new staging target**.
-
-Never copy interrupted staging into live data.
-
-## 19. Final post-fault verification
-
-After all services are healthy:
+After everything is healthy:
 
 1. require **Integrity OK**;
-2. if test source changed, regenerate the independent reference manifest **before** final backup;
-3. run a final normal backup;
-4. perform final staging restore;
+2. if source changed, regenerate the independent reference **before** backup;
+3. run final normal backup;
+4. run final fresh staging restore;
 5. repeat independent byte/hash verification.
 
-Do not modify source/reference between final backup and comparison. Acceptance must end on a known-good restore.
+Acceptance must finish on a known-good restored byte-for-byte result.
 
-## 20. Evidence to retain
+## 16. Evidence to retain
 
 Keep only non-secret evidence:
 
-- exact Control/Agent/Repository versions + digests;
+- exact appliance version + immutable digest + revision;
 - workstation-agent version;
-- principal/repository names, no password;
-- baseline and final run/snapshot IDs;
+- principal/namespace names, no passwords;
+- baseline/final run and snapshot IDs;
 - integrity results;
 - preview/restore run IDs;
 - hash-verification PASS outputs;
-- Control/Agent/Repository/workstation restart observations;
-- Control outage result;
-- Repository unavailable result;
+- appliance/workstation restart observations;
+- Control-port outage result;
+- Repository-port outage result;
 - interrupted restore/new-staging proof;
-- final integrity + final restore/hash PASS.
+- final integrity + restore/hash PASS.
 
-Do **not** retain raw tokens, REST transport passwords, Restic encryption passwords, CA private keys, rclone tokens or secret-bearing config files in the acceptance report.
+Never retain raw tokens, REST passwords, Restic encryption passwords, CA private keys, rclone tokens or secret-bearing configs in the acceptance report.
 
-## 21. PASS / FAIL
+## 17. PASS / FAIL
 
-Acceptance is **PASS** only if:
+PASS requires all of these:
 
-- backup bytes reach the intended isolated NexusBackup-Repository storage;
+- backup bytes reach isolated `/backup/workstations` through Repository TLS;
 - inventory/browse are correct;
-- repository integrity is OK when healthy;
+- integrity is healthy when Repository is reachable;
 - preview/write restore safety boundaries hold;
 - restored bytes match the independent manifest;
-- Control/Agent/Repository/workstation restarts preserve expected state;
-- transient Control loss does not invent success or unsafe cancellation;
-- Repository outage is truthful and never triggers remote auto-init;
+- whole-appliance restart preserves Control, Agent and Repository state;
+- transient Control loss does not invent success/unsafe cancellation;
+- Repository-path outage is truthful and never triggers remote auto-init;
 - interrupted restore is manual-retry-only and never writes in place;
 - final post-fault staging restore again passes hash verification.
 
 Anything else is **FAIL / INVESTIGATE**. Do not cut over the workstation.
 
-## 22. After a PASS
+## 18. After a PASS
 
-A PASS proves the isolated Balder-PC -> NexusBackup-Repository -> Unraid data path. It does **not** authorize production migration yet.
+A PASS proves the isolated Balder-PC -> NexusBackup appliance -> Unraid path. It still does **not** authorize production migration.
 
-Keep PCWatch-backup unchanged until a later cutover explicitly:
+Keep PCWatch-backup unchanged until later cutover explicitly:
 
-- provides a production repository/retention plan;
-- proves workstation Restic encryption-key recovery and Repository `/config` recovery from off-host material;
+- provides the production repository/retention plan;
+- proves workstation Restic encryption-key recovery and `/config/repository` off-host recovery;
 - cuts over one workstation at a time;
 - guarantees PCWatch and Nexus never write the same Restic repository concurrently.
-
-Only after those recovery/cutover gates should the corresponding production workload move away from PCWatch-backup.

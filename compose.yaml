@@ -1,78 +1,35 @@
 name: nexus-backup
 
 services:
-  control:
-    image: ghcr.io/swamp2k/nexus-backup-control:${NEXUS_BACKUP_IMAGE_TAG:-latest}
+  nexus-backup:
+    image: ghcr.io/swamp2k/nexus-backup:${NEXUS_BACKUP_IMAGE_TAG:-latest}
     build:
       context: .
-      dockerfile: Dockerfile.local
+      dockerfile: Dockerfile
       args:
         NEXUS_BACKUP_VERSION: ${NEXUS_BACKUP_VERSION:-dev}
         NEXUS_BACKUP_REVISION: ${NEXUS_BACKUP_REVISION:-unknown}
     restart: unless-stopped
-    ports:
-      - "${NEXUS_BACKUP_PORT:-8787}:8787"
+    network_mode: host
     environment:
-      NEXUS_BACKUP_AGENT_ID: local-agent
-      NEXUS_BACKUP_AGENT_CONFIG: /agent-config/agent.json
+      NEXUS_BACKUP_AGENT_ID: ${NEXUS_BACKUP_AGENT_ID:-local-agent}
       NEXUS_BACKUP_PUBLIC_URL: ${NEXUS_BACKUP_PUBLIC_URL:-}
+      NEXUS_BACKUP_REPOSITORY_HOST: ${NEXUS_BACKUP_REPOSITORY_HOST:-localhost}
+      NEXUS_BACKUP_REPOSITORY_PORT: ${NEXUS_BACKUP_REPOSITORY_PORT:-8000}
+      NEXUS_BACKUP_REPOSITORY_INITIAL_USER: ${NEXUS_BACKUP_REPOSITORY_INITIAL_USER:-nexus-workstation}
     volumes:
-      - control-config:/config
-      - runtime:/run/nexus-backup
-      - agent-config:/agent-config:ro
+      - nexus-config:/config
+      - nexus-state:/state
+      - ${NEXUS_BACKUP_DATA_PATH:-./.local/data}:/data:ro
+      - ${NEXUS_BACKUP_BACKUP_PATH:-./.local/backup}:/backup
+      - ${NEXUS_BACKUP_RESTORE_PATH:-./.local/restore}:/restore
+      - ${NEXUS_BACKUP_TRANSFER_PATH:-./.local/downloads}:/downloads
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 10s
       timeout: 5s
       retries: 6
 
-  agent:
-    image: ghcr.io/swamp2k/nexus-backup-agent:${NEXUS_BACKUP_IMAGE_TAG:-latest}
-    build:
-      context: .
-      dockerfile: Dockerfile.agent
-      args:
-        NEXUS_BACKUP_VERSION: ${NEXUS_BACKUP_VERSION:-dev}
-        NEXUS_BACKUP_REVISION: ${NEXUS_BACKUP_REVISION:-unknown}
-    restart: unless-stopped
-    depends_on:
-      control:
-        condition: service_healthy
-    environment:
-      NEXUS_BACKUP_URL: http://control:8787
-      NEXUS_BACKUP_AGENT_ID: local-agent
-      NEXUS_BACKUP_AGENT_TOKEN_FILE: /run/nexus-backup/agent-token
-    volumes:
-      - runtime:/run/nexus-backup:ro
-      - agent-config:/config
-      - agent-state:/state
-      - ${NEXUS_BACKUP_DATA_PATH:-./.local/data}:/data:ro
-      - ${NEXUS_BACKUP_BACKUP_PATH:-./.local/backup}:/backup
-      - ${NEXUS_BACKUP_RESTORE_PATH:-./.local/restore}:/restore
-      - ${NEXUS_BACKUP_TRANSFER_PATH:-./.local/downloads}:/downloads
-
-  repository:
-    image: ghcr.io/swamp2k/nexus-backup-repository:${NEXUS_BACKUP_IMAGE_TAG:-latest}
-    build:
-      context: .
-      dockerfile: Dockerfile.repository
-      args:
-        NEXUS_BACKUP_VERSION: ${NEXUS_BACKUP_VERSION:-dev}
-        NEXUS_BACKUP_REVISION: ${NEXUS_BACKUP_REVISION:-unknown}
-    restart: unless-stopped
-    ports:
-      - "${NEXUS_BACKUP_REPOSITORY_PORT:-8000}:${NEXUS_BACKUP_REPOSITORY_PORT:-8000}"
-    environment:
-      NEXUS_BACKUP_REPOSITORY_HOST: ${NEXUS_BACKUP_REPOSITORY_HOST:-localhost}
-      NEXUS_BACKUP_REPOSITORY_PORT: ${NEXUS_BACKUP_REPOSITORY_PORT:-8000}
-      NEXUS_BACKUP_REPOSITORY_INITIAL_USER: ${NEXUS_BACKUP_REPOSITORY_INITIAL_USER:-nexus-workstation}
-    volumes:
-      - repository-config:/config
-      - ${NEXUS_BACKUP_WORKSTATION_REPOSITORY_PATH:-./.local/workstation-repositories}:/data
-
 volumes:
-  control-config:
-  runtime:
-  agent-config:
-  agent-state:
-  repository-config:
+  nexus-config:
+  nexus-state:

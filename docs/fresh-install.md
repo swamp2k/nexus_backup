@@ -1,114 +1,124 @@
 # Fresh install: Unraid + Windows workstation
 
-This runbook installs Nexus Backup from a clean state without relying on prior chat history. It is intentionally conservative and describes the current local-first beta architecture.
+This runbook installs Nexus Backup from a clean state using the current **one-app / one-container** Unraid architecture.
 
 It does **not** cut over any existing production backup workload. PCWatch-backup and standalone Copyarr remain untouched until the isolated acceptance procedure in `docs/acceptance-test.md` has passed and a later cutover is explicitly approved.
 
 ## 1. Deployment model
 
-Nexus Backup is one product split into three Unraid containers plus a Windows workstation agent:
+Nexus Backup is one Unraid container plus an optional Windows workstation agent.
+
+Inside the container, three coordinated internal services run together:
 
 ```text
 Browser
-  -> NexusBackup-Control
+  -> Control (:8787)
        - UI/API
        - local auth
        - SQLite
        - schedules/job state
 
-NexusBackup-Agent
-  - generic Restic/rclone execution
-  - generic source/repository mappings
-  - generic local repository/rclone credentials
-  - optional FUSE only for remote-as-mounted-source backups
+Agent
+  - generic Restic/rclone/transfer execution
+  - local source/repository mappings
+  - talks to Control only at 127.0.0.1
 
-NexusBackup-Repository
-  - TLS-authenticated Restic REST endpoint for Windows workstations
+Repository (:8000 TLS)
+  - Restic REST endpoint for Windows workstations
   - dedicated workstation repository storage
-  - local TLS private key + bcrypt transport authentication
-  - no Control DB, source-data, restore-staging or Restic encryption-password access
+  - local TLS + bcrypt transport authentication
 
 Windows workstation agent
   - runs backup/recovery locally on Windows
-  - talks directly to NexusBackup-Repository for backup bytes
+  - sends backup bytes directly to Repository
   - owns its Restic encryption password and REST transport credential locally
   - talks to Control only for metadata/orchestration
 ```
 
-The workstation data path is therefore:
+The workstation data path remains:
 
 ```text
-Windows Restic -> TLS -> NexusBackup-Repository -> dedicated Unraid storage
+Windows Restic -> TLS -> Repository process -> /backup/workstations
 ```
 
-Backup payloads do not flow through Control. REST transport credentials and the Restic encryption password are not sent to Control.
+Backup payloads do not flow through Control.
+
+The one-container packaging intentionally trades the old Docker mount-namespace separation for Unraid simplicity: one Community Apps entry, one install, one image update and one WebUI.
 
 ## 2. Before installing
 
-Record the exact coordinated Nexus release you intend to test. Control, Agent and Repository must use the same release tag/digest. The beta Unraid XML templates default to `latest`; reproducible acceptance should record/pin the exact image digests actually tested.
+Record the exact Nexus release/tag/digest you intend to test. Reproducible acceptance should use an immutable image digest.
 
-Verify these prerequisites:
+Verify:
 
 - Docker is available on Unraid.
-- TCP 8787 and 8000 are unused on the Unraid host, unless deliberately changed.
-- you have selected persistent host paths for Control config, shared runtime, Agent config/state and Repository config.
-- generic Agent source, generic Agent repository, generic restore staging and workstation Repository storage use deliberate separate roots.
-- PCWatch does not write to the Nexus workstation Repository storage tree.
+- TCP 8787 and 8000 are free unless deliberately changed.
+- PCWatch and existing production backup repositories are not under the Nexus backup root.
+- you know the exact LAN DNS name or IPv4 address Windows workstations use to reach Unraid.
 
-Default storage roots deliberately separate generic and workstation repositories:
+The default mappings are:
 
 ```text
-generic Agent /backup:  /mnt/user/backups/nexus-backup/generic
-Repository /data:       /mnt/user/backups/nexus-backup/workstations
+/config      /mnt/user/appdata/nexus-backup              read/write
+/state       /mnt/user/appdata/nexus-backup-state        read/write
+/data        /mnt/user/nexus-backup-source               read-only
+/backup      /mnt/user/backups/nexus-backup              read/write
+/restore     /mnt/user/restore/nexus-backup              read/write
+/downloads   /mnt/user/downloads                         read/write
 ```
 
-Neither default is a parent of the other.
+Inside `/backup`, Nexus separates:
 
-`/dev/fuse` is **not** a normal prerequisite. It is needed only for the optional `rclone-restic-backup` feature that mounts a remote rclone endpoint as a read-only Restic source. The default Agent deployment does not grant `SYS_ADMIN` or `/dev/fuse`.
+```text
+/backup/generic       generic Agent repositories
+/backup/workstations  Windows workstation repositories
+```
 
-## 3. Install NexusBackup-Control
+Do not map the whole `/mnt/user` tree as `/data` merely for convenience. Source/repository/restore containment remains a hard safety rule.
 
-Use `unraid/templates/nexus-backup-control.xml` or equivalent values.
+`/dev/fuse` is **not** a normal prerequisite. The default appliance has no `SYS_ADMIN`, no `/dev/fuse` and is not privileged. Those are only needed if the optional rclone-mounted remote-source feature is deliberately enabled.
 
-| Container path | Purpose | Required property |
-| --- | --- | --- |
-| `/config` | SQLite, local auth, generated Control identity | persistent, read/write |
-| `/run/nexus-backup` | generated local-Agent token mirror | persistent/shared with Agent |
-| `/agent-config` | sanitized read-only view of Agent config | same host directory as Agent `/config`, read-only |
+## 3. Install NexusBackup
 
-Control uses host networking and listens on 8787. It must **not** receive source-data, repository-storage, `/dev/fuse` or `SYS_ADMIN` access.
+Use `unraid/templates/nexus-backup.xml` or equivalent values.
 
-Start Control and verify:
+Set **Repository host** to the LAN DNS name or IPv4 address Windows will actually use, for example:
+
+```text
+tower.local
+```
+
+or:
+
+```text
+192.168.1.20
+```
+
+That exact value is embedded in the generated self-signed Repository TLS certificate. Changing it later creates a new certificate and requires workstation reprovisioning with the new pinned CA.
+
+Start **NexusBackup** and verify:
 
 ```text
 http://<unraid-ip>:8787/healthz
 ```
 
+The appliance supervisor starts Control and Repository first, waits for Control to create the local Agent token, then starts Agent. The token lives only beneath `/run/nexus-backup` for the container lifetime; no shared runtime host mapping is required.
+
+If any core service exits, the appliance stops as one unit so Unraid/Docker restart policy can recover it. A half-alive UI is not treated as healthy.
+
 ### First local-admin bootstrap
 
-A brand-new Control config creates a one-time setup token and writes it to the privileged Control log. Open:
+A brand-new `/config/control` creates a one-time setup token and writes it to the privileged NexusBackup container log. Open:
 
 ```text
 http://<unraid-ip>:8787/
 ```
 
-and complete local-admin setup. After setup, `/config/auth.json` is persistent and the one-time setup token is removed.
+and complete local-admin setup. After setup, auth state is persistent under `/config/control` and the one-time setup token is removed.
 
-## 4. Install NexusBackup-Agent
+## 4. Fresh Agent config
 
-Use `unraid/templates/nexus-backup-agent.xml`. Keep Control/Agent shared paths identical where the templates say they must match.
-
-| Container path | Purpose | Access |
-| --- | --- | --- |
-| `/config` | `agent.json`, generic Restic/rclone credentials | read/write |
-| `/run/nexus-backup` | local-Agent token from Control | read-only |
-| `/state` | Restic/rclone cache/runtime state | read/write |
-| `/data` | protected generic source root(s) | read-only |
-| `/backup` | generic-Agent repository root, default `/mnt/user/backups/nexus-backup/generic` | read/write |
-| `/restore` | generic restore staging root | read/write |
-| `/downloads` | managed transfer destination root | read/write |
-
-The fresh Agent starter config is intentionally inert:
+If `/config/agent/agent.json` does not exist, Nexus creates this inert starter config:
 
 ```json
 {
@@ -121,80 +131,59 @@ The fresh Agent starter config is intentionally inert:
 }
 ```
 
-Do not widen `/data` to all of `/mnt/user` merely for convenience. Source/repository/restore containment remains a hard safety rule.
+`config/agent.example.json` remains only a worked example.
 
-A generic write restore target is a **staging root**, never an in-place destination. Current validation requires `overwrite: "never"`; write restore creates a fresh run-specific staging directory.
-
-Validate explicit Agent config before jobs:
+Validate the live Agent config with:
 
 ```sh
-docker exec NexusBackup-Agent node apps/agent/bin/agent.mjs --check-config
+docker exec NexusBackup node /app/apps/agent/bin/agent.mjs --check-config
 ```
 
-Only add:
+A generic write restore target is a **staging root**, never an in-place destination. Validation requires `overwrite: "never"`; write restore creates a fresh run-specific staging directory.
+
+## 5. Repository service inside the same container
+
+Repository state lives beneath:
 
 ```text
---cap-add=SYS_ADMIN --device=/dev/fuse
+/config/repository
 ```
 
-if you deliberately use the optional mount-enabled rclone source feature.
-
-## 5. Install NexusBackup-Repository
-
-Use `unraid/templates/nexus-backup-repository.xml`.
-
-Repository has only two persistent trust/storage roots:
-
-| Container path | Purpose | Access |
-| --- | --- | --- |
-| `/config` | TLS private key/certificate, bcrypt htpasswd and local transport-password copies | read/write, **secret** |
-| `/data` | encrypted Restic repository payloads from workstations | read/write |
-
-Set **Repository host** to the LAN DNS name or IPv4 address that Windows will actually use, for example:
+Workstation backup payloads live beneath:
 
 ```text
-tower.local
+/backup/workstations
 ```
 
-or:
-
-```text
-192.168.1.20
-```
-
-That exact name/address is placed in the generated self-signed TLS certificate. If you later change Repository host, Repository generates a new certificate and each workstation must be reprovisioned with the new pinned CA.
-
-Repository exposes only one network service by default:
+Repository exposes only:
 
 ```text
 8000  Restic REST over TLS 1.3 + Basic Auth
 ```
 
-There is deliberately **no HTTP CA/bootstrap port**. The public CA certificate and its SHA-256 are carried out-of-band in the local `nexus-repository-client` output and decoded/verified by the workstation installer before Restic is allowed to connect.
+There is no HTTP CA/bootstrap port. Repository uses official `rest-server` v0.14.0 pinned and SHA-256 verified during the Nexus image build, with private repositories and bcrypt htpasswd authentication.
 
-Repository uses Restic's official `rest-server` v0.14.0, pinned and SHA-256 verified during the Nexus image build. It runs with `--private-repos`, bcrypt htpasswd auth and TLS 1.3 minimum.
-
-Do not point Repository `/data` at the generic Agent `/backup` root or a PCWatch repository.
+The fact that Repository now shares a container with Control/Agent does **not** change the logical credential rule: Control must never receive REST transport credentials or workstation Restic encryption passwords.
 
 ## 6. Create a workstation Repository principal
 
-From the Repository container console, create a dedicated transport principal and repository namespace. For the isolated Balder acceptance test, for example:
+From the **NexusBackup container console**, create a dedicated transport principal and repository namespace. For the isolated Balder acceptance test:
 
 ```sh
 nexus-repository-client balder-pc acceptance
 ```
 
-The helper creates/reuses a random transport password and prints PowerShell lines similar to:
+The helper creates/reuses a random transport password and prints PowerShell values for:
 
-```powershell
-$env:NEXUS_BACKUP_REPOSITORY='rest:https://tower.local:8000/balder-pc/acceptance'
-$env:NEXUS_BACKUP_REST_USERNAME='balder-pc'
-$env:NEXUS_BACKUP_REST_PASSWORD='<generated transport password>'
-$env:NEXUS_BACKUP_REPOSITORY_CA_B64='<base64 public CA certificate>'
-$env:NEXUS_BACKUP_REPOSITORY_CA_SHA256='<sha256 of that exact certificate>'
+```text
+NEXUS_BACKUP_REPOSITORY
+NEXUS_BACKUP_REST_USERNAME
+NEXUS_BACKUP_REST_PASSWORD
+NEXUS_BACKUP_REPOSITORY_CA_B64
+NEXUS_BACKUP_REPOSITORY_CA_SHA256
 ```
 
-The CA payload is public material, but treat the helper output as secret as a whole because it also contains the REST transport password. Do not paste it into Nexus Control, screenshots, issue reports or the acceptance record.
+The CA is public material, but treat the helper output as secret because it also contains the REST transport password. Do not paste it into Control, screenshots, issue reports or the acceptance record.
 
 To rotate a principal deliberately:
 
@@ -202,34 +191,34 @@ To rotate a principal deliberately:
 nexus-repository-client balder-pc acceptance --rotate
 ```
 
-A rotation requires reprovisioning the workstation before its next repository operation.
+A rotation requires workstation reprovisioning.
 
-## 7. Enroll and provision the Windows workstation
+## 7. Enroll and provision Windows
 
-In Nexus **Workstations**, choose **Add workstation** and obtain the one-line elevated PowerShell enrollment command.
+In Nexus **Workstations**, choose **Add workstation** and obtain the generated elevated PowerShell command.
 
-On the workstation, open an **elevated PowerShell** and first paste the five environment lines printed by `nexus-repository-client`. Then set the separate Restic encryption password for this repository:
+On Windows, open an elevated PowerShell, paste the five Repository environment lines from `nexus-repository-client`, then add a separate Restic encryption password:
 
 ```powershell
 $env:NEXUS_BACKUP_RESTIC_PASSWORD='<dedicated Restic encryption password>'
 ```
 
-For acceptance use a new disposable test password, never a PCWatch/production key.
+For acceptance use a new disposable password, never a PCWatch/production key.
 
-Now run the Nexus-generated install command in the **same elevated PowerShell process**.
+Run the Nexus-generated install command in the **same** elevated PowerShell session.
 
-The installer performs the following before starting the Scheduled Task:
+The installer must:
 
-1. downloads the workstation agent and Restic bundled with the exact Control image and verifies their SHA-256 files;
-2. exchanges the short-lived enrollment credential for the durable local device token;
-3. decodes the Repository public CA certificate carried in `NEXUS_BACKUP_REPOSITORY_CA_B64`;
-4. verifies that exact certificate against `NEXUS_BACKUP_REPOSITORY_CA_SHA256` before persisting it;
-5. stores REST transport username/password, CA path and Restic password only below `%ProgramData%\NexusBackup`, protected to SYSTEM + local Administrators;
-6. explicitly initializes the exact pinned Repository namespace, or verifies an already-initialized one with `restic cat config`;
-7. sets remote runtime `autoInit=false`;
-8. installs/starts `NexusBackupWorkstation` as SYSTEM.
+1. download the workstation agent and Restic bundled with the exact Nexus image and verify their SHA-256 files;
+2. exchange the short-lived enrollment credential for the durable device token;
+3. decode the locally supplied Repository CA;
+4. verify it against `NEXUS_BACKUP_REPOSITORY_CA_SHA256` before trusting Repository TLS;
+5. store REST transport username/password, CA path and Restic encryption password only below `%ProgramData%\NexusBackup`, protected to SYSTEM + local Administrators;
+6. explicitly initialize/verify the exact pinned Repository namespace;
+7. set remote runtime `autoInit=false`;
+8. install/start `NexusBackupWorkstation` as SYSTEM.
 
-Normal workstation runtime **never initializes a remote repository after a failed probe**. Auth, TLS, network and unavailable-repository failures are failures, not permission to run `restic init`.
+Normal runtime **never** initializes a remote repository after an auth, TLS, network or repository probe failure.
 
 Normal paths are:
 
@@ -238,19 +227,15 @@ Normal paths are:
 %ProgramData%\NexusBackup
 ```
 
-The resulting local config contains secret fields. Do not paste its contents into chat/issues:
+Do not paste `C:\ProgramData\NexusBackup\workstation.json` into chat/issues; it contains secrets.
 
-```text
-C:\ProgramData\NexusBackup\workstation.json
-```
+## 8. Installer transport boundary
 
-After onboarding, Nexus should report the workstation online and storage-ready while Control/browser views expose only coarse repository kind/status, not URL, password, username, CA path or encryption key.
+The Control-hosted workstation installer can still be served over plain LAN HTTP in beta. The bundled checksums prove consistency but not independent MITM authenticity because script/binary/checksum share an origin.
 
-### Control installer transport
+Direct-LAN beta therefore assumes a trusted LAN/Unraid host during installation.
 
-The Control-hosted workstation installer can still be served over plain LAN HTTP in beta. Its bundled binary checksums are consistency checks, not independent MITM authenticity because script/binary/checksum share the same origin. The direct-LAN beta deployment therefore assumes a trusted LAN/Unraid host during installation.
-
-For stronger installer transport authenticity, terminate HTTPS and configure the exact external origin with:
+For stronger transport authenticity, terminate HTTPS and configure:
 
 ```text
 NEXUS_BACKUP_PUBLIC_URL=https://backup.example.test
@@ -258,39 +243,37 @@ NEXUS_BACKUP_PUBLIC_URL=https://backup.example.test
 
 Nexus intentionally ignores forwarded Host/Proto headers for this trust decision.
 
-The **Repository** data path is separately TLS protected and its CA is pinned from the local Repository console rather than fetched from an unauthenticated bootstrap service.
+Repository traffic is separately TLS protected with a CA pinned from the local container helper output.
 
-## 8. Secret/recovery boundary before production
+## 9. Secret/recovery boundary before production
 
-Two different secrets exist by design:
+Two independent secret classes exist:
 
-1. **REST transport credential** — Repository authentication only; stored in Repository `/config` and workstation local config.
-2. **Restic encryption password** — decrypts backup contents; workstation-local and never known by Control or Repository.
+1. **REST transport credential** — stored under `/config/repository` and workstation local config.
+2. **Restic encryption password** — decrypts backup contents; workstation-local and never known by Control/Repository.
 
-The current Nexus emergency bundle does not magically reconstruct workstation-local Restic encryption passwords, and Control is intentionally unable to fetch them. Likewise Repository `/config` contains TLS/auth state that must not be treated as disposable for production.
+For isolated acceptance these can be disposable. **Do not perform production cutover** until off-host recovery of workstation encryption keys and `/config/repository` has been implemented and tested.
 
-For the isolated acceptance test these values are disposable and can be recreated with a fresh repository. **Do not perform production cutover until the later workstation/Repository recovery-key export procedure has been completed and tested.**
+## 10. Emergency bundle
 
-## 9. Create the Control/Agent emergency bundle
+Create and verify the Nexus emergency bundle according to `docs/emergency-recovery.md` after local auth, Agent config/secrets and enrollment are trusted.
 
-Once Control auth, Agent config/secrets and device enrollment are trusted, create and verify the Nexus emergency bundle from `docs/emergency-recovery.md`.
+The emergency bundle protects Nexus control/generic-Agent state; it does not replace the workstation encryption-key / Repository-config recovery gate.
 
-That bundle protects Control + generic Agent control state; it does not replace the workstation/Repository secret-recovery requirement above.
+## 11. Ready for isolated acceptance
 
-## 10. Ready for isolated acceptance
+A fresh installation is ready to enter `docs/acceptance-test.md` only when:
 
-Do not migrate a production workload. A fresh installation is ready to enter `docs/acceptance-test.md` only when all of these are true:
-
-- Control, Agent and Repository image versions/digests are recorded and coordinated.
-- local admin login works.
-- generic Agent is online with explicit/inert-safe config.
-- Repository is running on the intended dedicated workstation storage root.
-- Repository host matches the address/name Windows uses and the CA payload/hash were obtained from the local Repository helper.
-- the workstation was provisioned with a dedicated Repository principal and a disposable acceptance encryption password.
-- workstation is online and storage-ready.
-- generic and workstation repository roots are isolated from each other, PCWatch and production repositories.
-- default Agent has no `SYS_ADMIN`/`/dev/fuse` unless deliberately required.
-- a Control/Agent emergency bundle has been created and verified.
-- PCWatch-backup and Copyarr have not been disabled, changed or repointed.
+- the exact one-container image version/digest is recorded;
+- local admin login works;
+- Agent is online with explicit/inert-safe config;
+- Repository TLS service is running on the intended `/backup/workstations` tree;
+- Repository host matches the address/name Windows uses;
+- the workstation is provisioned with a dedicated Repository principal and disposable acceptance encryption password;
+- workstation is online and storage-ready;
+- `/data` is narrow/read-only and does not contain `/backup` or `/restore` through the host mapping;
+- the container has no `SYS_ADMIN`/`/dev/fuse` unless deliberately required;
+- an emergency bundle has been created and verified;
+- PCWatch-backup and Copyarr remain unchanged.
 
 If any item is uncertain, stop before acceptance rather than testing against production data or repositories.
