@@ -25,7 +25,7 @@ services:
       - ${NEXUS_BACKUP_RESTORE_PATH:-./.local/restore}:/restore
       - ${NEXUS_BACKUP_TRANSFER_PATH:-./.local/downloads}:/downloads
     healthcheck:
-      test: ["CMD", "node", "-e", "Promise.all([fetch('http://127.0.0.1:8787/healthz').then(r=>{if(!r.ok)throw new Error('control')}),fetch('https://127.0.0.1:8000/',{agent:new (require('https').Agent)({rejectUnauthorized:false})}).catch(()=>{})]).then(()=>process.exit(0)).catch(()=>process.exit(1))"]
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 10s
       timeout: 5s
       retries: 6
