@@ -47,7 +47,15 @@ The one-container packaging intentionally trades the old Docker mount-namespace 
 
 ## 2. Before installing
 
-Record the exact Nexus release/tag/digest you intend to test. Reproducible acceptance should use an immutable image digest.
+Record the exact Nexus release/tag/digest you intend to test. Reproducible acceptance must use an immutable image digest.
+
+The Community Apps/Unraid template intentionally uses `:latest` for normal stable distribution. **Do not leave the Repository field on `:latest` during acceptance.** Override it with the exact recorded digest:
+
+```text
+ghcr.io/swamp2k/nexus-backup@sha256:<recorded-digest>
+```
+
+This prevents a later tag move from silently changing the build under test.
 
 Verify:
 
@@ -80,7 +88,7 @@ Do not map the whole `/mnt/user` tree as `/data` merely for convenience. Source/
 
 ## 3. Install NexusBackup
 
-Use `unraid/templates/nexus-backup.xml` or equivalent values.
+Use `unraid/templates/nexus-backup.xml` or equivalent values, but for acceptance replace the template's `:latest` Repository value with the immutable digest recorded in section 2 before creating/starting the container.
 
 Set **Repository host** to the LAN DNS name or IPv4 address Windows will actually use, for example:
 
@@ -264,7 +272,7 @@ The emergency bundle protects Nexus control/generic-Agent state; it does not rep
 
 A fresh installation is ready to enter `docs/acceptance-test.md` only when:
 
-- the exact one-container image version/digest is recorded;
+- the exact one-container image version/digest is recorded and the running container is pinned to that digest rather than `:latest`;
 - local admin login works;
 - Agent is online with explicit/inert-safe config;
 - Repository TLS service is running on the intended `/backup/workstations` tree;
