@@ -12,11 +12,11 @@ Existing PCWatch-backup and standalone Copyarr are fallbacks. Do not modify or r
 
 ## Current milestone
 
-**PR #30 – collapse the Unraid product into one app / one container before real acceptance.**
+**Publish and verify the first single-container acceptance RC.**
 
-User/product decision: Nexus Backup must present as one Community Apps entry and one normal Unraid container. The previous three-container packaging is no longer the acceptance target.
+The packaging pivot is merged. Nexus Backup now presents as one Community Apps entry and one normal Unraid container while keeping Control, Agent and Repository as coordinated internal processes.
 
-The new appliance image is:
+The appliance image is:
 
 ```text
 ghcr.io/swamp2k/nexus-backup:<version>
@@ -32,7 +32,9 @@ Repository  :8000  TLS Restic REST endpoint for Windows workstations
 
 The supervisor starts Control + Repository, waits for the locally generated Agent token, starts Agent, and terminates the whole appliance if any core process exits. Unraid/Docker restart policy then recovers the coordinated unit.
 
-## Merged history before the packaging pivot
+PR #30 merged as `f5c1ac01ed6ced6a11ea6f351cae431bace10b4e`. Post-merge main CI #270 is fully green, including native Windows tests, one-app Unraid/Compose contracts, unified image build, real Repository TLS/auth Restic `init` + `cat config`, invalid-credential rejection and fail-as-one-unit process supervision.
+
+## Merged history
 
 - M8 resilience batch 1: `941d138bde505181c3fd36af2e4bcf6e5b0b8736`
 - M8 resilience batch 2: `527909f3385b41c33b46cb421aabdc8b61cadf0e`
@@ -45,18 +47,19 @@ The supervisor starts Control + Repository, waits for the locally generated Agen
 - guarded acceptance RC publishing, PR #27: `515ecbee832c23ad1768b1bcfdf0a282627dc663`
 - acceptance RC handoff sync, PR #28: `44554518354babc017c27c4e141c28f459f02844`
 - first RC identity status sync, PR #29: `451366016aea577d4edeb6c46b32cc33254bb766`
+- collapse to one Unraid appliance container, PR #30: `f5c1ac01ed6ced6a11ea6f351cae431bace10b4e`
 
 ## Historical three-image RC
 
-`0.7.0-rc.1` was successfully published from `44554518354babc017c27c4e141c28f459f02844` and its three immutable image digests were recorded. It proved the guarded publishing path and GHCR push mechanics.
+`0.7.0-rc.1` was successfully published from `44554518354babc017c27c4e141c28f459f02844`. It proved the guarded publishing path and GHCR push mechanics.
 
-That RC is now **historical only**. Do not use it for real-machine acceptance because the final Unraid packaging decision changed afterward from three containers to one appliance container.
+That RC is **historical only**. Do not use it for real-machine acceptance because the final Unraid packaging decision changed afterward from three containers to one appliance container.
 
-A new one-image RC must be published only after PR #30 is merged and post-merge main CI is green.
+The next RC must be a single image, expected version `0.8.0-rc.1`, published only from the final green main SHA that includes this handoff sync. Manual RC publishing must not move `latest`.
 
-## Single-container architecture under PR #30
+## Single-container architecture
 
-Persistent layout inside the one appliance:
+Persistent layout inside the appliance:
 
 ```text
 /config/control       Control DB/auth/secrets
@@ -119,9 +122,9 @@ REST transport credentials remain local to Repository + workstation. The separat
 - fresh Agent starts inert;
 - PCWatch-backup and standalone Copyarr remain untouched during isolated acceptance.
 
-## PR #30 CI requirements
+## Proven single-container CI contract
 
-Do not merge #30 merely because Node/typecheck are green. Final-head CI must prove:
+The merged appliance CI proves:
 
 - Node tests + typecheck;
 - Linux Go tests/vet/cross-build;
@@ -160,9 +163,9 @@ The isolated acceptance test may use disposable secrets/repositories, but passin
 
 ## Remaining gates before “Nu tester vi”
 
-1. finish PR #30 code/docs and full final-head CI;
-2. merge #30 and require full post-merge main CI;
-3. publish one exact **single-image** prerelease from that main SHA without moving `latest`;
+1. merge this status-only handoff sync and require full post-merge main CI;
+2. publish one exact **single-image** prerelease (`0.8.0-rc.1`) from that main SHA without moving `latest`;
+3. record the immutable appliance image digest plus version/revision labels;
 4. pull that immutable image through the actual Unraid Docker path and verify digest + version/revision labels;
 5. rerun the final acceptance runbook preflight against the one-container deployment contract;
 6. only then start the isolated real-machine acceptance drill.
