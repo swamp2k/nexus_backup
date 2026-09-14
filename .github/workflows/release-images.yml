@@ -54,6 +54,7 @@ jobs:
           images: ghcr.io/swamp2k/nexus-backup
           tags: |
             type=raw,value=${{ needs.version.outputs.version }}
+            type=raw,value=beta,enable=${{ needs.version.outputs.stable != 'true' }}
             type=raw,value=latest,enable=${{ needs.version.outputs.stable == 'true' }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
@@ -79,6 +80,7 @@ jobs:
           {
             echo "### Nexus Backup appliance"
             echo "- tag: \`${{ needs.version.outputs.version }}\`"
+            echo "- channel: \`${{ needs.version.outputs.stable == 'true' && 'latest' || 'beta' }}\`"
             echo "- source: \`${GITHUB_SHA}\`"
             echo "- digest: \`${{ steps.build.outputs.digest }}\`"
           } >> "$GITHUB_STEP_SUMMARY"

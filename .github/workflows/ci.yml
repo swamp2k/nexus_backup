@@ -80,7 +80,7 @@ jobs:
           assert root.tag == "Container"
           assert root.attrib.get("version") == "2"
           assert root.findtext("Name") == "NexusBackup"
-          assert root.findtext("Repository") == "ghcr.io/swamp2k/nexus-backup:latest"
+          assert root.findtext("Repository") == "ghcr.io/swamp2k/nexus-backup:beta"
           assert root.findtext("Network") == "host"
           assert root.findtext("Privileged") == "false"
           assert root.findtext("Beta") == "True"
