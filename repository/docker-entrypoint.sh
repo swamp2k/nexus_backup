@@ -5,6 +5,7 @@ umask 077
 
 CONFIG_DIR=${NEXUS_BACKUP_REPOSITORY_CONFIG_DIR:-/config}
 DATA_DIR=${NEXUS_BACKUP_REPOSITORY_DATA_DIR:-/data}
+RUNTIME_DIR=${NEXUS_BACKUP_RUNTIME_DIR:-/run/nexus-backup}
 INITIAL_USER=${NEXUS_BACKUP_REPOSITORY_INITIAL_USER:-}
 SETTINGS_BIN=${NEXUS_BACKUP_REPOSITORY_SETTINGS_BIN:-/usr/local/bin/nexus-repository-settings}
 
@@ -13,8 +14,8 @@ fail() {
   exit 1
 }
 
-mkdir -p "$CONFIG_DIR/clients" "$CONFIG_DIR/settings" "$DATA_DIR"
-chmod 0700 "$CONFIG_DIR" "$CONFIG_DIR/clients" "$CONFIG_DIR/settings"
+mkdir -p "$CONFIG_DIR/clients" "$CONFIG_DIR/settings" "$DATA_DIR" "$RUNTIME_DIR"
+chmod 0700 "$CONFIG_DIR" "$CONFIG_DIR/clients" "$CONFIG_DIR/settings" "$RUNTIME_DIR"
 
 seed_setting() {
   key=$1
@@ -59,6 +60,7 @@ HTPASSWD="$CONFIG_DIR/.htpasswd"
 TLS_KEY="$CONFIG_DIR/repository-tls.key"
 TLS_CERT="$CONFIG_DIR/repository-tls.crt"
 TLS_HOST="$CONFIG_DIR/repository-tls.host"
+ACTIVE_JSON="$RUNTIME_DIR/repository-active.json"
 
 if [ ! -f "$HTPASSWD" ]; then
   : > "$HTPASSWD"
@@ -92,6 +94,12 @@ if [ -n "$INITIAL_USER" ]; then
   NEXUS_REPOSITORY_QUIET=1 /usr/local/bin/nexus-repository-client "$INITIAL_USER" main >/dev/null
   echo "Nexus Backup Repository: initial client '$INITIAL_USER' is ready; retrieve its local setup values with: nexus-repository-client $INITIAL_USER main"
 fi
+
+cat > "$ACTIVE_JSON.tmp" <<EOF
+{"exposure":"$EXPOSURE","host":"$HOST","listenPort":$PORT,"endpointPort":$ENDPOINT_PORT,"appendOnly":$APPEND_ONLY}
+EOF
+chmod 0600 "$ACTIVE_JSON.tmp"
+mv -f "$ACTIVE_JSON.tmp" "$ACTIVE_JSON"
 
 echo "Nexus Backup Repository: exposure=$EXPOSURE endpoint=https://$HOST:$ENDPOINT_PORT listen=:$PORT append-only=$APPEND_ONLY"
 echo "Nexus Backup Repository: TLS 1.3, bcrypt authentication and private repositories are enabled"
