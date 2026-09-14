@@ -1,11 +1,17 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
+import { constants } from "node:fs";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 const defaultPath = fileURLToPath(new URL("../../../config/agent.default.json", import.meta.url));
 const examplePath = fileURLToPath(new URL("../../../config/agent.example.json", import.meta.url));
-const dockerfilePath = fileURLToPath(new URL("../../../Dockerfile.agent", import.meta.url));
+const dockerfilePath = fileURLToPath(new URL("../../../Dockerfile", import.meta.url));
+const splitDockerfilePaths = [
+  fileURLToPath(new URL("../../../Dockerfile.local", import.meta.url)),
+  fileURLToPath(new URL("../../../Dockerfile.agent", import.meta.url)),
+  fileURLToPath(new URL("../../../Dockerfile.repository", import.meta.url)),
+];
 
 test("fresh agent starter config is inert and cannot target data or repositories by default", async () => {
   const config = JSON.parse(await readFile(defaultPath, "utf8"));
@@ -15,10 +21,16 @@ test("fresh agent starter config is inert and cannot target data or repositories
   assert.deepEqual(config.tools, {});
 });
 
-test("agent image installs the inert default rather than the worked example", async () => {
+test("appliance image installs the inert Agent default rather than the worked example", async () => {
   const dockerfile = await readFile(dockerfilePath, "utf8");
   assert.match(dockerfile, /COPY config\/agent\.default\.json \.\/defaults\/agent\.json/);
   assert.doesNotMatch(dockerfile, /COPY config\/agent\.example\.json \.\/defaults\/agent\.json/);
+});
+
+test("split deployment Dockerfiles stay removed from the one-container product", async () => {
+  for (const path of splitDockerfilePaths) {
+    await assert.rejects(access(path, constants.F_OK), { code: "ENOENT" });
+  }
 });
 
 test("worked agent example never uses the whole /data mount as a backup source", async () => {
