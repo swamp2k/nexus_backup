@@ -51,6 +51,8 @@ Before creating data record only non-secret identity/evidence:
 
 The workstation payload must be the one bundled by that exact appliance image.
 
+The running Unraid container must be pinned to the recorded immutable digest for the duration of acceptance. Do not use the template's normal `:latest` value for this test.
+
 ## 3. Provision the isolated Repository namespace
 
 The single `NexusBackup` container must already be installed according to `docs/fresh-install.md`, with workstation storage beneath:
