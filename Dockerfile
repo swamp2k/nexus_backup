@@ -83,6 +83,7 @@ COPY migrations ./migrations
 COPY docs/emergency-recovery.md ./docs/emergency-recovery.md
 COPY repository/docker-entrypoint.sh /usr/local/bin/nexus-repository-entrypoint
 COPY repository/client.sh /usr/local/bin/nexus-repository-client
+COPY repository/settings.sh /usr/local/bin/nexus-repository-settings
 COPY appliance/docker-entrypoint.sh /usr/local/bin/nexus-backup-entrypoint
 COPY --from=workstation /out/nexus-backup-workstation-windows-amd64.exe ./apps/local-server/web/workstation/nexus-backup-workstation-windows-amd64.exe
 COPY --from=workstation /out/nexus-backup-workstation-windows-amd64.exe.sha256 ./apps/local-server/web/workstation/nexus-backup-workstation-windows-amd64.exe.sha256
@@ -93,6 +94,7 @@ RUN chmod 0755 \
       /usr/local/bin/nexus-backup-entrypoint \
       /usr/local/bin/nexus-repository-entrypoint \
       /usr/local/bin/nexus-repository-client \
+      /usr/local/bin/nexus-repository-settings \
     && mkdir -p \
       /app/node_modules/@nexus-backup \
       /config/control /config/agent /config/repository \
@@ -116,7 +118,9 @@ ENV NEXUS_BACKUP_VERSION=$NEXUS_BACKUP_VERSION \
     NEXUS_BACKUP_INTERNAL_PORT=8788 \
     NEXUS_BACKUP_REPOSITORY_CONFIG_DIR=/config/repository \
     NEXUS_BACKUP_REPOSITORY_DATA_DIR=/backup/workstations \
-    NEXUS_BACKUP_REPOSITORY_PORT=8000
+    NEXUS_BACKUP_REPOSITORY_EXPOSURE=lan \
+    NEXUS_BACKUP_REPOSITORY_PORT=8000 \
+    NEXUS_BACKUP_REPOSITORY_ENDPOINT_PORT=8000
 
 EXPOSE 8787 8000
 ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/nexus-backup-entrypoint"]

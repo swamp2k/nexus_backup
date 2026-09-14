@@ -6,37 +6,80 @@ This is the durable handoff for future sessions. Read it before changing the pro
 
 ## Product goal
 
-Nexus Backup is a self-contained, local-first backup/recovery/transfer appliance for Unraid plus Windows workstations. Remote control may be optional later, but it must never be required for normal backup/recovery and backup payloads must never traverse Control, Cloudflare or PCWatch.
+Nexus Backup is a self-contained, local-first backup/recovery/transfer appliance for Unraid plus Windows workstations. Backup payloads must never traverse Control, Cloudflare or PCWatch. Remote control may use a separate optional HTTPS path.
 
 Existing PCWatch-backup and standalone Copyarr are fallbacks. Do not modify or retire them until each corresponding real workload has been migrated and proven, including restore/content verification where applicable.
 
-## Current milestone
+## Current milestone — M10 Internet-facing workstation Repository
 
-**Begin the isolated real-machine Balder-PC -> Unraid acceptance drill.**
+The first physical acceptance install was paused before creating the Nexus container when a real deployment requirement was identified: several existing workstation backup clients are off-LAN. A LAN-only Repository would not be a viable PCWatch replacement.
 
-The one-app / one-container packaging pivot is merged and has passed final CI, release and real-Unraid distribution preflight.
+Decision: **direct Internet Restic is a first-class Nexus data path.** No VPN overlay and no Cloudflare proxy is required for backup payloads.
 
-The acceptance appliance identity is:
+Supported off-LAN topology:
 
 ```text
-version:  0.8.0-rc.1
-source:   91bf2569bd301e29e0a55eaff70aa794669d2d8e
-image:    ghcr.io/swamp2k/nexus-backup@sha256:be927d306f28501999bc475a779f58ef6da2dcf3605db1095ad3257a7ecb69b9
+control/orchestration (small):
+Remote workstation -> HTTPS / optional Cloudflare Tunnel -> Control
+
+backup/recovery payload:
+Remote workstation -> direct HTTPS -> Repository -> /backup/workstations
 ```
 
-The manual RC publish did not move `latest`. GitHub release workflow run #2 completed successfully with the workstation release job intentionally skipped for manual RC publishing because the workstation payload is bundled in the appliance image.
+Repository and Control endpoints are deliberately independent. A Cloudflare Tunnel is acceptable for Control because it carries only metadata/jobs; Repository backup bytes must bypass it.
 
-The immutable appliance image was pulled successfully through the actual Unraid Docker path with a clean temporary Docker config. Unraid verified:
+Active branch/PR:
 
-- version label `0.8.0-rc.1`;
-- revision label `91bf2569bd301e29e0a55eaff70aa794669d2d8e`;
-- expected immutable digest `sha256:be927d306f28501999bc475a779f58ef6da2dcf3605db1095ad3257a7ecb69b9`.
+```text
+branch: m10-internet-repository
+PR:     #33 (draft)
+```
 
-**Distribution preflight is PASS.** The real acceptance drill may now begin after installing the container pinned to that digest and completing the fresh-install readiness checklist.
+M10 is not merge-ready until direct-Internet live CI, docs and security/diff review are green.
 
-## Single-container architecture
+## M10 implementation contract
 
-Nexus Backup presents as one Community Apps entry and one normal Unraid container. Inside it, three coordinated internal processes run together:
+Repository network policy is persisted beneath:
+
+```text
+/config/repository/settings
+```
+
+Settings:
+
+- exposure: `lan` or `internet`;
+- endpoint host: canonical DNS name/IP pinned into Repository TLS identity;
+- listen port: local Tower port, default `8000`;
+- endpoint port: advertised workstation port, allowing e.g. WAN `443 -> Tower:8000`;
+- append-only: Internet mode defaults `true` on first configuration.
+
+`nexus-repository-settings` provides a local CLI over the same settings source used by the GUI and Repository process. The Repository process publishes its non-secret active policy to `/run/nexus-backup/repository-active.json`, allowing the UI to show configured vs running state and whether a Nexus restart is required.
+
+The Nexus **Settings -> Workstation Repository -> Network & protection** panel manages these values. Listener/TLS identity changes are saved but applied only after restarting the single NexusBackup container; the UI does not receive Docker-socket access.
+
+### Current direct-endpoint protections
+
+Actually enforced:
+
+- TLS minimum 1.3;
+- pinned self-signed Repository CA on each workstation;
+- random strong per-workstation REST credentials;
+- bcrypt server-side authentication material;
+- private per-principal namespaces;
+- append-only mode, default-on for first-time Internet exposure.
+
+Not currently built into the direct Restic endpoint:
+
+- traffic rate limiting;
+- brute-force/IP lockout.
+
+The GUI must state those as unavailable rather than display false protection. `rest-server` does not natively provide those controls; adding them later requires a real edge/gate/firewall implementation.
+
+Append-only means remote clients cannot perform destructive `forget/prune`. That is intentional ransomware/client-compromise protection. Production retention for Internet workstations must ultimately run locally on Tower/Nexus rather than periodically disabling append-only.
+
+## Existing single-container architecture
+
+Nexus Backup presents as one Community Apps entry and one normal Unraid container. Inside it:
 
 ```text
 Control     :8787  UI/API/auth/SQLite/orchestration
@@ -44,14 +87,12 @@ Agent              local Restic/rclone/transfer execution, Control via 127.0.0.1
 Repository  :8000  TLS Restic REST endpoint for Windows workstations
 ```
 
-The supervisor starts Control + Repository, waits for Control to create the local Agent token, starts Agent, and terminates the whole appliance if any core process exits. Unraid/Docker restart policy then recovers the coordinated unit.
-
 Persistent layout:
 
 ```text
 /config/control       Control DB/auth/secrets
 /config/agent         Agent config and local storage credentials
-/config/repository    Repository TLS/auth/client material
+/config/repository    Repository TLS/auth/client material + network settings
 /state                Agent caches/state
 /backup/generic       Generic Restic repositories
 /backup/workstations  Windows workstation repositories
@@ -68,31 +109,37 @@ Default Unraid mappings:
 /downloads   /mnt/user/downloads
 ```
 
-The runtime Agent token lives beneath `/run/nexus-backup` for the container lifetime. The appliance remains non-privileged by default with no `SYS_ADMIN` or `/dev/fuse` unless the optional mounted remote-source feature is explicitly enabled.
+The appliance remains non-privileged by default with no `SYS_ADMIN` or `/dev/fuse` unless the optional mounted remote-source feature is explicitly enabled.
 
-## Workstation data path
+## Workstation data/control boundaries
+
+Backup path:
 
 ```text
 Windows Restic -> TLS -> Repository process -> /backup/workstations
 ```
 
-Backup payloads do not pass through Control.
+Control receives no backup payload and no Repository transport/encryption credentials.
 
-Repository uses official `rest-server` v0.14.0 pinned by SHA-256 at image build, TLS 1.3, bcrypt htpasswd authentication and private per-user namespaces. `nexus-repository-client` carries the public CA as base64 plus SHA-256 into workstation onboarding; there is no HTTP CA bootstrap endpoint.
+A workstation still needs Control for enrollment, job polling and status. Off-LAN deployments therefore need a reachable Control origin separate from Repository. `NEXUS_BACKUP_PUBLIC_URL` is the explicit source of truth for that origin; Nexus does not trust arbitrary forwarded Host/Proto headers.
+
+Repository uses official `rest-server` v0.14.0 pinned by SHA-256 at image build. `nexus-repository-client` carries the public CA as base64 plus SHA-256 into workstation onboarding; there is no HTTP CA bootstrap endpoint.
 
 REST transport credentials remain local to Repository + workstation. The separate Restic encryption password remains workstation-local. Control receives neither.
 
-## Acceptance install rule
+## Last proven acceptance image
 
-The normal Unraid template uses `ghcr.io/swamp2k/nexus-backup:latest` for eventual stable distribution. Acceptance must **not** use `:latest`.
-
-Install/run the acceptance appliance using exactly:
+The pre-M10 single-container RC was successfully published and physically pulled on the real Unraid host:
 
 ```text
-ghcr.io/swamp2k/nexus-backup@sha256:be927d306f28501999bc475a779f58ef6da2dcf3605db1095ad3257a7ecb69b9
+version:  0.8.0-rc.1
+source:   91bf2569bd301e29e0a55eaff70aa794669d2d8e
+image:    ghcr.io/swamp2k/nexus-backup@sha256:be927d306f28501999bc475a779f58ef6da2dcf3605db1095ad3257a7ecb69b9
 ```
 
-This keeps the running test system tied to the build whose CI/release/distribution evidence was recorded.
+The manual RC did not move `latest`. Unraid verified matching version, revision and immutable digest. Distribution preflight passed.
+
+That RC remains valid evidence for the one-container packaging path, but **do not start the real workstation acceptance on 0.8.0-rc.1 now**: M10 changes the required Repository connectivity contract. Publish and verify a new M10 RC after PR #33 merges.
 
 ## Non-negotiable restore/recovery invariants
 
@@ -109,93 +156,50 @@ This keeps the running test system tied to the build whose CI/release/distributi
 - fresh Agent starts inert;
 - PCWatch-backup and standalone Copyarr remain untouched during isolated acceptance.
 
-## Proven single-container CI contract
+## Proven one-container baseline
 
-PR #30 merged as `f5c1ac01ed6ced6a11ea6f351cae431bace10b4e`. Post-merge CI #270 was fully green. PR #31 synchronized the final RC handoff and merged as `91bf2569bd301e29e0a55eaff70aa794669d2d8e`; post-merge CI #272 was also fully green.
+PR #30 merged as `f5c1ac01ed6ced6a11ea6f351cae431bace10b4e`. PR #31 synchronized the first single-container RC handoff as `91bf2569bd301e29e0a55eaff70aa794669d2d8e`; post-merge CI #272 was green. PR #32 merged as `7a87ab9ccc4189522c58a7ab69159af182b9df09` and marked the LAN acceptance preflight ready immediately before the off-LAN requirement was discovered.
 
-The appliance CI proves:
+Existing appliance CI proves Node/typecheck, Linux/native-Windows Go, installer syntax, one Unraid template, one appliance image, inert fresh Agent, real Repository TLS/auth Restic `init` + `cat config`, invalid-credential rejection, fail-as-one-unit supervision and no default privileged/SYS_ADMIN/FUSE.
 
-- Node tests + typecheck;
-- Linux Go tests/vet/cross-build;
-- native Windows Go tests/vet;
-- PowerShell installer syntax + self-contained asset contract;
-- exactly one Unraid XML template and one default Compose service/image;
-- unified image contains Control, Agent, Repository, workstation payloads and emergency recovery assets;
-- fresh Agent config remains inert;
-- one real appliance container reaches Control health + Agent online + Repository TLS service;
-- real Restic can `init` and `cat config` through Repository TLS/auth;
-- invalid Repository credentials fail;
-- killing one core internal process causes the whole appliance container to terminate;
-- version/revision labels are correct;
-- no default `SYS_ADMIN`, `/dev/fuse` or privileged mode.
-
-## Historical three-image RC
-
-`0.7.0-rc.1` was successfully published from `44554518354babc017c27c4e141c28f459f02844` and proved the guarded publishing path and GHCR push mechanics.
-
-It is **historical only** and must not be used for real-machine acceptance because the final Unraid packaging decision changed afterward from three containers to one appliance container.
-
-## Accepted packaging security trade-off
-
-The old three-container model had stronger Docker mount-namespace isolation between Control, Agent and Repository. The one-container Unraid product intentionally gives up that boundary in exchange for one install/update/app surface.
-
-Security relies on the remaining boundaries: read-only source mounts, constrained host mappings, application-level path validation, staging-only restores, credential redaction, local-only Control/Agent transport, TLS/auth for workstation repository traffic and no default elevated container privileges.
-
-This is accepted for the Unraid target. Nexus must not assume the Unraid host itself is a hostile multi-tenant security boundary.
+M10 adds a separate live gate for Internet mode: NAT-style advertised port distinct from local listen port, real backup through the Repository, and proof that append-only rejects a destructive remote `restic forget` while the snapshot remains readable.
 
 ## Explicit beta / pre-production gaps
 
 These remain explicit:
 
-- plain-HTTP Control-hosted workstation installation assumes a trusted LAN/host; HTTPS + explicit `NEXUS_BACKUP_PUBLIC_URL` is stronger. Repository traffic itself is TLS/CA-pinned.
-- first-run Control setup token is visible to privileged container logs until setup, then removed.
-- internal processes currently run in the same non-privileged container namespace; non-root process separation may be considered later but is not a beta acceptance requirement.
-- base/build image tags are not all digest-pinned; acceptance uses the exact published appliance digest above.
-- FUSE/SYS_ADMIN remains explicit opt-in only for the optional mounted remote-source feature.
+- direct Internet Repository currently has strong TLS/auth/private namespace/append-only protection but no built-in IP rate limit or brute-force lockout;
+- Control remote access is a separate endpoint; Cloudflare Tunnel is recommended for off-LAN beta control traffic but never for backup payloads;
+- first-run Control setup token is visible to privileged container logs until setup, then removed;
+- internal processes share the same non-privileged container namespace;
+- base/build image tags are not all digest-pinned; acceptance must record exact published image digest;
+- FUSE/SYS_ADMIN remains explicit opt-in only for optional mounted remote-source;
+- production local retention for append-only workstation repositories is not implemented yet.
 
 ### Production recovery-key gate
 
-Before production cutover Nexus still needs and must prove an off-host recovery procedure for:
+Before production cutover Nexus still needs and must prove off-host recovery for:
 
 - each workstation Restic encryption password/recovery key;
 - `/config/repository` TLS/auth/client material, or a documented safe reconstruction flow;
-- the relationship between recovered workstation identity/repository namespace and encrypted repository payload.
+- relationship between recovered workstation identity/repository namespace and encrypted repository payload.
 
-The isolated acceptance test may use disposable secrets/repositories, but passing it does not waive this production recovery gate.
+The isolated acceptance test may use disposable secrets/repositories, but passing it does not waive this gate.
 
-## Acceptance status: READY TO BEGIN
+## Next gates
 
-The pre-acceptance gates are complete:
+1. finish PR #33 runtime/UI/docs and direct-Internet live CI;
+2. security/diff-review full `server.mjs`, `index.html`, Repository scripts and template;
+3. require all PR CI green and merge #33;
+4. require post-merge main CI green;
+5. publish a new exact single-image M10 RC without moving `latest`;
+6. pull/verify its immutable digest on Tower;
+7. install NexusBackup pinned to that digest with the selected public Repository hostname/port;
+8. prove Repository reachability from a genuinely off-LAN network and Control reachability through the separate HTTPS control path;
+9. run the existing backup -> inventory -> integrity -> dry-run -> staging restore -> independent SHA-256 acceptance sequence;
+10. keep PCWatch-backup and standalone Copyarr unchanged until later explicit cutover.
 
-1. single-container architecture merged;
-2. final PR and post-merge main CI green;
-3. exact single-image prerelease published without moving `latest`;
-4. immutable digest/version/revision recorded;
-5. immutable image pulled and verified through the actual Unraid Docker path;
-6. final runbook preflight completed, including explicit immutable-digest installation instead of the template's normal `:latest` value.
-
-Next physical steps are the `docs/fresh-install.md` readiness sequence followed by `docs/acceptance-test.md`:
-
-1. create the one `NexusBackup` Unraid container pinned to the acceptance digest;
-2. set Repository host to the exact LAN name/IP Balder-PC will use;
-3. complete local-admin bootstrap and verify Agent/Repository readiness;
-4. create the dedicated `balder-pc/acceptance` Repository principal;
-5. provision the workstation with disposable acceptance encryption credentials;
-6. create deterministic `C:\NexusBackup-Test` data + independent reference manifest;
-7. perform backup -> inventory/browse -> integrity -> dry-run preview -> staging restore -> independent SHA-256 verification;
-8. only after the core restore/hash proof passes continue with restart/outage/interrupted-restore resilience tests.
-
-A real PASS has **not** happened yet. Do not cut over any production workload.
-
-## Roadmap after isolated workstation proof
-
-- implement/prove workstation encryption-key + Repository-config off-host recovery;
-- cut over Balder-PC only after that production recovery gate;
-- prove/cut over Martin-PC -> Unraid separately;
-- prove Unraid -> Google Drive;
-- prove Seedbox -> Unraid and compare before retiring standalone Copyarr;
-- close telemetry/UX gaps found by real use;
-- first stable release only after real restore proof and production recovery/security sign-off.
+A real workload PASS has **not** happened yet.
 
 ## Merged history
 
@@ -212,7 +216,8 @@ A real PASS has **not** happened yet. Do not cut over any production workload.
 - first RC identity status sync, PR #29: `451366016aea577d4edeb6c46b32cc33254bb766`
 - collapse to one Unraid appliance container, PR #30: `f5c1ac01ed6ced6a11ea6f351cae431bace10b4e`
 - single-container acceptance handoff, PR #31: `91bf2569bd301e29e0a55eaff70aa794669d2d8e`
+- acceptance-ready docs sync, PR #32: `7a87ab9ccc4189522c58a7ab69159af182b9df09`
 
 ## Working rule
 
-Update this file on every substantial milestone, merge, newly discovered blocker or changed next step. Keep it factual; do not let green CI, a published image or an implemented feature imply real-world proof that has not happened.
+Update this file on every substantial milestone, merge, newly discovered blocker or changed next step. Keep it factual; never let green CI, a published image or an implemented feature imply real-world proof that has not happened.

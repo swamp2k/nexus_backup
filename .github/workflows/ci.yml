@@ -99,8 +99,11 @@ jobs:
           assert configs["/downloads"]["Mode"] == "rw"
 
           variables = {item.attrib["Target"]: item.attrib for item in root.findall("Config") if item.attrib.get("Type") == "Variable"}
+          assert variables["NEXUS_BACKUP_REPOSITORY_EXPOSURE"]["Default"] == "lan"
           assert variables["NEXUS_BACKUP_REPOSITORY_HOST"]["Required"] == "true"
           assert variables["NEXUS_BACKUP_REPOSITORY_PORT"]["Default"] == "8000"
+          assert variables["NEXUS_BACKUP_REPOSITORY_ENDPOINT_PORT"]["Default"] == "8000"
+          assert variables["NEXUS_BACKUP_REPOSITORY_APPEND_ONLY"]["Required"] == "false"
           assert variables["NEXUS_BACKUP_PUBLIC_URL"]["Required"] == "false"
           assert "NEXUS_BACKUP_REPOSITORY_PUBLIC_PORT" not in variables
           print("single Nexus Backup Unraid template is well formed and least-privilege by default")
@@ -146,6 +149,8 @@ jobs:
             test -s /app/docs/emergency-recovery.md
             node --check /app/apps/local-server/bin/emergency-export.mjs
             node --check /app/apps/local-server/lib/emergency-export.mjs
+            node --check /app/apps/local-server/lib/repository-settings.mjs
+            node --check /app/apps/local-server/web/repository-settings.js
           '
       - name: Verify inert Agent starter config
         shell: bash
@@ -242,6 +247,9 @@ jobs:
             sleep 1
           done
           [ "$stopped" = 1 ] || { echo 'appliance stayed alive after Repository process died' >&2; docker logs nexus-backup-ci >&2; exit 1; }
+      - name: Exercise direct Internet Repository protections
+        shell: bash
+        run: bash .github/scripts/test-internet-repository.sh nexus-backup:ci
       - name: Verify image version metadata
         shell: bash
         run: |
