@@ -28,14 +28,15 @@ Remote workstation -> direct HTTPS -> Repository -> /backup/workstations
 
 Repository and Control endpoints are deliberately independent. A Cloudflare Tunnel is acceptable for Control because it carries only metadata/jobs; Repository backup bytes must bypass it.
 
-Active branch/PR:
+M10 PR #33 merged as:
 
 ```text
-branch: m10-internet-repository
-PR:     #33 (draft)
+merge:   1be0126a64592b369862c4b39f8a111ed1e323c3
+PR CI:   #282 green on exact head acd68c7e99df94f06012a631d887902e9f290a02
+main CI: #283 green on exact merge 1be0126a64592b369862c4b39f8a111ed1e323c3
 ```
 
-M10 is not merge-ready until direct-Internet live CI, docs and security/diff review are green.
+The security/diff review was completed before merge. No inline review threads remained, and the unified-image Internet-mode gate passed on both PR and post-merge main CI.
 
 ## M10 implementation contract
 
@@ -139,7 +140,7 @@ image:    ghcr.io/swamp2k/nexus-backup@sha256:be927d306f28501999bc475a779f58ef6d
 
 The manual RC did not move `latest`. Unraid verified matching version, revision and immutable digest. Distribution preflight passed.
 
-That RC remains valid evidence for the one-container packaging path, but **do not start the real workstation acceptance on 0.8.0-rc.1 now**: M10 changes the required Repository connectivity contract. Publish and verify a new M10 RC after PR #33 merges.
+That RC remains valid evidence for the one-container packaging path, but **do not start the real workstation acceptance on 0.8.0-rc.1 now**: M10 changes the required Repository connectivity contract. Publish and verify a new M10 RC from merge `1be0126a64592b369862c4b39f8a111ed1e323c3` first.
 
 ## Non-negotiable restore/recovery invariants
 
@@ -162,7 +163,7 @@ PR #30 merged as `f5c1ac01ed6ced6a11ea6f351cae431bace10b4e`. PR #31 synchronized
 
 Existing appliance CI proves Node/typecheck, Linux/native-Windows Go, installer syntax, one Unraid template, one appliance image, inert fresh Agent, real Repository TLS/auth Restic `init` + `cat config`, invalid-credential rejection, fail-as-one-unit supervision and no default privileged/SYS_ADMIN/FUSE.
 
-M10 adds a separate live gate for Internet mode: NAT-style advertised port distinct from local listen port, real backup through the Repository, and proof that append-only rejects a destructive remote `restic forget` while the snapshot remains readable.
+M10 adds a separate live gate for Internet mode: NAT-style advertised port distinct from local listen port, real backup through the Repository, and proof that append-only rejects destructive remote snapshot deletion with HTTP 403 while the snapshot remains readable. This gate passed on PR CI #282 and post-merge main CI #283.
 
 ## Explicit beta / pre-production gaps
 
@@ -188,16 +189,12 @@ The isolated acceptance test may use disposable secrets/repositories, but passin
 
 ## Next gates
 
-1. finish PR #33 runtime/UI/docs and direct-Internet live CI;
-2. security/diff-review full `server.mjs`, `index.html`, Repository scripts and template;
-3. require all PR CI green and merge #33;
-4. require post-merge main CI green;
-5. publish a new exact single-image M10 RC without moving `latest`;
-6. pull/verify its immutable digest on Tower;
-7. install NexusBackup pinned to that digest with the selected public Repository hostname/port;
-8. prove Repository reachability from a genuinely off-LAN network and Control reachability through the separate HTTPS control path;
-9. run the existing backup -> inventory -> integrity -> dry-run -> staging restore -> independent SHA-256 acceptance sequence;
-10. keep PCWatch-backup and standalone Copyarr unchanged until later explicit cutover.
+1. publish a new exact single-image M10 prerelease from `1be0126a64592b369862c4b39f8a111ed1e323c3` without moving `latest`;
+2. record the resulting immutable digest and pull/verify it on Tower;
+3. install NexusBackup pinned to that digest with the selected public Repository hostname/port;
+4. prove Repository reachability from a genuinely off-LAN network and Control reachability through the separate HTTPS control path;
+5. run the existing backup -> inventory -> integrity -> dry-run -> staging restore -> independent SHA-256 acceptance sequence;
+6. keep PCWatch-backup and standalone Copyarr unchanged until later explicit cutover.
 
 A real workload PASS has **not** happened yet.
 
@@ -217,6 +214,7 @@ A real workload PASS has **not** happened yet.
 - collapse to one Unraid appliance container, PR #30: `f5c1ac01ed6ced6a11ea6f351cae431bace10b4e`
 - single-container acceptance handoff, PR #31: `91bf2569bd301e29e0a55eaff70aa794669d2d8e`
 - acceptance-ready docs sync, PR #32: `7a87ab9ccc4189522c58a7ab69159af182b9df09`
+- direct Internet workstation Repository, PR #33: `1be0126a64592b369862c4b39f8a111ed1e323c3`
 
 ## Working rule
 
