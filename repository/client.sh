@@ -3,8 +3,7 @@ set -eu
 
 umask 077
 CONFIG_DIR=${NEXUS_BACKUP_REPOSITORY_CONFIG_DIR:-/config}
-HOST=${NEXUS_BACKUP_REPOSITORY_HOST:-}
-PORT=${NEXUS_BACKUP_REPOSITORY_PORT:-8000}
+SETTINGS_BIN=${NEXUS_BACKUP_REPOSITORY_SETTINGS_BIN:-/usr/local/bin/nexus-repository-settings}
 HTPASSWD="$CONFIG_DIR/.htpasswd"
 CLIENTS_DIR="$CONFIG_DIR/clients"
 TLS_CERT="$CONFIG_DIR/repository-tls.crt"
@@ -19,7 +18,14 @@ USER_NAME=$1
 REPO_NAME=${2:-main}
 ROTATE=${3:-}
 [ -z "$ROTATE" ] || [ "$ROTATE" = "--rotate" ] || usage
-[ -n "$HOST" ] || { echo "NEXUS_BACKUP_REPOSITORY_HOST is not configured" >&2; exit 1; }
+
+HOST=$("$SETTINGS_BIN" get host 2>/dev/null || true)
+LISTEN_PORT=$("$SETTINGS_BIN" get listen-port 2>/dev/null || echo 8000)
+PORT=$("$SETTINGS_BIN" get endpoint-port 2>/dev/null || echo "$LISTEN_PORT")
+EXPOSURE=$("$SETTINGS_BIN" get exposure 2>/dev/null || echo lan)
+APPEND_ONLY=$("$SETTINGS_BIN" get append-only 2>/dev/null || { [ "$EXPOSURE" = internet ] && echo true || echo false; })
+
+[ -n "$HOST" ] || { echo "Repository endpoint host is not configured" >&2; exit 1; }
 [ -s "$TLS_CERT" ] || { echo "repository CA certificate is not ready" >&2; exit 1; }
 
 case "$USER_NAME" in
@@ -54,6 +60,7 @@ REPOSITORY="rest:https://$HOST:$PORT/$USER_NAME/$REPO_NAME"
 CA_SHA256=$(sha256sum "$TLS_CERT" | awk '{print $1}')
 CA_B64=$(openssl base64 -A -in "$TLS_CERT")
 cat <<EOF
+# Nexus Backup Repository endpoint: $EXPOSURE · append-only=$APPEND_ONLY
 # Paste these lines into an elevated PowerShell on the workstation before running its Nexus install command.
 # The public CA is carried out-of-band in this local helper output; Repository exposes no HTTP bootstrap port.
 # Transport credentials remain local to Repository + workstation and are never sent to Nexus Control.
