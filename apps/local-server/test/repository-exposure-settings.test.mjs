@@ -64,7 +64,7 @@ test("runtime and packaging keep direct Repository protection explicit", async (
   assert.match(entrypointText, /--append-only/);
   assert.match(entrypointText, /EXPOSURE.*internet/s);
   assert.match(clientText, /endpoint-port/);
-  assert.match(clientText, /rest:https:\/\/$HOST:\$PORT/);
+  assert.match(clientText, /REPOSITORY="rest:https:\/\/\$HOST:\$PORT\/\$USER_NAME\/\$REPO_NAME"/);
   assert.match(dockerfileText, /nexus-repository-settings/);
   assert.match(templateText, /NEXUS_BACKUP_REPOSITORY_EXPOSURE/);
   assert.match(templateText, /NEXUS_BACKUP_REPOSITORY_ENDPOINT_PORT/);
