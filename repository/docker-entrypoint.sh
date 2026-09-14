@@ -5,26 +5,55 @@ umask 077
 
 CONFIG_DIR=${NEXUS_BACKUP_REPOSITORY_CONFIG_DIR:-/config}
 DATA_DIR=${NEXUS_BACKUP_REPOSITORY_DATA_DIR:-/data}
-HOST=${NEXUS_BACKUP_REPOSITORY_HOST:-}
-PORT=${NEXUS_BACKUP_REPOSITORY_PORT:-8000}
 INITIAL_USER=${NEXUS_BACKUP_REPOSITORY_INITIAL_USER:-}
+SETTINGS_BIN=${NEXUS_BACKUP_REPOSITORY_SETTINGS_BIN:-/usr/local/bin/nexus-repository-settings}
 
 fail() {
   echo "Nexus Backup Repository: $*" >&2
   exit 1
 }
 
-[ -n "$HOST" ] || fail "NEXUS_BACKUP_REPOSITORY_HOST is required and must be the LAN DNS name or IPv4 address used by workstations"
-case "$HOST" in
-  *[!A-Za-z0-9.-]*) fail "NEXUS_BACKUP_REPOSITORY_HOST contains unsupported characters" ;;
-esac
-case "$PORT" in
-  ''|*[!0-9]*) fail "repository port must be numeric" ;;
-esac
-[ "$PORT" -ge 1 ] 2>/dev/null && [ "$PORT" -le 65535 ] 2>/dev/null || fail "repository port must be between 1 and 65535"
+mkdir -p "$CONFIG_DIR/clients" "$CONFIG_DIR/settings" "$DATA_DIR"
+chmod 0700 "$CONFIG_DIR" "$CONFIG_DIR/clients" "$CONFIG_DIR/settings"
 
-mkdir -p "$CONFIG_DIR/clients" "$DATA_DIR"
-chmod 0700 "$CONFIG_DIR" "$CONFIG_DIR/clients"
+seed_setting() {
+  key=$1
+  value=$2
+  file="$CONFIG_DIR/settings/$key"
+  if [ ! -s "$file" ] && [ -n "$value" ]; then
+    "$SETTINGS_BIN" set "$key" "$value" >/dev/null
+  fi
+}
+
+EXPOSURE_ENV=${NEXUS_BACKUP_REPOSITORY_EXPOSURE:-lan}
+HOST_ENV=${NEXUS_BACKUP_REPOSITORY_HOST:-}
+LISTEN_PORT_ENV=${NEXUS_BACKUP_REPOSITORY_PORT:-8000}
+ENDPOINT_PORT_ENV=${NEXUS_BACKUP_REPOSITORY_ENDPOINT_PORT:-$LISTEN_PORT_ENV}
+APPEND_ONLY_ENV=${NEXUS_BACKUP_REPOSITORY_APPEND_ONLY:-}
+
+seed_setting exposure "$EXPOSURE_ENV"
+seed_setting host "$HOST_ENV"
+seed_setting listen-port "$LISTEN_PORT_ENV"
+seed_setting endpoint-port "$ENDPOINT_PORT_ENV"
+if [ -n "$APPEND_ONLY_ENV" ]; then
+  seed_setting append-only "$APPEND_ONLY_ENV"
+fi
+
+EXPOSURE=$("$SETTINGS_BIN" get exposure 2>/dev/null || echo lan)
+HOST=$("$SETTINGS_BIN" get host 2>/dev/null || true)
+PORT=$("$SETTINGS_BIN" get listen-port 2>/dev/null || echo 8000)
+ENDPOINT_PORT=$("$SETTINGS_BIN" get endpoint-port 2>/dev/null || echo "$PORT")
+if APPEND_ONLY=$("$SETTINGS_BIN" get append-only 2>/dev/null); then
+  :
+elif [ "$EXPOSURE" = "internet" ]; then
+  APPEND_ONLY=true
+  "$SETTINGS_BIN" set append-only true >/dev/null
+else
+  APPEND_ONLY=false
+  "$SETTINGS_BIN" set append-only false >/dev/null
+fi
+
+[ -n "$HOST" ] || fail "Repository endpoint host is required; configure the DNS name or IPv4 address used by workstations"
 
 HTPASSWD="$CONFIG_DIR/.htpasswd"
 TLS_KEY="$CONFIG_DIR/repository-tls.key"
@@ -64,8 +93,10 @@ if [ -n "$INITIAL_USER" ]; then
   echo "Nexus Backup Repository: initial client '$INITIAL_USER' is ready; retrieve its local setup values with: nexus-repository-client $INITIAL_USER main"
 fi
 
-echo "Nexus Backup Repository: listening on TLS port $PORT; private authenticated repositories are enabled"
-exec /usr/local/bin/rest-server \
+echo "Nexus Backup Repository: exposure=$EXPOSURE endpoint=https://$HOST:$ENDPOINT_PORT listen=:$PORT append-only=$APPEND_ONLY"
+echo "Nexus Backup Repository: TLS 1.3, bcrypt authentication and private repositories are enabled"
+
+set -- \
   --path "$DATA_DIR" \
   --listen ":$PORT" \
   --htpasswd-file "$HTPASSWD" \
@@ -75,3 +106,9 @@ exec /usr/local/bin/rest-server \
   --tls-key "$TLS_KEY" \
   --tls-min-ver 1.3 \
   --log -
+
+if [ "$APPEND_ONLY" = "true" ]; then
+  set -- "$@" --append-only
+fi
+
+exec /usr/local/bin/rest-server "$@"
