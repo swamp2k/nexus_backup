@@ -13,6 +13,7 @@ cleanup() {
   docker rm -f "$NAME" >/dev/null 2>&1 || true
   docker volume rm "$CONFIG_VOLUME" "$STATE_VOLUME" "$BACKUP_VOLUME" >/dev/null 2>&1 || true
   rm -rf "$TMP_DIR"
+  rm -f /tmp/nexus-internet-forget.out /tmp/nexus-internet-forget.err
 }
 trap cleanup EXIT
 
@@ -55,7 +56,7 @@ fi
 
 settings=$(docker exec "$NAME" nexus-repository-settings show)
 grep -Eq 'Exposure:[[:space:]]+internet' <<<"$settings"
-grep -Eq "Listen port:[[:space:]]+8000" <<<"$settings"
+grep -Eq 'Listen port:[[:space:]]+8000' <<<"$settings"
 grep -Eq "Endpoint port:[[:space:]]+$HOST_PORT" <<<"$settings"
 grep -Eq 'Append-only:[[:space:]]+true' <<<"$settings"
 
@@ -100,16 +101,25 @@ snapshot_id=$(restic_run snapshots --json | node -e '
 ')
 test -n "$snapshot_id"
 
-# Append-only must prevent a compromised workstation from deleting its existing snapshot.
-if restic_run forget "$snapshot_id" >/tmp/nexus-internet-forget.out 2>/tmp/nexus-internet-forget.err; then
-  echo "Internet Repository append-only mode unexpectedly allowed restic forget" >&2
+# Restic 0.18.x may return zero even when the backend refuses the object DELETE,
+# so prove server enforcement from both the 403 response and snapshot persistence.
+set +e
+restic_run forget "$snapshot_id" >/tmp/nexus-internet-forget.out 2>/tmp/nexus-internet-forget.err
+forget_status=$?
+set -e
+if ! grep -Eq '403 Forbidden|unexpected HTTP response \(403\)' /tmp/nexus-internet-forget.err; then
+  echo "Internet Repository append-only test did not observe the expected 403 refusal (restic exit=$forget_status)" >&2
   cat /tmp/nexus-internet-forget.out >&2 || true
   cat /tmp/nexus-internet-forget.err >&2 || true
   exit 1
 fi
 
-# Existing backup remains readable after the refused destructive operation.
+# Existing backup must still be present/readable after the refused destructive operation.
 restic_run cat config >/dev/null
-restic_run snapshots --json | grep -Fq "$snapshot_id"
+snapshots_after=$(restic_run snapshots --json)
+grep -Fq "$snapshot_id" <<<"$snapshots_after" || {
+  echo "append-only refusal did not preserve the snapshot" >&2
+  exit 1
+}
 
-echo "direct Internet Repository integration passed: TLS/auth backup works and append-only rejects remote deletion"
+echo "direct Internet Repository integration passed: TLS/auth backup works; delete received 403 and snapshot persisted"
