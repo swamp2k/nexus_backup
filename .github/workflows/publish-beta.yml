@@ -1,0 +1,90 @@
+name: Publish beta image
+
+on:
+  workflow_run:
+    workflows:
+      - CI
+    types:
+      - completed
+    branches:
+      - main
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: publish-beta
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out tested main commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Verify tested commit is still main
+        id: freshness
+        shell: bash
+        env:
+          TESTED_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          git fetch --no-tags origin main
+          CURRENT_SHA="$(git rev-parse origin/main)"
+          if [[ "$CURRENT_SHA" == "$TESTED_SHA" ]]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping stale CI result: tested $TESTED_SHA, current main is $CURRENT_SHA" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Log in to GHCR
+        if: steps.freshness.outputs.publish == 'true'
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        if: steps.freshness.outputs.publish == 'true'
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ghcr.io/swamp2k/nexus-backup
+          tags: |
+            type=raw,value=beta
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=beta
+            org.opencontainers.image.revision=${{ github.event.workflow_run.head_sha }}
+
+      - name: Build and push Nexus Backup beta appliance
+        if: steps.freshness.outputs.publish == 'true'
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            NEXUS_BACKUP_VERSION=beta
+            NEXUS_BACKUP_REVISION=${{ github.event.workflow_run.head_sha }}
+
+      - name: Record beta identity
+        if: steps.freshness.outputs.publish == 'true'
+        shell: bash
+        run: |
+          {
+            echo "### Nexus Backup beta"
+            echo "- channel: \`beta\`"
+            echo "- source: \`${{ github.event.workflow_run.head_sha }}\`"
+            echo "- CI run: \`${{ github.event.workflow_run.id }}\`"
+            echo "- digest: \`${{ steps.build.outputs.digest }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
