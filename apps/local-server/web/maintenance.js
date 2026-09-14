@@ -3,7 +3,10 @@ let state=[];
 let loading=false;
 
 window.addEventListener("hashchange",()=>setTimeout(()=>{if(isPlans())void refresh();},30));
-new MutationObserver(()=>{if(isPlans())queueMicrotask(decorate)}).observe(content,{childList:true,subtree:true});
+// Observe only replacement of the top-level content view. Watching the whole
+// Plans subtree makes decorate() observe its own DOM writes and can create an
+// endless microtask/render loop that freezes the dashboard tab.
+new MutationObserver(()=>{if(isPlans())queueMicrotask(decorate)}).observe(content,{childList:true});
 setInterval(()=>{if(isPlans())void refresh(true)},5000);
 document.addEventListener("click",event=>{
   const button=event.target.closest?.("[data-run-maintenance]");
