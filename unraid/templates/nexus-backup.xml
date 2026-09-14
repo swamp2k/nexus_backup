@@ -2,7 +2,7 @@
 <Container version="2">
   <Beta>True</Beta>
   <Name>NexusBackup</Name>
-  <Repository>ghcr.io/swamp2k/nexus-backup:latest</Repository>
+  <Repository>ghcr.io/swamp2k/nexus-backup:beta</Repository>
   <Registry>https://github.com/users/swamp2k/packages/container/nexus-backup</Registry>
   <Network>host</Network>
   <Shell>sh</Shell>
