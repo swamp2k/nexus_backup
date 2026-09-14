@@ -140,7 +140,7 @@ image:    ghcr.io/swamp2k/nexus-backup@sha256:be927d306f28501999bc475a779f58ef6d
 
 The manual RC did not move `latest`. Unraid verified matching version, revision and immutable digest. Distribution preflight passed.
 
-That RC remains valid evidence for the one-container packaging path, but **do not start the real workstation acceptance on 0.8.0-rc.1 now**: M10 changes the required Repository connectivity contract. Publish and verify a new M10 RC from merge `1be0126a64592b369862c4b39f8a111ed1e323c3` first.
+That RC remains valid evidence for the one-container packaging path, but **do not start the real workstation acceptance on 0.8.0-rc.1 now**: M10 changes the required Repository connectivity contract. Publish and verify a new M10 RC from the exact current `main` SHA after the status sync; the guarded manual release requires `expected_sha` to equal current `main`.
 
 ## Non-negotiable restore/recovery invariants
 
@@ -189,7 +189,7 @@ The isolated acceptance test may use disposable secrets/repositories, but passin
 
 ## Next gates
 
-1. publish a new exact single-image M10 prerelease from `1be0126a64592b369862c4b39f8a111ed1e323c3` without moving `latest`;
+1. publish a new exact single-image M10 prerelease from the exact current `main` SHA without moving `latest`;
 2. record the resulting immutable digest and pull/verify it on Tower;
 3. install NexusBackup pinned to that digest with the selected public Repository hostname/port;
 4. prove Repository reachability from a genuinely off-LAN network and Control reachability through the separate HTTPS control path;
@@ -215,6 +215,7 @@ A real workload PASS has **not** happened yet.
 - single-container acceptance handoff, PR #31: `91bf2569bd301e29e0a55eaff70aa794669d2d8e`
 - acceptance-ready docs sync, PR #32: `7a87ab9ccc4189522c58a7ab69159af182b9df09`
 - direct Internet workstation Repository, PR #33: `1be0126a64592b369862c4b39f8a111ed1e323c3`
+- M10 status sync, PR #34: `b7540daae16672aa11a244c9cf2c6d777ae5642c`
 
 ## Working rule
 
