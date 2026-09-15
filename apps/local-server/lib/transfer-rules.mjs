@@ -20,8 +20,8 @@ export function createTransferRuleService({ db, enqueueJob, loadAgentConfig, now
       ORDER BY r.name COLLATE NOCASE ASC, r.id ASC
     `).all()).results ?? [];
     const countRows = (await db.prepare(`
-      SELECT rule_id, state, COUNT(*) AS count, COALESCE(SUM(size),0) AS bytes
-      FROM transfer_objects GROUP BY rule_id, state
+      SELECT rule_id, state, object_count AS count, bytes
+      FROM transfer_object_summary
     `).all()).results ?? [];
     const counts = new Map();
     for (const row of countRows) {
