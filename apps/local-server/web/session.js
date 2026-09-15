@@ -254,7 +254,7 @@ function installWorkstationRecoveryDashboard(){
       const supported=Boolean(ws?.capabilities?.includes("workstation.recovery.v1"));const ready=Boolean(ws?.enabled&&ws?.online&&ws?.status?.repositoryConfigured&&supported);
       button.disabled=!ready;button.title=ready?"Browse snapshots and restore safely to staging":!supported?"Update the workstation agent to enable recovery":!ws?.online?"Workstation must be online":"Workstation storage must be configured";
     });
-    const badge=content.querySelector("#workstations-view .transfer-hero .badge");if(badge)badge.textContent="M7 recovery";
+    const badge=content.querySelector("#workstations-view .transfer-hero .badge");setTextContentIfChanged(badge,"M7 recovery");
   }
 
   function openRecovery(ws){
@@ -338,6 +338,8 @@ function installWorkstationRecoveryDashboard(){
   function esc(value){return String(value??"").replace(/[&<>"']/g,char=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[char]))}
   function attr(value){return esc(value).replace(/`/g,"&#096;")}
 }
+
+function setTextContentIfChanged(element,value){if(element&&element.textContent!==value)element.textContent=value}
 
 function injectWorkstationRecoveryStyles(){
   const style=document.createElement("style");style.id="workstation-recovery-styles";style.textContent=`
