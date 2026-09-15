@@ -1,6 +1,6 @@
 const state={view:location.hash.replace(/^#/,"")||"overview",jobs:[],agents:[],config:{available:false,sources:[],repositories:[],endpoints:[]},info:null,health:null,filter:"",statusFilter:"",selectedJob:null,selectedEvents:[],refreshing:false};
 const pageTitles={overview:"Overview",jobs:"Jobs",sources:"Sources",destinations:"Destinations",repositories:"Repositories",agent:"Agent",settings:"Settings"};
-const sidecarViews=new Set(["plans","transfers","devices"]);
+const sidecarViews=new Set(["plans","transfers","devices","workstations"]);
 const terminalStates=new Set(["completed","partial","failed","cancelled"]);const activeStates=new Set(["leased","preparing","running","finalizing"]);
 const content=document.querySelector("#content"),pageTitle=document.querySelector("#page-title"),connectionPill=document.querySelector("#connection-pill"),jobModal=document.querySelector("#job-modal"),jobFields=document.querySelector("#job-fields"),jobType=document.querySelector("#job-type"),jobForm=document.querySelector("#job-form"),drawer=document.querySelector("#job-drawer"),drawerTitle=document.querySelector("#drawer-title"),drawerContent=document.querySelector("#drawer-content"),toastStack=document.querySelector("#toast-stack");
 applyTheme(localStorage.getItem("nexus-backup-theme")||"dark");bindStaticEvents();await refreshAll();render();setInterval(()=>void refreshAll({quiet:true}),5000);
