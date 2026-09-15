@@ -113,6 +113,7 @@ void runPlanScheduler();
 const STATIC_FILES = new Map([
   ["/", ["index.html", "text/html; charset=utf-8"]],
   ["/index.html", ["index.html", "text/html; charset=utf-8"]],
+  ["/session.js", ["session.js", "text/javascript; charset=utf-8"]],
   ["/app.js", ["app.js", "text/javascript; charset=utf-8"]],
   ["/telemetry.js", ["telemetry.js", "text/javascript; charset=utf-8"]],
   ["/plans.js", ["plans.js", "text/javascript; charset=utf-8"]],
