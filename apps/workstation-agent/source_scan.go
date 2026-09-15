@@ -10,7 +10,10 @@ import (
     "strings"
 )
 
-const maxSourceScanNodes = 75000
+const (
+    maxSourceScanNodes       = 75000
+    maxSourceScanApproxBytes = 10 * 1024 * 1024
+)
 
 type sourceScanNode struct {
     Path         string
@@ -23,9 +26,10 @@ type sourceScanNode struct {
 }
 
 type sourceScanResult struct {
-    Drives    []string
-    Nodes     []sourceScanNode
-    Truncated bool
+    Drives      []string
+    Nodes       []sourceScanNode
+    Truncated   bool
+    approxBytes int
 }
 
 // availableDriveRoots is intentionally lightweight. It only discovers roots;
@@ -76,12 +80,17 @@ func scanSourceTree(ctx context.Context, roots []string) (sourceScanResult, erro
 func scanSourceDirectory(ctx context.Context, path, parent string, result *sourceScanResult) sourceScanNode {
     node := sourceScanNode{Path: path, Parent: parent, Name: sourceNodeName(path)}
     if err := ctx.Err(); err != nil { node.Inaccessible = true; return node }
-    if len(result.Nodes) >= maxSourceScanNodes { result.Truncated = true; return node }
+    estimated := len(node.Path) + len(node.Parent) + len(node.Name) + 160
+    if len(result.Nodes) >= maxSourceScanNodes || result.approxBytes+estimated > maxSourceScanApproxBytes {
+        result.Truncated = true
+        return node
+    }
 
     entries, err := os.ReadDir(path)
     if err != nil {
         node.Inaccessible = true
         result.Nodes = append(result.Nodes, node)
+        result.approxBytes += estimated
         return node
     }
     for _, entry := range entries {
@@ -101,7 +110,12 @@ func scanSourceDirectory(ctx context.Context, path, parent string, result *sourc
         node.Files++
         if info.Size() > 0 { node.Bytes += info.Size() }
     }
-    result.Nodes = append(result.Nodes, node)
+    if result.approxBytes+estimated <= maxSourceScanApproxBytes && len(result.Nodes) < maxSourceScanNodes {
+        result.Nodes = append(result.Nodes, node)
+        result.approxBytes += estimated
+    } else {
+        result.Truncated = true
+    }
     return node
 }
 

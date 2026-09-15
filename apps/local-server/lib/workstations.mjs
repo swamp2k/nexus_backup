@@ -256,10 +256,10 @@ export function createWorkstationService({
     const device = await requireAuthenticatedWorkstation(rawToken);
     await recoverExpired(device.id);
     const status = await db.prepare("SELECT repository_configured FROM workstation_status WHERE device_id=?").bind(device.id).first();
-    const repositoryReady = Number(status?.repository_configured ?? 0) === 1;
-    const row = repositoryReady
-      ? await db.prepare(`SELECT * FROM workstation_runs WHERE device_id=? AND state='queued' ORDER BY queued_at ASC,id ASC LIMIT 1`).bind(device.id).first()
-      : await db.prepare(`SELECT * FROM workstation_runs WHERE device_id=? AND state='queued' AND operation='source-scan' ORDER BY queued_at ASC,id ASC LIMIT 1`).bind(device.id).first();
+    const repositoryKnownMissing = status !== null && status !== undefined && Number(status.repository_configured) !== 1;
+    const row = repositoryKnownMissing
+      ? await db.prepare(`SELECT * FROM workstation_runs WHERE device_id=? AND state='queued' AND operation='source-scan' ORDER BY queued_at ASC,id ASC LIMIT 1`).bind(device.id).first()
+      : await db.prepare(`SELECT * FROM workstation_runs WHERE device_id=? AND state='queued' ORDER BY queued_at ASC,id ASC LIMIT 1`).bind(device.id).first();
     if (!row) return { run: null, nextPollSeconds: 15 };
     const token = requireLeaseToken(leaseToken());
     const at = nowDate(now);
@@ -699,7 +699,7 @@ function normalizeSourceDrives(value) {
     if (!/^[A-Z]:\\$/.test(drive)) throw new RangeError("drives must be Windows drive roots such as C:\\");
     if (!seen.has(drive)) { seen.add(drive); result.push(drive); }
   }
-  return result;
+  return result.sort();
 }
 function normalizeReportedDrives(value) {
   if (value === undefined || value === null) return [];

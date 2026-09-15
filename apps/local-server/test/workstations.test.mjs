@@ -116,6 +116,23 @@ test("scheduled workstation runs coalesce missed schedules",async()=>{
   }finally{await f.close();}
 });
 
+test("explicit needs-storage status leaves ordinary backup queued while source scan may run",async()=>{
+  const f=await fixture();
+  try{
+    await f.service.putPolicy(f.device.id,policy);
+    const backup=await f.service.runNow(f.device.id);
+    await f.service.reportStatus(f.token,{repositoryConfigured:false,agentState:"needs-storage",localDrives:["C:\\"]});
+    const firstPoll=await f.service.poll(f.token);
+    assert.equal(firstPoll.run,null);
+    // Remove the queued backup only for this fixture so a source scan can own the one-active-run invariant.
+    await f.db.prepare("UPDATE workstation_runs SET state='cancelled',finished_at=updated_at WHERE id=?").bind(backup.id).run();
+    const scan=await f.service.queueSourceScan(f.device.id,{drives:["C:\\"]});
+    const secondPoll=await f.service.poll(f.token);
+    assert.equal(secondPoll.run.id,scan.id);
+    assert.equal(secondPoll.run.operation,"source-scan");
+  }finally{await f.close();}
+});
+
 test("source scan runs without repository setup and persists the latest tree",async()=>{
   const f=await fixture();
   try{
