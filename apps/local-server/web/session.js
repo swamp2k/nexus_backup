@@ -144,7 +144,7 @@ function installWorkstationDashboard(){
     const backupState=run?.state||"never";
     const pct=progress?.percent!=null?Math.max(0,Math.min(100,Number(progress.percent))):null;
     return `<section class="card workstation-card" data-ws="${attr(ws.id)}">
-      <div class="transfer-head"><div class="transfer-title"><span class="transfer-state${ws.online?"":" paused"}"></span><div><h2>${esc(ws.name)}</h2><span>${esc(ws.hostname||ws.id)} · ${esc(ws.version||"not installed yet")}</span></div></div><div class="transfer-actions"><span class="badge ${stateTone}">${state}</span><button class="button ghost compact" data-ws-action="policy" data-id="${attr(ws.id)}">Policy</button><button class="button primary compact" data-ws-action="run" data-id="${attr(ws.id)}" ${!ws.online||!status.repositoryConfigured||!ws.policy?"disabled":""}>Run now</button></div></div>
+      <div class="transfer-head"><div class="transfer-title"><span class="transfer-state${ws.online?"":" paused"}"></span><div><h2>${esc(ws.name)}</h2><span>${esc(ws.hostname||ws.id)} · ${esc(ws.version||"not installed yet")}</span></div></div><div class="transfer-actions"><span class="badge ${stateTone}">${state}</span><button class="button ghost compact" data-ws-action="sources" data-id="${attr(ws.id)}">Sources</button><button class="button ghost compact" data-ws-action="policy" data-id="${attr(ws.id)}">Policy</button><button class="button primary compact" data-ws-action="run" data-id="${attr(ws.id)}" ${!ws.online||!status.repositoryConfigured||!ws.policy?"disabled":""}>Run now</button></div></div>
       <div class="transfer-facts">${fact("Storage",storage,status.repositoryConfigured?"Credentials local":"Configure workstation.json",status.repositoryConfigured?"":"warn")}${fact("Last success",status.lastSuccessAt?relative(status.lastSuccessAt):"Never",status.lastSnapshotId?`Snapshot ${String(status.lastSnapshotId).slice(0,12)}`:"No snapshot")}${fact("Next run",ws.policy?.nextRunAt?relative(ws.policy.nextRunAt):"Not scheduled",ws.policy?.enabled?`${scheduleLabel(ws.policy.schedule)} · ${ws.policy.timezone}`:"Policy disabled")}${fact("Last run",backupState,run?.error||status.lastError||"No error",run?.state==="failed"||run?.state==="partial"?"danger":"")}</div>
       ${pct!==null?`<div class="ws-progress"><div><span style="width:${pct.toFixed(1)}%"></span></div><small>${esc(progress.phase||"running")} · ${pct.toFixed(0)}%${progress.bytesDone!=null?` · ${bytes(progress.bytesDone)} / ${bytes(progress.bytesTotal||0)}`:""}${progress.currentPath?` · ${esc(progress.currentPath)}`:""}</small></div>`:""}
       <div class="transfer-meta filters"><span>Sources: ${ws.policy?.sourcePaths?.length?esc(ws.policy.sourcePaths.join(", ")):"not configured"}</span><span>Excludes: ${ws.policy?.excludePatterns?.length?esc(ws.policy.excludePatterns.join(", ")):"none"}</span><span>Retention: ${ws.policy?`${ws.policy.retention.keepDaily}d / ${ws.policy.retention.keepWeekly}w / ${ws.policy.retention.keepMonthly}m`:"—"}</span><span>Last seen: ${ws.lastSeenAt?relative(ws.lastSeenAt):"never"}</span></div>
@@ -154,6 +154,7 @@ function installWorkstationDashboard(){
   function bind(){
     content.querySelectorAll("[data-ws-action]").forEach(button=>button.addEventListener("click",async()=>{
       const ws=workstations.find(item=>item.id===button.dataset.id);if(!ws)return;
+      if(button.dataset.wsAction==="sources"){void openSources(ws);return;}
       if(button.dataset.wsAction==="policy"){openPolicy(ws);return;}
       if(button.dataset.wsAction==="run"){
         button.disabled=true;
@@ -180,6 +181,63 @@ function installWorkstationDashboard(){
     document.body.append(tokenModal);tokenModal.querySelectorAll("[data-token-close]").forEach(button=>button.addEventListener("click",()=>{tokenModal.remove();tokenModal=null}));
     tokenModal.querySelector("[data-copy-install]")?.addEventListener("click",async event=>{await navigator.clipboard.writeText(data.installCommand||"");event.currentTarget.textContent="Copied"});
   }
+
+  async function openSources(ws){
+    closeModal();
+    const supported=ws.capabilities?.includes("workstation.source-scan.v1");
+    const drives=ws.status?.localDrives??[];
+    const selected=new Set(ws.policy?.sourcePaths??[]);
+    modal=document.createElement("div");modal.className="modal-backdrop";
+    modal.innerHTML=`<section class="modal ws-policy-modal" role="dialog" aria-modal="true"><div class="modal-header"><div><p class="eyebrow">${esc(ws.name)}</p><h2>Backup sources</h2></div><button class="icon-button" data-ws-close>×</button></div>
+      <p class="muted-2">Run TreeSize once for the drives you want to inspect. Nexus stores that scan, and folder selection below only reads the saved snapshot — expanding folders never scans the PC again.</p>
+      <div class="ws-source-scan-controls"><div><strong>Drives</strong><div data-source-drives>${drives.map(d=>`<label><input type="checkbox" value="${attr(d)}" checked> ${esc(d)}</label>`).join("")||'<span class="muted-2">No local drives reported yet.</span>'}</div></div><button class="button ghost" data-source-scan ${!supported||!ws.online||!drives.length?"disabled":""}>Run TreeSize scan</button></div>
+      <div class="transfer-note" data-source-status>${!supported?"Update the workstation agent to enable source scanning.":"Loading latest saved scan…"}</div>
+      <div class="ws-source-tree" data-source-tree></div>
+      <div class="modal-actions"><button type="button" class="button ghost" data-ws-close>Cancel</button><button type="button" class="button primary" data-source-save ${!supported?"disabled":""}>Save selected folders</button></div></section>`;
+    document.body.append(modal);modal.querySelectorAll("[data-ws-close]").forEach(button=>button.addEventListener("click",closeModal));
+    const statusEl=modal.querySelector("[data-source-status]");const treeEl=modal.querySelector("[data-source-tree]");
+
+    async function loadScan(){
+      const data=await request(`/v1/local/workstations/${encodeURIComponent(ws.id)}/source-scan`);
+      renderSourceScan(data);return data;
+    }
+    function renderSourceScan(data){
+      const scan=data.scan;const run=data.run;
+      if(run?.active){statusEl.textContent=`TreeSize ${run.state}… The previous completed scan remains available until this one finishes.`}
+      else if(scan){statusEl.textContent=`Last TreeSize scan: ${new Date(scan.scannedAt).toLocaleString()} · ${scan.nodes.length} folders${scan.truncated?" · truncated":""}`}
+      else{statusEl.textContent="No saved TreeSize scan yet. Select one or more drives and run the scan once."}
+      treeEl.innerHTML="";if(!scan?.nodes?.length)return;
+      const children=new Map();
+      for(const node of scan.nodes){const key=node.parent||"";if(!children.has(key))children.set(key,[]);children.get(key).push(node)}
+      for(const group of children.values())group.sort((a,b)=>a.name.localeCompare(b.name,undefined,{sensitivity:"base"}));
+      const renderChildren=(parent,host)=>{for(const node of children.get(parent)||[]){
+        const row=document.createElement("div");row.className="ws-source-row";
+        const hasChildren=(children.get(node.path)||[]).length>0;
+        row.innerHTML=`<button type="button" class="icon-button compact" data-source-expand ${hasChildren?"":"disabled"}>${hasChildren?"▸":"·"}</button><label><input type="checkbox" data-source-path value="${attr(node.path)}" ${selected.has(node.path)?"checked":""}> <strong>${esc(node.name)}</strong></label><span>${bytes(node.bytes)} · ${node.files} files${node.inaccessible?" · inaccessible":""}</span>`;
+        host.append(row);
+        if(hasChildren){const child=document.createElement("div");child.className="ws-source-children";child.hidden=true;host.append(child);row.querySelector("[data-source-expand]").addEventListener("click",event=>{if(!child.dataset.loaded){renderChildren(node.path,child);child.dataset.loaded="1"}child.hidden=!child.hidden;event.currentTarget.textContent=child.hidden?"▸":"▾"})}
+      }};
+      renderChildren("",treeEl);
+    }
+    modal.querySelector("[data-source-scan]")?.addEventListener("click",async event=>{
+      const selectedDrives=[...modal.querySelectorAll("[data-source-drives] input:checked")].map(input=>input.value);if(!selectedDrives.length){toast("Choose a drive","Select at least one drive to scan.",true);return}
+      event.currentTarget.disabled=true;
+      try{const queued=await request(`/v1/local/workstations/${encodeURIComponent(ws.id)}/source-scan`,{method:"POST",body:{drives:selectedDrives}});statusEl.textContent="TreeSize scan queued…";
+        for(let i=0;i<300;i++){await new Promise(resolve=>setTimeout(resolve,2000));const data=await loadScan();if(data.run?.id===queued.run?.id&&data.run?.terminal)break}
+      }catch(error){toast("TreeSize scan failed",error.message,true)}finally{event.currentTarget.disabled=false}
+    });
+    modal.querySelector("[data-source-save]")?.addEventListener("click",async event=>{
+      const paths=compactSourcePaths([...modal.querySelectorAll("[data-source-path]:checked")].map(input=>input.value));
+      if(!paths.length){toast("No backup folders selected","Choose at least one folder from the saved scan.",true);return}
+      const p=ws.policy??{enabled:false,excludePatterns:[],schedule:{kind:"daily",time:"02:00"},timezone:Intl.DateTimeFormat().resolvedOptions().timeZone||"UTC",retention:{keepDaily:7,keepWeekly:4,keepMonthly:12}};
+      event.currentTarget.disabled=true;
+      try{await request(`/v1/local/workstations/${encodeURIComponent(ws.id)}/policy`,{method:"PUT",body:{enabled:p.enabled===true,sourcePaths:paths,excludePatterns:p.excludePatterns??[],schedule:p.schedule??{kind:"daily",time:"02:00"},timezone:p.timezone??"UTC",retention:p.retention??{keepDaily:7,keepWeekly:4,keepMonthly:12}}});closeModal();toast("Backup sources saved",`${ws.name}: ${paths.length} source path(s)`);await refresh(true)}
+      catch(error){toast("Could not save backup sources",error.message,true);event.currentTarget.disabled=false}
+    });
+    try{await loadScan()}catch(error){statusEl.textContent=error.message}
+  }
+
+  function compactSourcePaths(paths){const sorted=[...new Set(paths)].sort((a,b)=>a.length-b.length||a.localeCompare(b));const kept=[];for(const path of sorted){const lower=path.toLowerCase();if(kept.some(parent=>lower===parent.toLowerCase()||lower.startsWith(parent.toLowerCase().replace(/\\+$/,"")+"\\")))continue;kept.push(path)}return kept}
 
   function openPolicy(ws){
     closeModal();const p=ws.policy??{enabled:true,sourcePaths:[],excludePatterns:[],schedule:{kind:"daily",time:"02:00"},timezone:Intl.DateTimeFormat().resolvedOptions().timeZone||"UTC",retention:{keepDaily:7,keepWeekly:4,keepMonthly:12}};
@@ -211,7 +269,7 @@ function installWorkstationDashboard(){
 function injectWorkstationStyles(){
   if(document.querySelector("#workstation-styles"))return;
   const style=document.createElement("style");style.id="workstation-styles";style.textContent=`
-    .workstation-grid{display:grid;gap:16px}.workstation-card{overflow:hidden}.ws-progress{padding:0 18px 16px}.ws-progress>div{height:8px;border-radius:999px;background:var(--surface-3,#202735);overflow:hidden}.ws-progress>div>span{display:block;height:100%;background:currentColor}.ws-progress small{display:block;margin-top:7px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.ws-installer pre{white-space:pre-wrap;word-break:break-all;padding:14px;border-radius:10px;background:var(--surface-2,#111721);border:1px solid var(--border,#2b3442);max-height:220px;overflow:auto}.ws-installer{display:grid;gap:14px}.ws-form-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}.ws-policy-modal textarea{resize:vertical;min-height:90px}.ws-days>div{display:flex;flex-wrap:wrap;gap:10px;margin-top:8px}.ws-days>div label{display:flex;flex-direction:row;align-items:center;gap:5px}.transfer-fact.warn strong{color:var(--warning,#e5a93b)}@media(max-width:700px){.ws-form-grid{grid-template-columns:1fr}.workstation-card .transfer-head{align-items:flex-start}.workstation-card .transfer-actions{flex-wrap:wrap}.ws-progress small{white-space:normal}}
+    .workstation-grid{display:grid;gap:16px}.workstation-card{overflow:hidden}.ws-source-scan-controls{display:flex;justify-content:space-between;gap:16px;align-items:flex-end;margin:14px 0}.ws-source-scan-controls [data-source-drives]{display:flex;gap:12px;flex-wrap:wrap;margin-top:8px}.ws-source-tree{max-height:52vh;overflow:auto;border:1px solid var(--border,#2b3442);border-radius:10px;margin:14px 0}.ws-source-row{display:grid;grid-template-columns:32px minmax(220px,1fr) auto;align-items:center;gap:8px;padding:7px 10px;border-bottom:1px solid var(--border,#2b3442)}.ws-source-row>span{color:var(--muted,#9aa5b5);font-size:12px}.ws-source-children{padding-left:22px}.ws-progress{padding:0 18px 16px}.ws-progress>div{height:8px;border-radius:999px;background:var(--surface-3,#202735);overflow:hidden}.ws-progress>div>span{display:block;height:100%;background:currentColor}.ws-progress small{display:block;margin-top:7px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.ws-installer pre{white-space:pre-wrap;word-break:break-all;padding:14px;border-radius:10px;background:var(--surface-2,#111721);border:1px solid var(--border,#2b3442);max-height:220px;overflow:auto}.ws-installer{display:grid;gap:14px}.ws-form-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}.ws-policy-modal textarea{resize:vertical;min-height:90px}.ws-days>div{display:flex;flex-wrap:wrap;gap:10px;margin-top:8px}.ws-days>div label{display:flex;flex-direction:row;align-items:center;gap:5px}.transfer-fact.warn strong{color:var(--warning,#e5a93b)}@media(max-width:700px){.ws-form-grid{grid-template-columns:1fr}.workstation-card .transfer-head{align-items:flex-start}.workstation-card .transfer-actions{flex-wrap:wrap}.ws-progress small{white-space:normal}}
   `;document.head.append(style);
 }
 

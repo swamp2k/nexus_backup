@@ -121,11 +121,13 @@ func (a *agent) run() error {
 
 func (a *agent) report() error {
 	hostname, _ := os.Hostname()
+	capabilities := []string{"workstation.backup.v1", "workstation.recovery.v1", "workstation.restore-staging.v1", "workstation.integrity.v1", "restic.v1", "windows-vss.v1"}
+	if runtime.GOOS == "windows" { capabilities = append(capabilities, "workstation.source-scan.v1") }
 	response, err := a.client.reportDevice(deviceReport{
 		Version:      version,
 		Hostname:     hostname,
 		Platform:     runtime.GOOS + "/" + runtime.GOARCH,
-		Capabilities: []string{"workstation.backup.v1", "workstation.recovery.v1", "workstation.restore-staging.v1", "workstation.integrity.v1", "restic.v1", "windows-vss.v1"},
+		Capabilities: capabilities,
 	})
 	if err != nil {
 		return err
@@ -162,6 +164,7 @@ func (a *agent) reportStatus() error {
 		RepositoryConfigured: a.repositoryReady(),
 		RepositoryKind:       repositoryKind(a.cfg.Repository),
 		AgentState:           "idle",
+		LocalDrives:          availableDriveRoots(),
 		CurrentRunID:         runningID,
 		LastBackupAt:         state.LastBackupAt,
 		LastSuccessAt:        state.LastSuccessAt,
@@ -177,9 +180,6 @@ func (a *agent) reportStatus() error {
 }
 
 func (a *agent) pollOnce() error {
-	if !a.repositoryReady() {
-		return nil
-	}
 	a.mu.Lock()
 	busy := a.runningID != ""
 	a.mu.Unlock()

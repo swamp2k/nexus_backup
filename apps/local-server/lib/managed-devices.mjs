@@ -67,6 +67,17 @@ export function createManagedDeviceService({
     return present(await byId(db, normalizedId), nowDate(now));
   }
 
+  async function remove(deviceId) {
+    const normalizedId = requireId(deviceId, "device id");
+    const existing = await byId(db, normalizedId);
+    if (!existing) throw statusError(404, `Device not found: ${normalizedId}`);
+    if (Number(existing.enabled) === 1) throw statusError(409, "Disable the device before deleting it");
+    if (String(existing.kind) === "workstation") throw statusError(409, "Delete workstations from the Workstations page so workstation history is handled explicitly");
+    const result = await db.prepare("DELETE FROM managed_devices WHERE id=? AND enabled=0").bind(normalizedId).run();
+    if (Number(result.meta?.changes ?? 0) !== 1) throw statusError(409, "Device could not be deleted");
+    return { deleted: true, id: normalizedId };
+  }
+
   async function authenticate(rawToken) {
     const supplied = requireDeviceToken(rawToken);
     const row = await db.prepare("SELECT * FROM managed_devices WHERE token_hash=? LIMIT 1")
@@ -150,7 +161,7 @@ export function createManagedDeviceService({
     };
   }
 
-  return { list, create, rotateToken, update, authenticate, report };
+  return { list, create, rotateToken, update, remove, authenticate, report };
 }
 
 export function normalizeDeviceReport(input) {
