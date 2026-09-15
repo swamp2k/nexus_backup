@@ -90,7 +90,11 @@ COPY --from=workstation /out/nexus-backup-workstation-windows-amd64.exe.sha256 .
 COPY --from=restic-windows /out/restic.exe ./apps/local-server/web/workstation/restic.exe
 COPY --from=restic-windows /out/restic.exe.sha256 ./apps/local-server/web/workstation/restic.exe.sha256
 
-RUN chmod 0755 \
+RUN build_revision="$(printf '%s' "$NEXUS_BACKUP_REVISION" | cut -c1-8)" \
+    && build_identity="${NEXUS_BACKUP_VERSION} · ${build_revision}" \
+    && escaped_identity="$(printf '%s' "$build_identity" | sed 's/[&|]/\\&/g')" \
+    && sed -i "s|No cloud dependency|No cloud dependency · ${escaped_identity}|" /app/apps/local-server/web/index.html \
+    && chmod 0755 \
       /usr/local/bin/nexus-backup-entrypoint \
       /usr/local/bin/nexus-repository-entrypoint \
       /usr/local/bin/nexus-repository-client \
