@@ -26,7 +26,7 @@ export function createWorkstationService({
         p.enabled AS policy_enabled,p.source_paths_json,p.exclude_patterns_json,p.schedule_json,p.timezone,p.retention_json,
         p.next_run_at,p.last_scheduled_at,p.last_run_id,
         s.repository_configured,s.repository_kind,s.agent_state,s.current_run_id,s.last_backup_at,s.last_success_at,
-        s.last_snapshot_id,s.last_error AS status_error,s.updated_at AS status_updated_at,
+        s.last_snapshot_id,s.last_error AS status_error,s.local_drives_json,s.updated_at AS status_updated_at,
         r.state AS last_run_state,r.queued_at AS last_run_queued_at,r.started_at AS last_run_started_at,
         r.finished_at AS last_run_finished_at,r.progress_json AS last_run_progress_json,
         r.result_json AS last_run_result_json,r.error_message AS last_run_error
@@ -133,6 +133,40 @@ export function createWorkstationService({
     return { queued, failures };
   }
 
+  async function queueSourceScan(deviceId, input = {}) {
+    const device = await requireWorkstation(deviceId);
+    if (!device.enabled) throw statusError(409, "Workstation is disabled");
+    if (!device.capabilities.includes("workstation.source-scan.v1")) throw statusError(409, "Workstation agent does not support source scans; update it first");
+    if (!isOnline(device.lastSeenAt, nowDate(now))) throw statusError(409, "Workstation must be online to scan backup sources");
+    const drives = normalizeSourceDrives(input?.drives);
+    const active = await activeRun(device.id);
+    if (active) throw statusError(409, `Workstation already has an active ${active.operation} run`);
+    const at = nowDate(now).toISOString();
+    const runId = requireId(id(), "generated run id");
+    const operationKey = `workstation:${device.id}:source-scan:${at}:${randomUUID()}`;
+    await db.prepare(`
+      INSERT INTO workstation_runs(id,device_id,operation_key,state,operation,request_json,source_paths_json,exclude_patterns_json,retention_json,
+        queued_at,created_at,updated_at)
+      VALUES(?,?,?,'queued','source-scan',?,'[]','[]','{}',?,?,?)
+    `).bind(runId, device.id, operationKey, JSON.stringify({ drives }), at, at, at).run();
+    return presentRun(await db.prepare("SELECT * FROM workstation_runs WHERE id=?").bind(runId).first());
+  }
+
+  async function getSourceScan(deviceId) {
+    const device = await requireWorkstation(deviceId);
+    const row = await db.prepare("SELECT * FROM workstation_source_scans WHERE device_id=?").bind(device.id).first();
+    const latestRun = await db.prepare(`
+      SELECT * FROM workstation_runs WHERE device_id=? AND operation='source-scan' ORDER BY queued_at DESC,id DESC LIMIT 1
+    `).bind(device.id).first();
+    return {
+      scan: row ? {
+        deviceId: device.id, sourceRunId: nullableString(row.source_run_id), scannedAt: String(row.scanned_at),
+        drives: parseArray(row.drives_json), nodes: parseJson(row.tree_json, []), truncated: Number(row.truncated) === 1,
+      } : null,
+      run: presentRun(latestRun),
+    };
+  }
+
   async function queueRecovery(deviceId, operation, input = {}) {
     const device = await requireWorkstation(deviceId);
     if (!device.enabled) throw statusError(409, "Workstation is disabled");
@@ -221,9 +255,11 @@ export function createWorkstationService({
   async function poll(rawToken) {
     const device = await requireAuthenticatedWorkstation(rawToken);
     await recoverExpired(device.id);
-    const row = await db.prepare(`
-      SELECT * FROM workstation_runs WHERE device_id=? AND state='queued' ORDER BY queued_at ASC,id ASC LIMIT 1
-    `).bind(device.id).first();
+    const status = await db.prepare("SELECT repository_configured FROM workstation_status WHERE device_id=?").bind(device.id).first();
+    const repositoryKnownMissing = status !== null && status !== undefined && Number(status.repository_configured) !== 1;
+    const row = repositoryKnownMissing
+      ? await db.prepare(`SELECT * FROM workstation_runs WHERE device_id=? AND state='queued' AND operation='source-scan' ORDER BY queued_at ASC,id ASC LIMIT 1`).bind(device.id).first()
+      : await db.prepare(`SELECT * FROM workstation_runs WHERE device_id=? AND state='queued' ORDER BY queued_at ASC,id ASC LIMIT 1`).bind(device.id).first();
     if (!row) return { run: null, nextPollSeconds: 15 };
     const token = requireLeaseToken(leaseToken());
     const at = nowDate(now);
@@ -293,7 +329,10 @@ export function createWorkstationService({
         VALUES(?,0,'idle',NULL,?)
         ON CONFLICT(device_id) DO UPDATE SET agent_state='idle',current_run_id=NULL,updated_at=excluded.updated_at
       `).bind(device.id, at.toISOString()).run();
-      if (state === "completed") await persistRecoveryResult(device.id, normalizedRunId, operation, request, resultValue, at.toISOString());
+      if (state === "completed") {
+        if (operation === "source-scan") await persistSourceScan(device.id, normalizedRunId, resultValue, at.toISOString());
+        else await persistRecoveryResult(device.id, normalizedRunId, operation, request, resultValue, at.toISOString());
+      }
     }
     return presentRun(await db.prepare("SELECT * FROM workstation_runs WHERE id=?").bind(normalizedRunId).first());
   }
@@ -303,12 +342,13 @@ export function createWorkstationService({
     const status = normalizeStatus(input);
     const at = nowDate(now).toISOString();
     await db.prepare(`
-      INSERT INTO workstation_status(device_id,repository_configured,repository_kind,agent_state,current_run_id,last_backup_at,last_success_at,last_snapshot_id,last_error,updated_at)
-      VALUES(?,?,?,?,?,?,?,?,?,?)
+      INSERT INTO workstation_status(device_id,repository_configured,repository_kind,agent_state,current_run_id,last_backup_at,last_success_at,last_snapshot_id,last_error,local_drives_json,updated_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?)
       ON CONFLICT(device_id) DO UPDATE SET repository_configured=excluded.repository_configured,repository_kind=excluded.repository_kind,
         agent_state=excluded.agent_state,current_run_id=excluded.current_run_id,last_backup_at=COALESCE(excluded.last_backup_at,workstation_status.last_backup_at),
         last_success_at=COALESCE(excluded.last_success_at,workstation_status.last_success_at),
-        last_snapshot_id=COALESCE(excluded.last_snapshot_id,workstation_status.last_snapshot_id),last_error=excluded.last_error,updated_at=excluded.updated_at
+        last_snapshot_id=COALESCE(excluded.last_snapshot_id,workstation_status.last_snapshot_id),last_error=excluded.last_error,
+        local_drives_json=excluded.local_drives_json,updated_at=excluded.updated_at
     `).bind(
       device.id,
       status.repositoryConfigured ? 1 : 0,
@@ -319,6 +359,7 @@ export function createWorkstationService({
       status.lastSuccessAt,
       status.lastSnapshotId,
       status.lastError,
+      JSON.stringify(status.localDrives),
       at,
     ).run();
     return { ok: true, deviceId: device.id, nextReportSeconds: 60 };
@@ -348,6 +389,14 @@ export function createWorkstationService({
     }
 
     return recoveredRuns.length;
+  }
+
+  async function persistSourceScan(deviceId, runId, value, scannedAt) {
+    await db.prepare(`
+      INSERT INTO workstation_source_scans(device_id,source_run_id,scanned_at,drives_json,tree_json,truncated) VALUES(?,?,?,?,?,?)
+      ON CONFLICT(device_id) DO UPDATE SET source_run_id=excluded.source_run_id,scanned_at=excluded.scanned_at,
+        drives_json=excluded.drives_json,tree_json=excluded.tree_json,truncated=excluded.truncated
+    `).bind(deviceId, runId, scannedAt, JSON.stringify(value.drives), JSON.stringify(value.nodes), value.truncated ? 1 : 0).run();
   }
 
   async function persistRecoveryResult(deviceId, runId, operation, request, value, scannedAt) {
@@ -467,7 +516,7 @@ export function createWorkstationService({
   }
 
   return {
-    list, getPolicy, putPolicy, runNow, runDue, queueRecovery, getRecoveryInventory, getRecoveryBrowse, getRun, getLatestCheck,
+    list, getPolicy, putPolicy, runNow, runDue, queueSourceScan, getSourceScan, queueRecovery, getRecoveryInventory, getRecoveryBrowse, getRun, getLatestCheck,
     poll, progress, finish, reportStatus, recoverExpired,
   };
 }
@@ -538,6 +587,7 @@ function normalizeStatus(value) {
     lastSuccessAt: optionalDateString(value.lastSuccessAt, "lastSuccessAt"),
     lastSnapshotId: optionalString(value.lastSnapshotId, "lastSnapshotId", 128),
     lastError: optionalString(value.lastError, "lastError", 4000),
+    localDrives: normalizeReportedDrives(value.localDrives),
   };
 }
 
@@ -572,12 +622,18 @@ function normalizeResult(value, operation, request, runId, state) {
     throw new RangeError("successful workstation operation must include a result");
   }
   if (!isRecord(value)) throw new RangeError("result must be an object");
-  const max = operation === "backup" ? 64 * 1024 : 900 * 1024;
+  const max = operation === "backup" ? 64 * 1024 : operation === "source-scan" ? 15 * 1024 * 1024 : 900 * 1024;
   if (JSON.stringify(value).length > max) throw new RangeError("result is too large");
   if (operation === "backup") return value;
-  if (value.operation !== operation) throw new RangeError("recovery result operation does not match the leased run");
-  if (state === "failed" && (operation === "check" || operation === "inventory" || operation === "browse")) {
+  if (value.operation !== operation) throw new RangeError("workstation result operation does not match the leased run");
+  if (state === "failed" && (operation === "source-scan" || operation === "check" || operation === "inventory" || operation === "browse")) {
     return { operation };
+  }
+  if (operation === "source-scan") {
+    const drives = normalizeSourceDrives(value.drives);
+    if (JSON.stringify(drives) !== JSON.stringify(normalizeSourceDrives(request.drives))) throw new RangeError("source scan result does not match requested drives");
+    if (!Array.isArray(value.nodes) || value.nodes.length > 75000) throw new RangeError("source scan result has too many directories");
+    return { operation, drives, nodes: value.nodes.map(normalizeSourceScanNode), truncated: value.truncated === true };
   }
   if (operation === "check") {
     if (value.integrity !== "ok") throw new RangeError("integrity check result must report ok");
@@ -635,6 +691,33 @@ function normalizeBrowseEntry(value) {
   };
 }
 
+function normalizeSourceDrives(value) {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 26) throw new RangeError("drives must contain 1-26 drive roots");
+  const result=[];const seen=new Set();
+  for (const item of value) {
+    const drive=requireRawString(item,"drive",3,3).replace("/","\\").toUpperCase();
+    if (!/^[A-Z]:\\$/.test(drive)) throw new RangeError("drives must be Windows drive roots such as C:\\");
+    if (!seen.has(drive)) { seen.add(drive); result.push(drive); }
+  }
+  return result.sort();
+}
+function normalizeReportedDrives(value) {
+  if (value === undefined || value === null) return [];
+  return normalizeSourceDrives(value);
+}
+function normalizeSourceScanNode(value) {
+  if (!isRecord(value)) throw new RangeError("source scan node is invalid");
+  const path=requireRawString(value.path,"source path",3,1024);
+  const parent=value.parent ? requireRawString(value.parent,"source parent",3,1024) : "";
+  const name=requireRawString(value.name,"source name",1,255);
+  return {
+    path,parent,name,bytes:optionalNonNegativeInteger(value.bytes,"source bytes")??0,
+    files:optionalNonNegativeInteger(value.files,"source files")??0,
+    directories:optionalNonNegativeInteger(value.directories,"source directories")??0,
+    inaccessible:value.inaccessible===true,
+  };
+}
+
 function normalizeSnapshotId(value) {
   if (typeof value !== "string" || !SNAPSHOT_ID_RE.test(value.trim())) throw new RangeError("snapshotId must be 8-64 hexadecimal characters");
   return value.trim().toLowerCase();
@@ -683,7 +766,7 @@ function presentWorkstation(row) {
       repositoryConfigured: Number(row.repository_configured ?? 0) === 1, repositoryKind: nullableString(row.repository_kind),
       agentState: nullableString(row.agent_state), currentRunId: nullableString(row.current_run_id), lastBackupAt: nullableString(row.last_backup_at),
       lastSuccessAt: nullableString(row.last_success_at), lastSnapshotId: nullableString(row.last_snapshot_id),
-      lastError: nullableString(row.status_error), updatedAt: nullableString(row.status_updated_at),
+      lastError: nullableString(row.status_error), localDrives: parseArray(row.local_drives_json), updatedAt: nullableString(row.status_updated_at),
     },
     lastRun,
   };

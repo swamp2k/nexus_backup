@@ -158,7 +158,9 @@ const gateway = createServer(async (request, response) => {
     }
     const workstationResultMatch = path.match(/^\/v1\/device\/workstation\/runs\/([^/]+)\/result$/);
     if (workstationResultMatch && request.method === "POST") {
-      sendJson(response, 200, { run: await workstationService.finish(requireBearerToken(request), decodePathPart(workstationResultMatch[1]), await readJsonBody(request)) });
+      // Source scans can contain a cached directory tree. Keep the endpoint bounded,
+      // but allow substantially more than ordinary control-plane mutations.
+      sendJson(response, 200, { run: await workstationService.finish(requireBearerToken(request), decodePathPart(workstationResultMatch[1]), await readJsonBody(request, 16 * 1024 * 1024)) });
       return;
     }
 
@@ -196,6 +198,10 @@ const gateway = createServer(async (request, response) => {
       sendJson(response, 200, { device: await deviceService.update(decodePathPart(deviceMatch[1]), await readJsonBody(request)) });
       return;
     }
+    if (deviceMatch && request.method === "DELETE") {
+      sendJson(response, 200, await deviceService.remove(decodePathPart(deviceMatch[1])));
+      return;
+    }
 
     if (path === "/v1/local/workstations" && request.method === "GET") {
       sendJson(response, 200, { workstations: await workstationService.list() });
@@ -210,6 +216,15 @@ const gateway = createServer(async (request, response) => {
         fallbackHost: `127.0.0.1:${publicPort}`,
       });
       sendJson(response, 201, { ...created, installCommand: workstationInstallCommand(origin, created.token) });
+      return;
+    }
+    const workstationSourceScanMatch = path.match(/^\/v1\/local\/workstations\/([^/]+)\/source-scan$/);
+    if (workstationSourceScanMatch && request.method === "GET") {
+      sendJson(response, 200, await workstationService.getSourceScan(decodePathPart(workstationSourceScanMatch[1])));
+      return;
+    }
+    if (workstationSourceScanMatch && request.method === "POST") {
+      sendJson(response, 202, { run: await workstationService.queueSourceScan(decodePathPart(workstationSourceScanMatch[1]), await readJsonBody(request)) });
       return;
     }
     const workstationPolicyMatch = path.match(/^\/v1\/local\/workstations\/([^/]+)\/policy$/);
@@ -419,15 +434,15 @@ async function proxy(request, response, url) {
   response.end(Buffer.from(await upstream.arrayBuffer()));
 }
 
-async function readJsonBody(request) {
-  const body = await readBody(request, 1_048_576);
+async function readJsonBody(request, limit = 1_048_576) {
+  const body = await readBody(request, limit);
   if (!body) throw new RangeError("JSON body is required");
   let value;
   try { value = JSON.parse(body.toString("utf8")); } catch { throw new RangeError("Malformed JSON body"); }
   if (!isRecord(value)) throw new RangeError("JSON body must be an object");
   return value;
 }
-async function readBody(request, limit) { const chunks = []; let size = 0; for await (const chunk of request) { size += chunk.length; if (size > limit) throw statusError(413, "Request body exceeds 1 MiB"); chunks.push(chunk); } return chunks.length ? Buffer.concat(chunks) : undefined; }
+async function readBody(request, limit) { const chunks = []; let size = 0; for await (const chunk of request) { size += chunk.length; if (size > limit) throw statusError(413, `Request body exceeds ${Math.ceil(limit / 1_048_576)} MiB`); chunks.push(chunk); } return chunks.length ? Buffer.concat(chunks) : undefined; }
 function sendJson(response, status, value) { response.statusCode = status; response.setHeader("content-type", "application/json; charset=utf-8"); response.setHeader("cache-control", "no-store"); response.setHeader("x-content-type-options", "nosniff"); response.end(JSON.stringify(value)); }
 function acceptsHtml(request) { const accept = singleHeader(request.headers.accept) || ""; return accept.includes("text/html") && (request.method === "GET" || request.method === "HEAD"); }
 function isMutation(method) { return !["GET", "HEAD", "OPTIONS"].includes(method || "GET"); }

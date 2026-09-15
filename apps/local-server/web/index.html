@@ -129,7 +129,7 @@
       const status=!device.enabled?"Disabled":device.online?"Online":device.lastSeenAt?"Offline":"Never seen";
       const tone=!device.enabled?"warn":device.online?"success":device.lastSeenAt?"danger":"warn";
       return`<section class="card transfer-card" data-device="${deviceAttr(device.id)}">
-        <div class="transfer-head"><div class="transfer-title"><span class="transfer-state${device.online?"":" paused"}"></span><div><h2>${deviceEsc(device.name)}</h2><span>${deviceEsc(device.kind)} · ${deviceEsc(device.id)}</span></div></div><div class="transfer-actions"><span class="badge ${tone}">${status}</span><button class="button ghost compact" data-device-action="rotate" data-id="${deviceAttr(device.id)}">Rotate token</button><button class="button ghost compact" data-device-action="toggle" data-id="${deviceAttr(device.id)}">${device.enabled?"Disable":"Enable"}</button></div></div>
+        <div class="transfer-head"><div class="transfer-title"><span class="transfer-state${device.online?"":" paused"}"></span><div><h2>${deviceEsc(device.name)}</h2><span>${deviceEsc(device.kind)} · ${deviceEsc(device.id)}</span></div></div><div class="transfer-actions"><span class="badge ${tone}">${status}</span><button class="button ghost compact" data-device-action="rotate" data-id="${deviceAttr(device.id)}">Rotate token</button><button class="button ghost compact" data-device-action="toggle" data-id="${deviceAttr(device.id)}">${device.enabled?"Disable":"Enable"}</button>${!device.enabled&&device.kind!=="workstation"?`<button class="button ghost compact" data-device-action="delete" data-id="${deviceAttr(device.id)}">Delete device</button>`:""}</div></div>
         <div class="transfer-facts">${deviceFact("Version",device.version||"—",device.platform||"not reported")}${deviceFact("Host",device.hostname||"—",device.lastSeenAt?`Seen ${deviceRelative(device.lastSeenAt)}`:"never reported")}${deviceFact("Capabilities",device.capabilities?.length||0,"reported")}${deviceFact("Remotes",device.remotes?.length||0,"names only")}</div>
         <div class="transfer-meta filters"><span>Capabilities: ${device.capabilities?.length?deviceEsc(device.capabilities.join(", ")):"none reported"}</span><span>Remotes: ${device.remotes?.length?deviceEsc(device.remotes.join(", ")):"none reported"}</span><span>First seen: ${device.firstSeenAt?deviceEsc(new Date(device.firstSeenAt).toLocaleString()):"—"}</span></div>
       </section>`;
@@ -147,6 +147,10 @@
           }else if(button.dataset.deviceAction==="rotate"){
             const result=await deviceApi(`/v1/local/devices/${encodeURIComponent(device.id)}/rotate-token`,{method:"POST",body:{}});
             showDeviceToken(result.device,result.token,true);
+          }else if(button.dataset.deviceAction==="delete"){
+            if(!confirm(`Permanently delete ${device.name}? This cannot be undone.`))return;
+            await deviceApi(`/v1/local/devices/${encodeURIComponent(device.id)}`,{method:"DELETE"});
+            deviceToast("Device deleted",device.name);
           }
           await refreshDevices(true);
         }catch(error){deviceToast("Device action failed",error.message,true)}finally{button.disabled=false;}

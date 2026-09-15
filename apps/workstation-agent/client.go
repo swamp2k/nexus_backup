@@ -36,9 +36,10 @@ type deviceReportResponse struct {
 }
 
 type workstationStatus struct {
-	RepositoryConfigured bool   `json:"repositoryConfigured"`
-	RepositoryKind       string `json:"repositoryKind,omitempty"`
-	AgentState           string `json:"agentState"`
+	RepositoryConfigured bool     `json:"repositoryConfigured"`
+	RepositoryKind       string   `json:"repositoryKind,omitempty"`
+	AgentState           string   `json:"agentState"`
+	LocalDrives          []string `json:"localDrives,omitempty"`
 	CurrentRunID         string `json:"currentRunId,omitempty"`
 	LastBackupAt         string `json:"lastBackupAt,omitempty"`
 	LastSuccessAt        string `json:"lastSuccessAt,omitempty"`
@@ -47,8 +48,9 @@ type workstationStatus struct {
 }
 
 type recoveryRequest struct {
-	SnapshotID string `json:"snapshotId,omitempty"`
-	Path       string `json:"path,omitempty"`
+	SnapshotID string   `json:"snapshotId,omitempty"`
+	Path       string   `json:"path,omitempty"`
+	Drives     []string `json:"drives,omitempty"`
 }
 
 type workstationRun struct {
