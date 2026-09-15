@@ -235,7 +235,8 @@
         }
       });
       const note=document.querySelector("#transfers-view .transfer-note");
-      if(note)note.innerHTML="<strong>Copyarr safety:</strong> staged transfer + exact-size verification are active. Move deletes source only after final verification. Cleanup re-checks destination provenance before delete. Optional rTorrent readiness gates hold back known incomplete torrents; completed copy torrents are grouped as one manifest; credentials never leave local agent config.";
+      const noteHtml="<strong>Copyarr safety:</strong> staged transfer + exact-size verification are active. Move deletes source only after final verification. Cleanup re-checks destination provenance before delete. Optional rTorrent readiness gates hold back known incomplete torrents; completed copy torrents are grouped as one manifest; credentials never leave local agent config.";
+      if(note&&note.innerHTML!==noteHtml)note.innerHTML=noteHtml;
     }
 
     document.addEventListener("click",event=>{
