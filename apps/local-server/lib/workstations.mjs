@@ -316,13 +316,15 @@ export function createWorkstationService({
     if (operation === "backup") {
       const snapshotId = state === "completed" && resultValue && typeof resultValue.snapshotId === "string" ? resultValue.snapshotId.slice(0, 128) : null;
       const successAt = state === "completed" ? at.toISOString() : null;
+      const repositoryConfiguredByRun = state === "completed" || state === "partial" ? 1 : 0;
       await db.prepare(`
         INSERT INTO workstation_status(device_id,repository_configured,agent_state,current_run_id,last_backup_at,last_success_at,last_snapshot_id,last_error,updated_at)
-        VALUES(?,0,'idle',NULL,?,?,?,?,?)
-        ON CONFLICT(device_id) DO UPDATE SET agent_state='idle',current_run_id=NULL,last_backup_at=excluded.last_backup_at,
+        VALUES(?,?,'idle',NULL,?,?,?,?,?)
+        ON CONFLICT(device_id) DO UPDATE SET repository_configured=CASE WHEN excluded.repository_configured=1 THEN 1 ELSE workstation_status.repository_configured END,
+          agent_state='idle',current_run_id=NULL,last_backup_at=excluded.last_backup_at,
           last_success_at=COALESCE(excluded.last_success_at,workstation_status.last_success_at),
           last_snapshot_id=COALESCE(excluded.last_snapshot_id,workstation_status.last_snapshot_id),last_error=excluded.last_error,updated_at=excluded.updated_at
-      `).bind(device.id, at.toISOString(), successAt, snapshotId, errorMessage, at.toISOString()).run();
+      `).bind(device.id, repositoryConfiguredByRun, at.toISOString(), successAt, snapshotId, errorMessage, at.toISOString()).run();
     } else {
       await db.prepare(`
         INSERT INTO workstation_status(device_id,repository_configured,agent_state,current_run_id,updated_at)

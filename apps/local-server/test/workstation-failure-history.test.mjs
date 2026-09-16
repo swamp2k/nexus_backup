@@ -81,6 +81,7 @@ test("partial backup cannot replace last successful snapshot history", async () 
     assert.equal(afterSuccess.status.lastSnapshotId, "aaaaaaaa11111111");
     const successAt = afterSuccess.status.lastSuccessAt;
     assert.ok(successAt);
+    assert.equal(afterSuccess.status.repositoryConfigured, true, "a successful backup proves repository configuration");
 
     f.setNow("2026-09-13T12:05:00.000Z");
     const partial = await runBackup(f, {
