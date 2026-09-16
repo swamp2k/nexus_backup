@@ -1,12 +1,14 @@
 ARG NEXUS_BACKUP_VERSION=dev
+ARG NEXUS_BACKUP_REVISION=unknown
 
 FROM golang:1.24-alpine AS workstation
 ARG NEXUS_BACKUP_VERSION
+ARG NEXUS_BACKUP_REVISION
 WORKDIR /src/apps/workstation-agent
 COPY apps/workstation-agent/go.mod ./go.mod
 COPY apps/workstation-agent/*.go ./
 RUN mkdir -p /out \
-    && CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-X main.version=${NEXUS_BACKUP_VERSION} -s -w" -o /out/nexus-backup-workstation-windows-amd64.exe . \
+    && CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-X main.version=${NEXUS_BACKUP_VERSION} -X main.revision=${NEXUS_BACKUP_REVISION} -s -w" -o /out/nexus-backup-workstation-windows-amd64.exe . \
     && cd /out \
     && sha256sum nexus-backup-workstation-windows-amd64.exe > nexus-backup-workstation-windows-amd64.exe.sha256
 

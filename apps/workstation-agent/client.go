@@ -40,11 +40,11 @@ type workstationStatus struct {
 	RepositoryKind       string   `json:"repositoryKind,omitempty"`
 	AgentState           string   `json:"agentState"`
 	LocalDrives          []string `json:"localDrives,omitempty"`
-	CurrentRunID         string `json:"currentRunId,omitempty"`
-	LastBackupAt         string `json:"lastBackupAt,omitempty"`
-	LastSuccessAt        string `json:"lastSuccessAt,omitempty"`
-	LastSnapshotID       string `json:"lastSnapshotId,omitempty"`
-	LastError            string `json:"lastError,omitempty"`
+	CurrentRunID         string   `json:"currentRunId,omitempty"`
+	LastBackupAt         string   `json:"lastBackupAt,omitempty"`
+	LastSuccessAt        string   `json:"lastSuccessAt,omitempty"`
+	LastSnapshotID       string   `json:"lastSnapshotId,omitempty"`
+	LastError            string   `json:"lastError,omitempty"`
 }
 
 type recoveryRequest struct {
@@ -78,13 +78,14 @@ type pollResponse struct {
 }
 
 type backupProgress struct {
-	Phase       string  `json:"phase"`
-	Percent     float64 `json:"percent,omitempty"`
-	BytesDone   int64   `json:"bytesDone,omitempty"`
-	BytesTotal  int64   `json:"bytesTotal,omitempty"`
-	FilesDone   int64   `json:"filesDone,omitempty"`
-	FilesTotal  int64   `json:"filesTotal,omitempty"`
-	CurrentPath string  `json:"currentPath,omitempty"`
+	Phase           string  `json:"phase"`
+	Percent         float64 `json:"percent,omitempty"`
+	BytesDone       int64   `json:"bytesDone,omitempty"`
+	BytesTotal      int64   `json:"bytesTotal,omitempty"`
+	FilesDone       int64   `json:"filesDone,omitempty"`
+	FilesTotal      int64   `json:"filesTotal,omitempty"`
+	DirectoriesDone int64   `json:"directoriesDone,omitempty"`
+	CurrentPath     string  `json:"currentPath,omitempty"`
 }
 
 func newAPIClient(baseURL, token string) *apiClient {

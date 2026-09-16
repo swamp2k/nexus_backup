@@ -14,21 +14,24 @@ import (
 	"time"
 )
 
-var version = "dev"
+var (
+	version  = "dev"
+	revision = "unknown"
+)
 
 const defaultConfigName = "workstation.json"
 
 type config struct {
-	ServerURL     string `json:"serverUrl"`
-	DeviceToken   string `json:"deviceToken"`
-	Repository    string `json:"repository"`
-	PasswordFile  string `json:"passwordFile"`
-	ResticPath    string `json:"resticPath"`
-	RestUsername  string `json:"restUsername,omitempty"`
-	RestPassword  string `json:"restPassword,omitempty"`
-	CACertPath    string `json:"caCertPath,omitempty"`
-	PollSeconds   int    `json:"pollSeconds"`
-	ReportSeconds int    `json:"reportSeconds"`
+	ServerURL          string `json:"serverUrl"`
+	DeviceToken        string `json:"deviceToken"`
+	Repository         string `json:"repository"`
+	PasswordFile       string `json:"passwordFile"`
+	ResticPath         string `json:"resticPath"`
+	RestUsername       string `json:"restUsername,omitempty"`
+	RestPassword       string `json:"restPassword,omitempty"`
+	CACertPath         string `json:"caCertPath,omitempty"`
+	PollSeconds        int    `json:"pollSeconds"`
+	ReportSeconds      int    `json:"reportSeconds"`
 	AutoInit           bool   `json:"autoInit"`
 	InsecureNoPassword bool   `json:"insecureNoPassword,omitempty"`
 }
@@ -53,7 +56,7 @@ type agent struct {
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "--version" {
-		fmt.Printf("nexus-backup-workstation %s\n", version)
+		fmt.Printf("nexus-backup-workstation %s\n", agentVersion())
 		return
 	}
 	cfgPath := configPathFromArgs(os.Args[1:])
@@ -83,7 +86,7 @@ func main() {
 
 func (a *agent) run() error {
 	hostname, _ := os.Hostname()
-	log.Printf("Nexus Backup workstation agent %s starting; server=%s host=%s", version, a.cfg.ServerURL, hostname)
+	log.Printf("Nexus Backup workstation agent %s starting; server=%s host=%s", agentVersion(), a.cfg.ServerURL, hostname)
 
 	reportEvery := time.Duration(a.cfg.ReportSeconds) * time.Second
 	pollEvery := time.Duration(a.cfg.PollSeconds) * time.Second
@@ -123,9 +126,11 @@ func (a *agent) run() error {
 func (a *agent) report() error {
 	hostname, _ := os.Hostname()
 	capabilities := []string{"workstation.backup.v1", "workstation.recovery.v1", "workstation.restore-staging.v1", "workstation.integrity.v1", "restic.v1", "windows-vss.v1"}
-	if runtime.GOOS == "windows" { capabilities = append(capabilities, "workstation.source-scan.v1") }
+	if runtime.GOOS == "windows" {
+		capabilities = append(capabilities, "workstation.source-scan.v1")
+	}
 	response, err := a.client.reportDevice(deviceReport{
-		Version:      version,
+		Version:      agentVersion(),
 		Hostname:     hostname,
 		Platform:     runtime.GOOS + "/" + runtime.GOARCH,
 		Capabilities: capabilities,
@@ -421,6 +426,21 @@ func repositoryKind(repository string) string {
 		}
 	}
 	return "remote"
+}
+
+func agentVersion() string {
+	v := strings.TrimSpace(version)
+	if v == "" {
+		v = "dev"
+	}
+	r := strings.TrimSpace(revision)
+	if r == "" || r == "unknown" {
+		return v
+	}
+	if len(r) > 8 {
+		r = r[:8]
+	}
+	return v + " · " + r
 }
 
 func shortID(value string) string {
