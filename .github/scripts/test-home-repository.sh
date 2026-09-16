@@ -34,8 +34,8 @@ docker run -d --name "$container" \
 ready=0
 for _ in $(seq 1 60); do
   control=0; repository=0; agent=0
-  curl -fsS -o /dev/null "http://127.0.0.1:$control_port/healthz" && control=1 || true
-  curl -fsS -o /dev/null "http://127.0.0.1:$repository_port/" && repository=1 || true
+  curl --max-time 2 -fsS -o /dev/null "http://127.0.0.1:$control_port/healthz" && control=1 || true
+  curl --max-time 2 -fsS -o /dev/null "http://127.0.0.1:$repository_port/" && repository=1 || true
   docker logs "$container" 2>&1 | grep -Fq '"message":"agent online"' && agent=1 || true
   if [ "$control" = 1 ] && [ "$repository" = 1 ] && [ "$agent" = 1 ]; then
     ready=1
@@ -56,11 +56,13 @@ fi
 # Home mode is intentionally plain HTTP/no Repository authentication. The LAN
 # and Unraid host are the trust boundary; Restic still supplies snapshots,
 # deduplication, compression and integrity checking.
-if ! curl -fsS "http://127.0.0.1:$repository_port/" >/dev/null; then
+if ! curl --max-time 3 -fsS "http://127.0.0.1:$repository_port/" >/dev/null; then
   echo 'Home Repository unexpectedly requires TLS or authentication' >&2
   exit 1
 fi
-if curl -kfsS "https://127.0.0.1:$repository_port/" >/dev/null 2>&1; then
+# A TLS handshake against a plain-HTTP server can otherwise wait for curl's
+# long default timeout, so keep this negative protocol assertion tightly bounded.
+if curl --connect-timeout 1 --max-time 3 -kfsS "https://127.0.0.1:$repository_port/" >/dev/null 2>&1; then
   echo 'Home Repository unexpectedly enabled TLS' >&2
   exit 1
 fi
@@ -68,13 +70,6 @@ fi
 mkdir -p "$source_dir" "$restore_dir"
 printf 'home-mode-ci\n' > "$source_dir/probe.txt"
 repo="rest:http://127.0.0.1:$repository_port/workstation-ci-home"
-
-restic() {
-  docker run --rm --network host --entrypoint restic \
-    -e RESTIC_REPOSITORY="$repo" \
-    "$@" \
-    "$image" --insecure-no-password
-}
 
 # Keep invocation explicit rather than relying on ambient RESTIC_PASSWORD*.
 docker run --rm --network host --entrypoint restic \
