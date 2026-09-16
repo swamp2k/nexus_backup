@@ -1,10 +1,13 @@
 name: Fix source scan repository status
 on:
-  workflow_dispatch:
+  push:
+    branches:
+      - feature/workstation-source-scan-device-delete
 permissions:
   contents: write
 jobs:
   fix:
+    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
