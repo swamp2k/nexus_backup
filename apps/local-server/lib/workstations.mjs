@@ -574,8 +574,9 @@ function normalizeProgress(value) {
   const bytesTotal = optionalNonNegativeInteger(value.bytesTotal, "progress.bytesTotal");
   const filesDone = optionalNonNegativeInteger(value.filesDone, "progress.filesDone");
   const filesTotal = optionalNonNegativeInteger(value.filesTotal, "progress.filesTotal");
+  const directoriesDone = optionalNonNegativeInteger(value.directoriesDone, "progress.directoriesDone");
   const currentPath = optionalString(value.currentPath, "progress.currentPath", 1024);
-  return { phase, percent, bytesDone, bytesTotal, filesDone, filesTotal, currentPath };
+  return { phase, percent, bytesDone, bytesTotal, filesDone, filesTotal, directoriesDone, currentPath };
 }
 
 function normalizeStatus(value) {

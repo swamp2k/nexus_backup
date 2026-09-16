@@ -38,25 +38,33 @@ func (a *agent) executeRecovery(run workstationRun, operation string) {
 		}
 	}
 
+	// TreeSize has its own throttled progress stream (files/folders/bytes/current
+	// path), which also renews the lease. Do not overwrite that useful payload
+	// every 60 seconds with a phase-only heartbeat. Other recovery operations
+	// retain the generic lease heartbeat.
 	heartbeatStop := make(chan struct{})
 	heartbeatDone := make(chan struct{})
-	go func() {
-		defer close(heartbeatDone)
-		ticker := time.NewTicker(60 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-heartbeatStop:
-				return
-			case <-ticker.C:
-				err := a.client.reportProgress(run.ID, run.LeaseToken, backupProgress{Phase: operation})
-				if err != nil {
-					fmt.Printf("%s lease heartbeat failed: %v\n", logPrefix, err)
+	if operation == "source-scan" {
+		close(heartbeatDone)
+	} else {
+		go func() {
+			defer close(heartbeatDone)
+			ticker := time.NewTicker(60 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-heartbeatStop:
+					return
+				case <-ticker.C:
+					err := a.client.reportProgress(run.ID, run.LeaseToken, backupProgress{Phase: operation})
+					if err != nil {
+						fmt.Printf("%s lease heartbeat failed: %v\n", logPrefix, err)
+					}
+					onLeaseResponse(err)
 				}
-				onLeaseResponse(err)
 			}
-		}
-	}()
+		}()
+	}
 
 	onLeaseResponse(a.client.reportProgress(run.ID, run.LeaseToken, backupProgress{Phase: operation}))
 	result, err := a.runRecoveryOperation(ctx, run, operation)
@@ -77,8 +85,22 @@ func (a *agent) executeRecovery(run workstationRun, operation string) {
 func (a *agent) runRecoveryOperation(ctx context.Context, run workstationRun, operation string) (map[string]any, error) {
 	switch operation {
 	case "source-scan":
-		result, err := scanSourceTree(ctx, run.Request.Drives)
-		if err != nil { return map[string]any{"operation": operation, "drives": run.Request.Drives}, err }
+		result, err := scanSourceTree(ctx, run.Request.Drives, func(progress sourceScanProgress) error {
+			reportErr := a.client.reportProgress(run.ID, run.LeaseToken, backupProgress{
+				Phase: "source-scan", BytesDone: progress.Bytes, FilesDone: progress.Files,
+				DirectoriesDone: progress.Directories, CurrentPath: progress.CurrentPath,
+			})
+			if reportErr != nil {
+				if isStaleLease(reportErr) {
+					return reportErr
+				}
+				fmt.Printf("workstation source-scan run %s progress report failed: %v\n", run.ID, reportErr)
+			}
+			return nil
+		})
+		if err != nil {
+			return map[string]any{"operation": operation, "drives": run.Request.Drives}, err
+		}
 		nodes := make([]map[string]any, 0, len(result.Nodes))
 		for _, node := range result.Nodes {
 			nodes = append(nodes, map[string]any{
@@ -99,13 +121,15 @@ func (a *agent) runRecoveryOperation(ctx context.Context, run workstationRun, op
 
 	case "inventory":
 		snapshots, err := listRecoverySnapshots(ctx, a.cfg, run.DeviceID)
-		if err != nil { return map[string]any{"operation": operation}, err }
+		if err != nil {
+			return map[string]any{"operation": operation}, err
+		}
 		compact := make([]map[string]any, 0, len(snapshots))
 		for _, snapshot := range snapshots {
 			compact = append(compact, map[string]any{
-				"id": snapshot.ID,
-				"shortId": snapshot.ShortID,
-				"time": snapshot.Time,
+				"id":       snapshot.ID,
+				"shortId":  snapshot.ShortID,
+				"time":     snapshot.Time,
 				"hostname": snapshot.Hostname,
 			})
 		}
@@ -116,7 +140,9 @@ func (a *agent) runRecoveryOperation(ctx context.Context, run workstationRun, op
 
 	case "browse":
 		result, err := browseRecoverySnapshot(ctx, a.cfg, run.Request.SnapshotID, run.Request.Path)
-		if err != nil { return map[string]any{"operation": operation}, err }
+		if err != nil {
+			return map[string]any{"operation": operation}, err
+		}
 		entries := result.Entries
 		truncated := result.Truncated
 		if len(entries) > maxRecoveryReportEntries {
@@ -124,12 +150,12 @@ func (a *agent) runRecoveryOperation(ctx context.Context, run workstationRun, op
 			truncated = true
 		}
 		return map[string]any{
-			"operation": operation,
+			"operation":  operation,
 			"snapshotId": result.SnapshotID,
-			"path": result.Path,
-			"entries": entries,
+			"path":       result.Path,
+			"entries":    entries,
 			"entryLimit": maxRecoveryReportEntries,
-			"truncated": truncated,
+			"truncated":  truncated,
 		}, nil
 
 	case "restore-preview", "restore":
@@ -147,18 +173,20 @@ func (a *agent) runRecoveryOperation(ctx context.Context, run workstationRun, op
 			logsTruncated = true
 		}
 		payload := map[string]any{
-			"operation": operation,
-			"snapshotId": strings.ToLower(strings.TrimSpace(run.Request.SnapshotID)),
-			"path": run.Request.Path,
-			"stagingId": run.ID,
-			"dryRun": result.DryRun,
-			"restored": result.Restored,
-			"updated": result.Updated,
-			"unchanged": result.Unchanged,
-			"changedLogs": logs,
+			"operation":            operation,
+			"snapshotId":           strings.ToLower(strings.TrimSpace(run.Request.SnapshotID)),
+			"path":                 run.Request.Path,
+			"stagingId":            run.ID,
+			"dryRun":               result.DryRun,
+			"restored":             result.Restored,
+			"updated":              result.Updated,
+			"unchanged":            result.Unchanged,
+			"changedLogs":          logs,
 			"changedLogsTruncated": logsTruncated,
 		}
-		if result.Err != nil { return payload, result.Err }
+		if result.Err != nil {
+			return payload, result.Err
+		}
 		return payload, nil
 
 	default:

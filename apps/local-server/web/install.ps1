@@ -191,8 +191,8 @@ try {
     restUsername = ''
     restPassword = ''
     caCertPath = ''
-    pollSeconds = 15
-    reportSeconds = 60
+    pollSeconds = 5
+    reportSeconds = 30
     autoInit = $true
     insecureNoPassword = $false
   }

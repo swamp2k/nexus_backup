@@ -203,7 +203,7 @@ function installWorkstationDashboard(){
     }
     function renderSourceScan(data){
       const scan=data.scan;const run=data.run;
-      if(run?.active){statusEl.textContent=`TreeSize ${run.state}… The previous completed scan remains available until this one finishes.`}
+      if(run?.active){const progress=run.progress??{};const bits=[`TreeSize ${run.state}…`];if(progress.filesDone!=null)bits.push(`${Number(progress.filesDone).toLocaleString()} files`);if(progress.directoriesDone!=null)bits.push(`${Number(progress.directoriesDone).toLocaleString()} folders`);if(progress.bytesDone!=null)bits.push(bytes(progress.bytesDone));if(progress.currentPath)bits.push(progress.currentPath);statusEl.textContent=`${bits.join(" · ")} — previous completed scan remains available until this one finishes.`}
       else if(scan){statusEl.textContent=`Last TreeSize scan: ${new Date(scan.scannedAt).toLocaleString()} · ${scan.nodes.length} folders${scan.truncated?" · truncated":""}`}
       else{statusEl.textContent="No saved TreeSize scan yet. Select one or more drives and run the scan once."}
       treeEl.innerHTML="";if(!scan?.nodes?.length)return;
