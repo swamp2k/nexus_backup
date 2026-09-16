@@ -44,6 +44,13 @@ function Short-NativeOutput($Value) {
   return $text
 }
 
+function Get-OptionalProperty($Object, [string]$Name) {
+  if ($null -eq $Object) { return $null }
+  $property = $Object.PSObject.Properties[$Name]
+  if ($null -eq $property) { return $null }
+  return $property.Value
+}
+
 function Invoke-PinnedRepositoryProvision([string]$ResticExe, [System.Collections.IDictionary]$Config) {
   $repository = ([string]$Config['repository']).Trim()
   $username = ([string]$Config['restUsername']).Trim()
@@ -125,8 +132,9 @@ $deviceToken = ''
 if (Test-Path $configPath) {
   try {
     $old = Get-Content -Raw -Path $configPath | ConvertFrom-Json
-    if ($null -ne $old.deviceToken -and ([string]$old.deviceToken).StartsWith('nxbdev_')) {
-      $deviceToken = [string]$old.deviceToken
+    $oldDeviceToken = Get-OptionalProperty $old 'deviceToken'
+    if ($null -ne $oldDeviceToken -and ([string]$oldDeviceToken).StartsWith('nxbdev_')) {
+      $deviceToken = [string]$oldDeviceToken
     }
   } catch { Write-Warning 'Existing workstation.json was invalid; replacing it with safe defaults.' }
 }
@@ -198,7 +206,8 @@ try {
   }
   if ($null -ne $old) {
     foreach ($name in @('repository','passwordFile','resticPath','restUsername','restPassword','caCertPath','pollSeconds','reportSeconds','autoInit','insecureNoPassword')) {
-      if ($null -ne $old.$name) { $config[$name] = $old.$name }
+      $value = Get-OptionalProperty $old $name
+      if ($null -ne $value) { $config[$name] = $value }
     }
   }
   if ($null -ne $repositoryProfile -and [string]$repositoryProfile.mode -eq 'home' -and [string]::IsNullOrWhiteSpace([string]$config['repository'])) {
