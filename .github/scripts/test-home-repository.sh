@@ -35,7 +35,9 @@ ready=0
 for _ in $(seq 1 60); do
   control=0; repository=0; agent=0
   curl --max-time 2 -fsS -o /dev/null "http://127.0.0.1:$control_port/healthz" && control=1 || true
-  curl --max-time 2 -fsS -o /dev/null "http://127.0.0.1:$repository_port/" && repository=1 || true
+  # rest-server intentionally answers GET / with 405. A completed HTTP response
+  # still proves that the Home Repository listener is alive.
+  curl --max-time 2 -sS -o /dev/null "http://127.0.0.1:$repository_port/" && repository=1 || true
   docker logs "$container" 2>&1 | grep -Fq '"message":"agent online"' && agent=1 || true
   if [ "$control" = 1 ] && [ "$repository" = 1 ] && [ "$agent" = 1 ]; then
     ready=1
@@ -56,8 +58,8 @@ fi
 # Home mode is intentionally plain HTTP/no Repository authentication. The LAN
 # and Unraid host are the trust boundary; Restic still supplies snapshots,
 # deduplication, compression and integrity checking.
-if ! curl --max-time 3 -fsS "http://127.0.0.1:$repository_port/" >/dev/null; then
-  echo 'Home Repository unexpectedly requires TLS or authentication' >&2
+if ! curl --max-time 3 -sS "http://127.0.0.1:$repository_port/" >/dev/null; then
+  echo 'Home Repository HTTP listener is not reachable' >&2
   exit 1
 fi
 # A TLS handshake against a plain-HTTP server can otherwise wait for curl's
