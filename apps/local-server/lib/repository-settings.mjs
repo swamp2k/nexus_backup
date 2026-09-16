@@ -20,20 +20,7 @@ export function createRepositorySettingsService({
   async function get() {
     const configured = await readConfigured(settingsDir, env);
     const active = await readActive(activePath);
-    return {
-      configured,
-      active,
-      restartRequired: Boolean(active && !sameSettings(configured, active)),
-      protections: {
-        tls: true,
-        tlsMinVersion: "1.3",
-        bcryptAuth: true,
-        privateRepositories: true,
-        appendOnly: configured.appendOnly,
-        rateLimit: false,
-        bruteForceLockout: false,
-      },
-    };
+    return present(configured, active, Boolean(active && !sameSettings(configured, active)));
   }
 
   async function update(input) {
@@ -48,23 +35,29 @@ export function createRepositorySettingsService({
       writeAtomic(join(settingsDir, KEYS.appendOnly), String(next.appendOnly)),
     ]);
     const active = await readActive(activePath);
-    return {
-      configured: next,
-      active,
-      restartRequired: !active || !sameSettings(next, active),
-      protections: {
-        tls: true,
-        tlsMinVersion: "1.3",
-        bcryptAuth: true,
-        privateRepositories: true,
-        appendOnly: next.appendOnly,
-        rateLimit: false,
-        bruteForceLockout: false,
-      },
-    };
+    return present(next, active, !active || !sameSettings(next, active));
   }
 
   return { get, update };
+}
+
+function present(configured, active, restartRequired) {
+  const home = configured.exposure === "lan";
+  return {
+    configured,
+    active,
+    restartRequired,
+    mode: home ? "home" : "remote",
+    protections: {
+      tls: !home,
+      tlsMinVersion: !home ? "1.3" : null,
+      bcryptAuth: !home,
+      privateRepositories: !home,
+      appendOnly: configured.appendOnly,
+      rateLimit: false,
+      bruteForceLockout: false,
+    },
+  };
 }
 
 async function readConfigured(settingsDir, env) {
@@ -110,8 +103,8 @@ function normalize(value) {
   if (exposure !== "lan" && exposure !== "internet") throw new RangeError("Repository exposure must be lan or internet");
 
   const host = String(value.host ?? "").trim();
-  if (!host) throw new RangeError("Repository endpoint host is required");
-  if (!/^[A-Za-z0-9.-]+$/.test(host)) throw new RangeError("Repository endpoint host contains unsupported characters");
+  if (host && !/^[A-Za-z0-9.-]+$/.test(host)) throw new RangeError("Repository endpoint host contains unsupported characters");
+  if (exposure === "internet" && !host) throw new RangeError("Internet Repository mode requires an endpoint host");
 
   const listenPort = port(value.listenPort, "Repository listen port");
   const endpointPort = port(value.endpointPort, "Repository endpoint port");

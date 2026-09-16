@@ -41,12 +41,18 @@ jobs:
           gateway=apps/local-server/bin/gateway.mjs
           grep -F '$serverUrl/workstation/nexus-backup-workstation-windows-amd64.exe' "$installer"
           grep -F '$serverUrl/workstation/restic.exe' "$installer"
+          grep -F '/v1/device/workstation/repository-profile' "$installer"
+          grep -F 'insecureNoPassword' "$installer"
           grep -F 'NEXUS_BACKUP_REST_USERNAME' "$installer"
           grep -F 'NEXUS_BACKUP_REST_PASSWORD' "$installer"
           grep -F 'NEXUS_BACKUP_REPOSITORY_CA_B64' "$installer"
           grep -F 'NEXUS_BACKUP_REPOSITORY_CA_SHA256' "$installer"
           grep -F 'Pinned Repository CA checksum mismatch' "$installer"
           grep -F 'Invoke-PinnedRepositoryProvision' "$installer"
+          if grep -Fq '/inheritance:r' "$installer"; then
+            echo 'Home installer must not hide ProgramData behind stripped ACL inheritance' >&2
+            exit 1
+          fi
           if grep -Fq 'NEXUS_BACKUP_REPOSITORY_CA_URL' "$installer"; then
             echo 'installer must not depend on a Repository HTTP CA bootstrap URL' >&2
             exit 1
@@ -67,6 +73,7 @@ jobs:
             grep -F "[\"$route\"" "$gateway"
           done
           grep -F 'path.startsWith("/workstation/")' "$gateway"
+          grep -F 'path === "/v1/device/workstation/repository-profile"' "$gateway"
       - name: Validate one-app Unraid template
         shell: bash
         run: |
@@ -100,13 +107,13 @@ jobs:
 
           variables = {item.attrib["Target"]: item.attrib for item in root.findall("Config") if item.attrib.get("Type") == "Variable"}
           assert variables["NEXUS_BACKUP_REPOSITORY_EXPOSURE"]["Default"] == "lan"
-          assert variables["NEXUS_BACKUP_REPOSITORY_HOST"]["Required"] == "true"
+          assert variables["NEXUS_BACKUP_REPOSITORY_HOST"]["Required"] == "false"
           assert variables["NEXUS_BACKUP_REPOSITORY_PORT"]["Default"] == "8000"
           assert variables["NEXUS_BACKUP_REPOSITORY_ENDPOINT_PORT"]["Default"] == "8000"
           assert variables["NEXUS_BACKUP_REPOSITORY_APPEND_ONLY"]["Required"] == "false"
           assert variables["NEXUS_BACKUP_PUBLIC_URL"]["Required"] == "false"
           assert "NEXUS_BACKUP_REPOSITORY_PUBLIC_PORT" not in variables
-          print("single Nexus Backup Unraid template is well formed and least-privilege by default")
+          print("single Nexus Backup Unraid template is well formed and Home-first by default")
           PY
 
   workstation-windows:
@@ -164,7 +171,7 @@ jobs:
             }
             if (!c.tools || Object.keys(c.tools).length !== 0) throw new Error("tools must be empty");
           '
-      - name: Exercise complete appliance with real Restic
+      - name: Exercise complete Remote appliance with real Restic
         shell: bash
         run: |
           set -euo pipefail
@@ -177,6 +184,7 @@ jobs:
           trap cleanup EXIT
 
           docker run -d --name nexus-backup-ci \
+            -e NEXUS_BACKUP_REPOSITORY_EXPOSURE=internet \
             -e NEXUS_BACKUP_REPOSITORY_HOST=127.0.0.1 \
             -e NEXUS_BACKUP_REPOSITORY_INITIAL_USER=ci-user \
             -p 18787:8787 \
@@ -247,6 +255,9 @@ jobs:
             sleep 1
           done
           [ "$stopped" = 1 ] || { echo 'appliance stayed alive after Repository process died' >&2; docker logs nexus-backup-ci >&2; exit 1; }
+      - name: Exercise zero-credential Home Repository
+        shell: bash
+        run: bash .github/scripts/test-home-repository.sh nexus-backup:ci
       - name: Exercise direct Internet Repository protections
         shell: bash
         run: bash .github/scripts/test-internet-repository.sh nexus-backup:ci
@@ -261,7 +272,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          NEXUS_BACKUP_REPOSITORY_HOST=127.0.0.1 docker compose config > /tmp/nexus-compose.yml
+          docker compose config > /tmp/nexus-compose.yml
           test "$(grep -c '^  nexus-backup:$' /tmp/nexus-compose.yml)" = 1
           grep -F 'ghcr.io/swamp2k/nexus-backup:' /tmp/nexus-compose.yml
           grep -F 'network_mode: host' /tmp/nexus-compose.yml

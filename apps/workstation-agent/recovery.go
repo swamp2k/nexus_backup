@@ -96,12 +96,12 @@ func listRecoverySnapshots(parent context.Context, cfg config, deviceID string) 
 	ctx, cancel := context.WithTimeout(parent, 2*time.Minute)
 	defer cancel()
 	env := recoveryEnvironment(cfg)
-	if err := ensureRepositoryContext(ctx, cfg.ResticPath, env, cfg.Repository, false); err != nil {
+	if err := ensureRepositoryContext(ctx, cfg.ResticPath, env, cfg.Repository, false, cfg.InsecureNoPassword); err != nil {
 		return nil, redactBackupError(cfg, err)
 	}
 
 	cmd := commandContextWithTree(ctx, cfg.ResticPath,
-		"snapshots", "--json", "--latest", fmt.Sprint(maxRecoverySnapshots), "--group-by", "", "--tag", "nexus-workstation:"+deviceID,
+		resticCLIArgs(cfg, "snapshots", "--json", "--latest", fmt.Sprint(maxRecoverySnapshots), "--group-by", "", "--tag", "nexus-workstation:"+deviceID)...,
 	)
 	cmd.Env = env
 	stdout, err := cmd.StdoutPipe()
@@ -168,11 +168,11 @@ func browseRecoverySnapshot(parent context.Context, cfg config, snapshotID, snap
 	ctx, cancel := context.WithTimeout(parent, 2*time.Minute)
 	defer cancel()
 	env := recoveryEnvironment(cfg)
-	if err := ensureRepositoryContext(ctx, cfg.ResticPath, env, cfg.Repository, false); err != nil {
+	if err := ensureRepositoryContext(ctx, cfg.ResticPath, env, cfg.Repository, false, cfg.InsecureNoPassword); err != nil {
 		return browseResult{}, redactBackupError(cfg, err)
 	}
 
-	cmd := commandContextWithTree(ctx, cfg.ResticPath, "ls", "--json", id, selectedPath)
+	cmd := commandContextWithTree(ctx, cfg.ResticPath, resticCLIArgs(cfg, "ls", "--json", id, selectedPath)...)
 	cmd.Env = env
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -274,7 +274,7 @@ func runRecoveryRestore(ctx context.Context, cfg config, restoreRoot, runID, sna
 		return started
 	}
 	env := recoveryEnvironment(cfg)
-	if err := ensureRepositoryContext(ctx, cfg.ResticPath, env, cfg.Repository, false); err != nil {
+	if err := ensureRepositoryContext(ctx, cfg.ResticPath, env, cfg.Repository, false, cfg.InsecureNoPassword); err != nil {
 		started.Err = redactBackupError(cfg, err)
 		if ctx.Err() != nil {
 			started.Cancelled = true
@@ -303,6 +303,7 @@ func runRecoveryRestore(ctx context.Context, cfg config, restoreRoot, runID, sna
 	if selectedPath != "" {
 		args = append(args, "--include", selectedPath)
 	}
+	args = resticCLIArgs(cfg, args...)
 	result := runRestoreCommand(ctx, cfg.ResticPath, env, args, target, dryRun)
 	if result.Err != nil {
 		result.Err = redactBackupError(cfg, result.Err)

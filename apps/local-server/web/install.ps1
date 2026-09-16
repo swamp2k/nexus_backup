@@ -114,11 +114,11 @@ $taskName = 'NexusBackupWorkstation'
 New-Item -ItemType Directory -Path $installDir -Force | Out-Null
 New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
 
-# Device credentials, REST transport credentials and the Restic encryption password
-# live below ProgramData. Do not inherit ordinary Users read access; retain only
-# SYSTEM and local Administrators.
-& icacls.exe $dataDir '/inheritance:r' '/grant:r' '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '/T' '/C' | Out-Null
-if ($LASTEXITCODE -ne 0) { Fail 'Could not secure the local NexusBackup data directory ACL.' }
+# Home mode deliberately uses ordinary ProgramData inheritance. Older beta
+# installs stripped inheritance; reset those ACLs during repair/update so the
+# config is administratively boring again instead of becoming a hidden secret store.
+& icacls.exe $dataDir '/inheritance:e' '/T' '/C' | Out-Null
+& icacls.exe $dataDir '/reset' '/T' '/C' | Out-Null
 
 $old = $null
 $deviceToken = ''
@@ -174,6 +174,14 @@ try {
     }
   }
 
+  $repositoryProfile = $null
+  try {
+    $repositoryProfile = Invoke-RestMethod -UseBasicParsing -Method Get -Uri "$serverUrl/v1/device/workstation/repository-profile" `
+      -Headers @{ Authorization = "Bearer $deviceToken" }
+  } catch {
+    Write-Warning "Could not discover Nexus Home Repository settings; workstation will remain usable for scanning and can be repaired later. $($_.Exception.Message)"
+  }
+
   $config = [ordered]@{
     serverUrl = $serverUrl
     deviceToken = $deviceToken
@@ -186,14 +194,31 @@ try {
     pollSeconds = 15
     reportSeconds = 60
     autoInit = $true
+    insecureNoPassword = $false
   }
   if ($null -ne $old) {
-    foreach ($name in @('repository','passwordFile','resticPath','restUsername','restPassword','caCertPath','pollSeconds','reportSeconds','autoInit')) {
+    foreach ($name in @('repository','passwordFile','resticPath','restUsername','restPassword','caCertPath','pollSeconds','reportSeconds','autoInit','insecureNoPassword')) {
       if ($null -ne $old.$name) { $config[$name] = $old.$name }
     }
   }
+  if ($null -ne $repositoryProfile -and [string]$repositoryProfile.mode -eq 'home' -and [string]::IsNullOrWhiteSpace([string]$config['repository'])) {
+    $config['repository'] = ([string]$repositoryProfile.repository).Trim()
+    $config['passwordFile'] = ''
+    $config['restUsername'] = ''
+    $config['restPassword'] = ''
+    $config['caCertPath'] = ''
+    $config['autoInit'] = $true
+    $config['insecureNoPassword'] = $true
+    Write-Host "Nexus Backup: Home Repository configured automatically at $($config['repository'])"
+  }
+
   if (-not [string]::IsNullOrWhiteSpace([string]$env:NEXUS_BACKUP_REPOSITORY)) {
     $config['repository'] = ([string]$env:NEXUS_BACKUP_REPOSITORY).Trim()
+    $config['insecureNoPassword'] = $false
+  }
+  if (([string]$env:NEXUS_BACKUP_RESTIC_NO_PASSWORD).Trim().ToLowerInvariant() -in @('1','true','yes')) {
+    $config['passwordFile'] = ''
+    $config['insecureNoPassword'] = $true
   }
 
   $restUsername = ([string]$env:NEXUS_BACKUP_REST_USERNAME).Trim()
@@ -225,7 +250,7 @@ try {
     [IO.File]::WriteAllText($passwordPath, [string]$env:NEXUS_BACKUP_RESTIC_PASSWORD, (New-Object Text.UTF8Encoding($false)))
   }
 
-  $isPinnedRest = [string]$config['repository'] -match '^rest:https://' -and -not [string]::IsNullOrWhiteSpace([string]$config['restUsername'])
+  $isPinnedRest = -not [bool]$config['insecureNoPassword'] -and [string]$config['repository'] -match '^rest:https://' -and -not [string]::IsNullOrWhiteSpace([string]$config['restUsername'])
   if ($isPinnedRest -and [string]::IsNullOrWhiteSpace([string]$config['caCertPath'])) {
     Fail 'Authenticated Nexus Repository setup requires a locally supplied and SHA-256-verified CA certificate.'
   }
@@ -242,8 +267,6 @@ try {
   # existing installation. If a later file replacement fails, rerunning the installer
   # can repair it without needing the already-consumed bootstrap token.
   Write-WorkstationConfig $configPath $config
-  & icacls.exe $dataDir '/inheritance:r' '/grant:r' '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '/T' '/C' | Out-Null
-  if ($LASTEXITCODE -ne 0) { Fail 'Could not protect Nexus Backup workstation configuration.' }
 
   try { Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue } catch {}
   Start-Sleep -Milliseconds 300
@@ -259,10 +282,13 @@ try {
   Start-ScheduledTask -TaskName $taskName
 
   Write-Host 'Nexus Backup workstation agent installed and started.'
-  if ([string]::IsNullOrWhiteSpace([string]$config['repository']) -or -not (Test-Path $passwordPath)) {
+  $storageReady = -not [string]::IsNullOrWhiteSpace([string]$config['repository']) -and ([bool]$config['insecureNoPassword'] -or (Test-Path $passwordPath))
+  if (-not $storageReady) {
     Write-Host 'Storage is not configured yet; Nexus will show this workstation as Needs storage setup.'
+  } elseif ([bool]$config['insecureNoPassword']) {
+    Write-Host 'Nexus Backup Home mode is ready: no Restic password, Repository credential or CA setup is required.'
   }
 } finally {
   Remove-Item $tmpAgent,$tmpRestic,$tmpCa -Force -ErrorAction SilentlyContinue
-  Remove-Item Env:NEXUS_BACKUP_TOKEN,Env:NEXUS_BACKUP_REPOSITORY,Env:NEXUS_BACKUP_REST_USERNAME,Env:NEXUS_BACKUP_REST_PASSWORD,Env:NEXUS_BACKUP_REPOSITORY_CA_B64,Env:NEXUS_BACKUP_REPOSITORY_CA_SHA256,Env:NEXUS_BACKUP_RESTIC_PASSWORD -ErrorAction SilentlyContinue
+  Remove-Item Env:NEXUS_BACKUP_TOKEN,Env:NEXUS_BACKUP_REPOSITORY,Env:NEXUS_BACKUP_REST_USERNAME,Env:NEXUS_BACKUP_REST_PASSWORD,Env:NEXUS_BACKUP_REPOSITORY_CA_B64,Env:NEXUS_BACKUP_REPOSITORY_CA_SHA256,Env:NEXUS_BACKUP_RESTIC_PASSWORD,Env:NEXUS_BACKUP_RESTIC_NO_PASSWORD -ErrorAction SilentlyContinue
 }

@@ -27,31 +27,32 @@ function render(){
   const c=current.configured||{};
   const a=current.active;
   const p=current.protections||{};
-  const endpoint=c.host?`https://${c.host}:${c.endpointPort||c.listenPort}`:"Not configured";
   const internet=c.exposure==="internet";
+  const homeHost=c.host||location.hostname;
+  const endpoint=internet?(c.host?`https://${c.host}:${c.endpointPort||c.listenPort}`:"Not configured"):`http://${homeHost}:${c.listenPort||8000}/<workstation>`;
   host.innerHTML=`
     <div class="flex items-center justify-between gap-8">
-      <div><p class="eyebrow">Workstation Repository</p><h2>Network & protection</h2><p class="muted small">Expose Restic directly over HTTPS. No VPN or cloud data proxy is required.</p></div>
-      ${badge(internet?"Internet":"LAN",internet?"warn":"success")}
+      <div><p class="eyebrow">Workstation Repository</p><h2>${internet?"Remote mode":"Home mode"}</h2><p class="muted small">${internet?"Hardened direct-Internet Repository with TLS, authentication and private namespaces.":"Trusted-LAN default: no Repository password, certificate or per-PC transport credentials."}</p></div>
+      ${badge(internet?"Remote / Internet":"Home / LAN",internet?"warn":"success")}
     </div>
     ${current.restartRequired?'<div class="repo-settings-banner">Saved settings differ from the running Repository. Restart <strong>NexusBackup</strong> from Unraid to apply them.</div>':""}
     <form id="repository-settings-form" class="repo-settings-form mt-16">
-      <label><span>Exposure</span><select name="exposure"><option value="lan" ${c.exposure==="lan"?"selected":""}>LAN only</option><option value="internet" ${internet?"selected":""}>Direct Internet</option></select><small>Internet mode is for remote PCs reaching this Restic endpoint through your router/firewall.</small></label>
-      <label><span>Endpoint hostname / IP</span><input name="host" required value="${attr(c.host||"")}" placeholder="backup.example.com"><small>This exact identity is pinned into the Repository TLS certificate.</small></label>
-      <div class="repo-settings-columns"><label><span>Local listen port</span><input name="listenPort" type="number" min="1" max="65535" required value="${attr(c.listenPort||8000)}"><small>Port on Tower.</small></label><label><span>Advertised endpoint port</span><input name="endpointPort" type="number" min="1" max="65535" required value="${attr(c.endpointPort||c.listenPort||8000)}"><small>May be 443 while router forwards to local 8000.</small></label></div>
-      <label class="repo-settings-toggle"><input name="appendOnly" type="checkbox" ${c.appendOnly?"checked":""}><span><strong>Append-only Repository</strong><small>Recommended for Internet exposure. Workstations can add backups but cannot delete or modify existing repository objects through the REST endpoint.</small></span></label>
+      <label><span>Mode</span><select name="exposure"><option value="lan" ${c.exposure==="lan"?"selected":""}>Home / trusted LAN</option><option value="internet" ${internet?"selected":""}>Remote / Internet</option></select><small>Home mode is deliberately simple. Remote mode turns the existing TLS/auth hardening back on.</small></label>
+      <label><span>Endpoint hostname / IP</span><input name="host" ${internet?"required":""} value="${attr(c.host||"")}" placeholder="${internet?"backup.example.com":"optional — Control host is used automatically"}"><small>${internet?"Required for Remote mode and pinned into its TLS certificate.":"Optional in Home mode. Leave blank and Nexus uses the same LAN host as Control."}</small></label>
+      <div class="repo-settings-columns"><label><span>Local listen port</span><input name="listenPort" type="number" min="1" max="65535" required value="${attr(c.listenPort||8000)}"><small>${internet?"Port on Tower behind the router/firewall.":"Home Repository port on the LAN."}</small></label><label><span>Advertised endpoint port</span><input name="endpointPort" type="number" min="1" max="65535" required value="${attr(c.endpointPort||c.listenPort||8000)}"><small>${internet?"May be 443 while router forwards to local 8000.":"Normally the same as the local port."}</small></label></div>
+      <label class="repo-settings-toggle"><input name="appendOnly" type="checkbox" ${c.appendOnly?"checked":""}><span><strong>Append-only Repository</strong><small>${internet?"Recommended for hostile-network exposure.":"Off by default at home so normal retention/prune works without extra maintenance."}</small></span></label>
       <div class="repo-settings-endpoint"><span>Advertised Restic endpoint</span><code>${esc(endpoint)}</code></div>
       <div class="modal-actions"><button type="button" class="button ghost" data-repo-refresh>Reload</button><button type="submit" class="button primary">Save Repository settings</button></div>
     </form>
     <div class="repo-protection-grid mt-16">
-      ${protection("TLS",p.tls?`TLS ${esc(p.tlsMinVersion||"1.3")} minimum`:"Off",Boolean(p.tls))}
-      ${protection("Authentication",p.bcryptAuth?"bcrypt per workstation":"Off",Boolean(p.bcryptAuth))}
-      ${protection("Private namespaces",p.privateRepositories?"Enabled":"Off",Boolean(p.privateRepositories))}
+      ${protection("Transport",p.tls?`TLS ${esc(p.tlsMinVersion||"1.3")} minimum`:"Plain HTTP on trusted LAN",Boolean(p.tls))}
+      ${protection("Repository auth",p.bcryptAuth?"bcrypt per workstation":"None in Home mode",Boolean(p.bcryptAuth))}
+      ${protection("Private namespaces",p.privateRepositories?"Enabled":"Folder per workstation",Boolean(p.privateRepositories))}
       ${protection("Append-only",c.appendOnly?"Enabled":"Disabled",Boolean(c.appendOnly))}
       ${protection("Rate limit",p.rateLimit?"Enabled":"Not built in yet",false)}
       ${protection("Brute-force lockout",p.bruteForceLockout?"Enabled":"Not built in yet",false)}
     </div>
-    ${internet?'<div class="transfer-note mt-16"><strong>Router/firewall required:</strong> forward only the advertised Repository port to the local Repository listen port. Do not expose the Nexus Control UI just because Repository is Internet-facing.</div>':""}
+    ${internet?'<div class="transfer-note mt-16"><strong>Advanced Remote mode:</strong> forward only the advertised Repository port. Control should use its own HTTPS path.</div>':'<div class="transfer-note mt-16"><strong>Home trust boundary:</strong> Nexus assumes your LAN and Unraid are trusted. Restic keeps dedup/snapshots but uses an intentionally empty password.</div>'}
     ${a?`<p class="muted small mt-16">Running now: ${esc(a.exposure)} · ${esc(a.host)}:${esc(a.endpointPort)} · append-only ${a.appendOnly?"on":"off"}</p>`:""}
   `;
   injectStyles();
