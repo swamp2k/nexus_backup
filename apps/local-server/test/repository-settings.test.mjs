@@ -5,6 +5,35 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRepositorySettingsService } from "../lib/repository-settings.mjs";
 
+test("repository settings default LAN to simple Home mode", async () => {
+  const root = await mkdtemp(join(tmpdir(), "nexus-repository-home-"));
+  const service = createRepositorySettingsService({
+    configDir: join(root, "config"),
+    runtimeDir: join(root, "run"),
+    env: {},
+  });
+
+  const initial = await service.get();
+  assert.deepEqual(initial.configured, {
+    exposure: "lan",
+    host: "",
+    listenPort: 8000,
+    endpointPort: 8000,
+    appendOnly: false,
+  });
+  assert.equal(initial.mode, "home");
+  assert.equal(initial.protections.tls, false);
+  assert.equal(initial.protections.bcryptAuth, false);
+  assert.equal(initial.protections.privateRepositories, false);
+  assert.equal(initial.protections.appendOnly, false);
+  assert.equal(initial.restartRequired, false);
+
+  const saved = await service.update({ listenPort: 8123, endpointPort: 8123 });
+  assert.equal(saved.configured.host, "");
+  assert.equal(saved.configured.listenPort, 8123);
+  assert.equal(saved.configured.endpointPort, 8123);
+});
+
 test("repository settings default Internet mode to append-only and separate listen/endpoint ports", async () => {
   const root = await mkdtemp(join(tmpdir(), "nexus-repository-service-"));
   const configDir = join(root, "config");
@@ -28,9 +57,12 @@ test("repository settings default Internet mode to append-only and separate list
     endpointPort: 443,
     appendOnly: true,
   });
+  assert.equal(initial.mode, "remote");
   assert.equal(initial.active, null);
   assert.equal(initial.restartRequired, false);
   assert.equal(initial.protections.tlsMinVersion, "1.3");
+  assert.equal(initial.protections.bcryptAuth, true);
+  assert.equal(initial.protections.privateRepositories, true);
   assert.equal(initial.protections.rateLimit, false);
 
   const saved = await service.update({ endpointPort: 8443, appendOnly: false });
