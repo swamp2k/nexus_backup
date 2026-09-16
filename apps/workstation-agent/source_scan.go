@@ -17,27 +17,27 @@ const (
 )
 
 type sourceScanNode struct {
-	Path         string
-	Parent       string
-	Name         string
-	Bytes        int64
-	Files        int64
-	Directories  int64
-	Inaccessible bool
+	Path         string `json:"path"`
+	Parent       string `json:"parent"`
+	Name         string `json:"name"`
+	Bytes        int64  `json:"bytes"`
+	Files        int64  `json:"files"`
+	Directories  int64  `json:"directories"`
+	Inaccessible bool   `json:"inaccessible,omitempty"`
 }
 
 type sourceScanResult struct {
-	Drives      []string
-	Nodes       []sourceScanNode
-	Truncated   bool
+	Drives      []string         `json:"drives"`
+	Nodes       []sourceScanNode `json:"nodes"`
+	Truncated   bool             `json:"truncated"`
 	approxBytes int
 }
 
 type sourceScanProgress struct {
-	Files       int64
-	Directories int64
-	Bytes       int64
-	CurrentPath string
+	Files       int64  `json:"files"`
+	Directories int64  `json:"directories"`
+	Bytes       int64  `json:"bytes"`
+	CurrentPath string `json:"currentPath,omitempty"`
 }
 
 type sourceScanWalker struct {
