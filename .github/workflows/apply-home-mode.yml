@@ -36,6 +36,7 @@ jobs:
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -A
+          rm -f apps/agent/tsconfig.tsbuildinfo apps/control-plane/tsconfig.tsbuildinfo packages/core/tsconfig.tsbuildinfo
+          git add apps repository compose.yaml unraid
           git commit -m 'Make Home mode the zero-credential default'
           git push origin HEAD:home-mode-simplification
