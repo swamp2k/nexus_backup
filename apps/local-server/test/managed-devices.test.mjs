@@ -115,6 +115,28 @@ test("disable and token rotation invalidate previous device credentials",async()
   }finally{await f.close();}
 });
 
+test("disabled non-workstation devices can be permanently deleted",async()=>{
+  const f=await fixture();
+  try{
+    const created=await f.service.create({name:"Old PCWatch",kind:"pcwatch"});
+    await assert.rejects(()=>f.service.remove(created.device.id),/Disable.*before deleting/i);
+    await f.service.update(created.device.id,{enabled:false});
+    const deleted=await f.service.remove(created.device.id);
+    assert.deepEqual(deleted,{deleted:true,id:created.device.id});
+    assert.equal((await f.service.list()).length,0);
+    await assert.rejects(()=>f.service.authenticate(created.token),/Invalid/i);
+  }finally{await f.close();}
+});
+
+test("managed-device delete refuses workstation rows",async()=>{
+  const f=await fixture();
+  try{
+    const created=await f.service.create({name:"Workstation",kind:"workstation"});
+    await f.service.update(created.device.id,{enabled:false});
+    await assert.rejects(()=>f.service.remove(created.device.id),/Workstations page/i);
+  }finally{await f.close();}
+});
+
 test("device reports reject oversized and malformed metadata",()=>{
   assert.throws(()=>normalizeDeviceReport({capabilities:Array.from({length:33},(_,i)=>`cap-${i}`)}),/at most 32/);
   assert.throws(()=>normalizeDeviceReport({remotes:["x".repeat(129)]}),/1-128/);

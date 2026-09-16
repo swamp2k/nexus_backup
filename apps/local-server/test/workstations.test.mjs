@@ -31,7 +31,7 @@ async function fixture(){
     leaseMs:60_000,
   });
   const created=await devices.create({name:"Balder PC",kind:"workstation"});
-  const bootstrap=await devices.report(created.token,{version:"installer",hostname:"balder-pc",platform:"windows/amd64",capabilities:["workstation.bootstrap.v1"]});
+  const bootstrap=await devices.report(created.token,{version:"installer",hostname:"balder-pc",platform:"windows/amd64",capabilities:["workstation.bootstrap.v1","workstation.source-scan.v1"]});
   return{dir,db,devices,service,token:bootstrap.deviceToken,device:bootstrap.device,setNow:value=>{now=new Date(value)},async close(){db.close();await rm(dir,{recursive:true,force:true});}};
 }
 
@@ -113,6 +113,41 @@ test("scheduled workstation runs coalesce missed schedules",async()=>{
     assert.equal(rows.length,1);
     const updated=await f.service.getPolicy(f.device.id);
     assert.ok(new Date(updated.nextRunAt)>new Date("2026-09-14T08:00:00Z"));
+  }finally{await f.close();}
+});
+
+test("explicit needs-storage status leaves ordinary backup queued while source scan may run",async()=>{
+  const f=await fixture();
+  try{
+    await f.service.putPolicy(f.device.id,policy);
+    const backup=await f.service.runNow(f.device.id);
+    await f.service.reportStatus(f.token,{repositoryConfigured:false,agentState:"needs-storage",localDrives:["C:\\"]});
+    const firstPoll=await f.service.poll(f.token);
+    assert.equal(firstPoll.run,null);
+    // Remove the queued backup only for this fixture so a source scan can own the one-active-run invariant.
+    await f.db.prepare("UPDATE workstation_runs SET state='cancelled',finished_at=updated_at WHERE id=?").bind(backup.id).run();
+    const scan=await f.service.queueSourceScan(f.device.id,{drives:["C:\\"]});
+    const secondPoll=await f.service.poll(f.token);
+    assert.equal(secondPoll.run.id,scan.id);
+    assert.equal(secondPoll.run.operation,"source-scan");
+  }finally{await f.close();}
+});
+
+test("source scan runs without repository setup and persists the latest tree",async()=>{
+  const f=await fixture();
+  try{
+    await f.service.reportStatus(f.token,{repositoryConfigured:false,agentState:"needs-storage",localDrives:["C:\\","D:\\"]});
+    const queued=await f.service.queueSourceScan(f.device.id,{drives:["C:\\"]});
+    const leased=await f.service.poll(f.token);
+    assert.equal(leased.run.id,queued.id);
+    assert.equal(leased.run.operation,"source-scan");
+    assert.deepEqual(leased.run.request.drives,["C:\\"]);
+    await f.service.finish(f.token,queued.id,{leaseToken:leased.run.leaseToken,status:"success",result:{operation:"source-scan",drives:["C:\\"],nodes:[{path:"C:\\",parent:"",name:"C:\\",bytes:123,files:2,directories:1},{path:"C:\\Users",parent:"C:\\",name:"Users",bytes:100,files:1,directories:0}],truncated:false}});
+    const cached=await f.service.getSourceScan(f.device.id);
+    assert.equal(cached.scan.nodes.length,2);
+    assert.equal(cached.scan.nodes[1].path,"C:\\Users");
+    const listed=(await f.service.list())[0];
+    assert.deepEqual(listed.status.localDrives,["C:\\","D:\\"]);
   }finally{await f.close();}
 });
 

@@ -76,6 +76,18 @@ func (a *agent) executeRecovery(run workstationRun, operation string) {
 
 func (a *agent) runRecoveryOperation(ctx context.Context, run workstationRun, operation string) (map[string]any, error) {
 	switch operation {
+	case "source-scan":
+		result, err := scanSourceTree(ctx, run.Request.Drives)
+		if err != nil { return map[string]any{"operation": operation, "drives": run.Request.Drives}, err }
+		nodes := make([]map[string]any, 0, len(result.Nodes))
+		for _, node := range result.Nodes {
+			nodes = append(nodes, map[string]any{
+				"path": node.Path, "parent": node.Parent, "name": node.Name, "bytes": node.Bytes,
+				"files": node.Files, "directories": node.Directories, "inaccessible": node.Inaccessible,
+			})
+		}
+		return map[string]any{"operation": operation, "drives": result.Drives, "nodes": nodes, "truncated": result.Truncated}, nil
+
 	case "check":
 		if err := checkWorkstationRepository(ctx, a.cfg); err != nil {
 			return map[string]any{"operation": operation}, err
