@@ -21,7 +21,9 @@ jobs:
           go-version-file: apps/workstation-agent/go.mod
           cache-dependency-path: apps/workstation-agent/go.mod
       - name: Apply refactor
-        run: python3 .github/scripts/apply-home-mode.py
+        run: |
+          python3 .github/scripts/apply-home-mode.py
+          python3 .github/scripts/post-home-mode.py
       - name: Test Node code
         run: npm ci && npm test && npm run typecheck
       - name: Test workstation agent
