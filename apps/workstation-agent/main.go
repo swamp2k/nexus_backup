@@ -29,7 +29,8 @@ type config struct {
 	CACertPath    string `json:"caCertPath,omitempty"`
 	PollSeconds   int    `json:"pollSeconds"`
 	ReportSeconds int    `json:"reportSeconds"`
-	AutoInit      bool   `json:"autoInit"`
+	AutoInit           bool   `json:"autoInit"`
+	InsecureNoPassword bool   `json:"insecureNoPassword,omitempty"`
 }
 
 type localState struct {

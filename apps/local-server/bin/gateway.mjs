@@ -7,6 +7,7 @@ import { loadSanitizedAgentConfig } from "../lib/dashboard-data.mjs";
 import { confirmationPhrase, createLocalAuth } from "../lib/local-auth.mjs";
 import { createManagedDeviceService } from "../lib/managed-devices.mjs";
 import { resolvePublicOrigin } from "../lib/public-origin.mjs";
+import { createRepositorySettingsService } from "../lib/repository-settings.mjs";
 import { assertRecentRestorePreview, normalizeRestoreScope, queueRestoreExecution } from "../lib/restore-execution.mjs";
 import { openSqliteD1 } from "../lib/sqlite-d1.mjs";
 import { createTransferCleanupService } from "../lib/transfer-cleanup.mjs";
@@ -38,6 +39,7 @@ const db = await openSqliteD1({ filename: databasePath, migrationsDir });
 const auth = await createLocalAuth({ configDir, log });
 const deviceService = createManagedDeviceService({ db });
 const workstationService = createWorkstationService({ db, deviceService });
+const repositorySettingsService = createRepositorySettingsService();
 const workstationRecoveryHttp = createWorkstationRecoveryHttp({ workstationService });
 const transferService = createTransferRuleService({
   db,
@@ -144,6 +146,32 @@ const gateway = createServer(async (request, response) => {
     }
     if (path === "/v1/device/workstation/status" && request.method === "POST") {
       sendJson(response, 200, await workstationService.reportStatus(requireBearerToken(request), await readJsonBody(request)));
+      return;
+    }
+    if (path === "/v1/device/workstation/repository-profile" && request.method === "GET") {
+      const device = await deviceService.authenticate(requireBearerToken(request));
+      if (device.kind !== "workstation") throw statusError(403, "Device token is not a workstation token");
+      const settings = await repositorySettingsService.get();
+      if (settings.configured.exposure !== "lan") {
+        sendJson(response, 200, { mode: "remote", automatic: false });
+        return;
+      }
+      const authority = singleHeader(request.headers.host) || `127.0.0.1:${publicPort}`;
+      let controlHost;
+      try {
+        controlHost = new URL(`http://${authority}`).hostname;
+      } catch {
+        throw statusError(400, "Invalid Control host");
+      }
+      const repositoryHost = settings.configured.host || controlHost;
+      const repositoryPort = settings.configured.endpointPort || settings.configured.listenPort;
+      sendJson(response, 200, {
+        mode: "home",
+        automatic: true,
+        repository: `rest:http://${repositoryHost}:${repositoryPort}/${encodeURIComponent(device.id)}`,
+        insecureNoPassword: true,
+        autoInit: true,
+      });
       return;
     }
     if (path === "/v1/device/workstation/poll" && request.method === "POST") {

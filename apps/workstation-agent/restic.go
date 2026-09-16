@@ -57,8 +57,8 @@ func executeResticBackup(ctx context.Context, cfg config, run workstationRun, re
 	// probe may mean auth, TLS or network failure and must never be treated as
 	// permission to create/initialize a remote repository. Managed Nexus REST
 	// repositories are provisioned explicitly by the workstation installer.
-	allowInit := cfg.AutoInit && localRepositoryPath(cfg.Repository) != ""
-	if err := ensureRepositoryContext(ctx, cfg.ResticPath, env, cfg.Repository, allowInit); err != nil {
+	allowInit := cfg.AutoInit && (localRepositoryPath(cfg.Repository) != "" || (cfg.InsecureNoPassword && strings.HasPrefix(strings.ToLower(cfg.Repository), "rest:http://")))
+	if err := ensureRepositoryContext(ctx, cfg.ResticPath, env, cfg.Repository, allowInit, cfg.InsecureNoPassword); err != nil {
 		result := backupResult{Duration: time.Since(started), Err: redactBackupError(cfg, err)}
 		if ctx.Err() != nil {
 			result.Cancelled = true
@@ -76,6 +76,7 @@ func executeResticBackup(ctx context.Context, cfg config, run workstationRun, re
 		args = append(args, "--exclude", pattern)
 	}
 	args = append(args, run.SourcePaths...)
+	args = resticCLIArgs(cfg, args...)
 
 	result := runBackupCommand(ctx, cfg.ResticPath, env, args, report)
 	result.Duration = time.Since(started)
@@ -93,7 +94,7 @@ func executeResticBackup(ctx context.Context, cfg config, run workstationRun, re
 		result.Err = fmt.Errorf("run cancelled: %w", ctx.Err())
 		return result
 	}
-	if err := applyRetentionContext(ctx, cfg.ResticPath, env, tag, run.Retention); err != nil {
+	if err := applyRetentionContext(ctx, cfg.ResticPath, env, tag, run.Retention, cfg.InsecureNoPassword); err != nil {
 		if ctx.Err() != nil {
 			result.Cancelled = true
 			result.Err = fmt.Errorf("retention cancelled: %w", ctx.Err())
@@ -211,7 +212,8 @@ func ensureRepository(resticPath string, env []string, repository string, autoIn
 	return ensureRepositoryContext(context.Background(), resticPath, env, repository, autoInit)
 }
 
-func ensureRepositoryContext(ctx context.Context, resticPath string, env []string, repository string, autoInit bool) error {
+func ensureRepositoryContext(ctx context.Context, resticPath string, env []string, repository string, autoInit bool, insecureNoPassword ...bool) error {
+	noPassword := len(insecureNoPassword) > 0 && insecureNoPassword[0]
 	if local := localRepositoryPath(repository); local != "" {
 		configPath := filepath.Join(local, "config")
 		_, statErr := os.Stat(configPath)
@@ -219,7 +221,7 @@ func ensureRepositoryContext(ctx context.Context, resticPath string, env []strin
 			if !autoInit {
 				return errors.New("local restic repository does not exist and autoInit is disabled")
 			}
-			initCmd := commandContextWithTree(ctx, resticPath, "init")
+			initCmd := commandContextWithTree(ctx, resticPath, resticCLIArgsForMode(noPassword, "init")...)
 			initCmd.Env = env
 			output, err := combinedOutputTree(initCmd)
 			if ctx.Err() != nil {
@@ -235,14 +237,35 @@ func ensureRepositoryContext(ctx context.Context, resticPath string, env []strin
 		}
 	}
 
-	check := commandContextWithTree(ctx, resticPath, "cat", "config")
+	check := commandContextWithTree(ctx, resticPath, resticCLIArgsForMode(noPassword, "cat", "config")...)
 	check.Env = env
 	output, err := combinedOutputTree(check)
 	if ctx.Err() != nil {
 		return fmt.Errorf("open restic repository cancelled: %w", ctx.Err())
 	}
-	if err != nil {
+	if err == nil {
+		return nil
+	}
+	// Runtime initialization of a remote repository is permitted only for the
+	// explicit Home-mode empty-password REST profile. Encrypted/Remote targets
+	// retain the old fail-closed behavior on auth/TLS/network errors.
+	if !autoInit || !noPassword {
 		return fmt.Errorf("open restic repository: %s", boundedText(output, 4000))
+	}
+	initCmd := commandContextWithTree(ctx, resticPath, resticCLIArgsForMode(noPassword, "init")...)
+	initCmd.Env = env
+	initOutput, initErr := combinedOutputTree(initCmd)
+	if ctx.Err() != nil {
+		return fmt.Errorf("initialize restic repository cancelled: %w", ctx.Err())
+	}
+	if initErr != nil {
+		return fmt.Errorf("initialize restic repository: %s", boundedText(initOutput, 4000))
+	}
+	probe := commandContextWithTree(ctx, resticPath, resticCLIArgsForMode(noPassword, "cat", "config")...)
+	probe.Env = env
+	probeOutput, probeErr := combinedOutputTree(probe)
+	if probeErr != nil {
+		return fmt.Errorf("open initialized restic repository: %s", boundedText(probeOutput, 4000))
 	}
 	return nil
 }
@@ -262,7 +285,7 @@ func applyRetention(resticPath string, env []string, tag string, retention reten
 	return applyRetentionContext(context.Background(), resticPath, env, tag, retention)
 }
 
-func applyRetentionContext(ctx context.Context, resticPath string, env []string, tag string, retention retentionPolicy) error {
+func applyRetentionContext(ctx context.Context, resticPath string, env []string, tag string, retention retentionPolicy, insecureNoPassword ...bool) error {
 	if retention.KeepDaily == 0 && retention.KeepWeekly == 0 && retention.KeepMonthly == 0 {
 		return nil
 	}
@@ -276,7 +299,8 @@ func applyRetentionContext(ctx context.Context, resticPath string, env []string,
 	if retention.KeepMonthly > 0 {
 		args = append(args, "--keep-monthly", strconv.Itoa(retention.KeepMonthly))
 	}
-	cmd := commandContextWithTree(ctx, resticPath, args...)
+	noPassword := len(insecureNoPassword) > 0 && insecureNoPassword[0]
+	cmd := commandContextWithTree(ctx, resticPath, resticCLIArgsForMode(noPassword, args...)...)
 	cmd.Env = env
 	output, err := combinedOutputTree(cmd)
 	if ctx.Err() != nil {
@@ -315,15 +339,17 @@ func validateRepositoryConfig(cfg config) error {
 	if strings.TrimSpace(cfg.Repository) == "" {
 		return errors.New("repository is not configured locally")
 	}
-	if strings.TrimSpace(cfg.PasswordFile) == "" {
-		return errors.New("passwordFile is not configured locally")
-	}
-	content, err := os.ReadFile(cfg.PasswordFile)
-	if err != nil {
-		return fmt.Errorf("read restic password file: %w", err)
-	}
-	if strings.TrimSpace(string(content)) == "" {
-		return errors.New("restic password file is empty")
+	if !cfg.InsecureNoPassword {
+		if strings.TrimSpace(cfg.PasswordFile) == "" {
+			return errors.New("passwordFile is not configured locally")
+		}
+		content, err := os.ReadFile(cfg.PasswordFile)
+		if err != nil {
+			return fmt.Errorf("read restic password file: %w", err)
+		}
+		if strings.TrimSpace(string(content)) == "" {
+			return errors.New("restic password file is empty")
+		}
 	}
 	if (strings.TrimSpace(cfg.RestUsername) == "") != (strings.TrimSpace(cfg.RestPassword) == "") {
 		return errors.New("REST transport username and password must be configured together")
@@ -345,11 +371,13 @@ func validateRepositoryConfig(cfg config) error {
 
 func resticEnvironment(cfg config) []string {
 	blocked := map[string]struct{}{
-		"RESTIC_REPOSITORY":    {},
-		"RESTIC_PASSWORD_FILE": {},
-		"RESTIC_REST_USERNAME": {},
-		"RESTIC_REST_PASSWORD": {},
-		"RESTIC_CACERT":        {},
+		"RESTIC_REPOSITORY":       {},
+		"RESTIC_PASSWORD":         {},
+		"RESTIC_PASSWORD_FILE":    {},
+		"RESTIC_PASSWORD_COMMAND": {},
+		"RESTIC_REST_USERNAME":    {},
+		"RESTIC_REST_PASSWORD":    {},
+		"RESTIC_CACERT":           {},
 	}
 	env := make([]string, 0, len(os.Environ())+5)
 	for _, entry := range os.Environ() {
@@ -362,10 +390,10 @@ func resticEnvironment(cfg config) []string {
 		}
 		env = append(env, entry)
 	}
-	env = append(env,
-		"RESTIC_REPOSITORY="+cfg.Repository,
-		"RESTIC_PASSWORD_FILE="+cfg.PasswordFile,
-	)
+	env = append(env, "RESTIC_REPOSITORY="+cfg.Repository)
+	if !cfg.InsecureNoPassword {
+		env = append(env, "RESTIC_PASSWORD_FILE="+cfg.PasswordFile)
+	}
 	if cfg.RestUsername != "" {
 		env = append(env, "RESTIC_REST_USERNAME="+cfg.RestUsername, "RESTIC_REST_PASSWORD="+cfg.RestPassword)
 	}
@@ -373,6 +401,19 @@ func resticEnvironment(cfg config) []string {
 		env = append(env, "RESTIC_CACERT="+cfg.CACertPath)
 	}
 	return env
+}
+
+func resticCLIArgs(cfg config, args ...string) []string {
+	return resticCLIArgsForMode(cfg.InsecureNoPassword, args...)
+}
+
+func resticCLIArgsForMode(insecureNoPassword bool, args ...string) []string {
+	if !insecureNoPassword {
+		return args
+	}
+	result := make([]string, 0, len(args)+1)
+	result = append(result, "--insecure-no-password")
+	return append(result, args...)
 }
 
 func redactBackupError(cfg config, err error) error {

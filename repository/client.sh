@@ -25,6 +25,11 @@ PORT=$("$SETTINGS_BIN" get endpoint-port 2>/dev/null || echo "$LISTEN_PORT")
 EXPOSURE=$("$SETTINGS_BIN" get exposure 2>/dev/null || echo lan)
 APPEND_ONLY=$("$SETTINGS_BIN" get append-only 2>/dev/null || { [ "$EXPOSURE" = internet ] && echo true || echo false; })
 
+if [ "$EXPOSURE" = "lan" ]; then
+  echo "Nexus Backup Home mode configures workstation repositories automatically; no Repository credentials or CA are required."
+  exit 0
+fi
+
 [ -n "$HOST" ] || { echo "Repository endpoint host is not configured" >&2; exit 1; }
 [ -s "$TLS_CERT" ] || { echo "repository CA certificate is not ready" >&2; exit 1; }
 
