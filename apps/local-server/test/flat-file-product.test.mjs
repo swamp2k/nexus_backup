@@ -13,6 +13,7 @@ import { openSqliteD1 } from "../lib/sqlite-d1.mjs";
 const migrationsDir = fileURLToPath(new URL("../../../migrations/", import.meta.url));
 const repositoriesWebPath = fileURLToPath(new URL("../web/repositories.js", import.meta.url));
 const installerPath = fileURLToPath(new URL("../web/install.ps1", import.meta.url));
+const gatewayPath = fileURLToPath(new URL("../bin/gateway.mjs", import.meta.url));
 
 async function fixture() {
   const dir = await mkdtemp(join(tmpdir(), "nexus-flat-file-"));
@@ -40,11 +41,13 @@ test("repository browser consumes typed directory entries and workstation instal
   assert.match(browser, /filter\(item=>item\.type==="directory"\)/);
   assert.doesNotMatch(browser, /filter\(item=>item\.directory\)/);
   const installer = await readFile(installerPath, "utf8");
+  const gateway = await readFile(gatewayPath, "utf8");
   assert.match(installer, /repositoryId=/);
   assert.doesNotMatch(installer, /receiverProtocol=/);
   assert.doesNotMatch(installer, /receiverHost=/);
   assert.doesNotMatch(installer, /receiverPassword=/);
   assert.doesNotMatch(installer, /@\('pollSeconds','reportSeconds','receiverPassword'\)/);
+  assert.doesNotMatch(gateway, /consumeBootstrapPassword|receiverPassword/);
   assert.match(browser, /user\.kind==="manual"/);
 });
 
@@ -63,8 +66,8 @@ test("receiver users get random credentials and a restricted root", async () => 
     await f.db.prepare(`INSERT INTO managed_devices(id,name,kind,token_hash,created_at,updated_at) VALUES(?,?,?,?,?,?)`)
       .bind("ws-1", "Balder PC", "workstation", "hash-ws-1", new Date().toISOString(), new Date().toISOString()).run();
     const workstation = await f.receiverUsers.create({ username: "Balder PC", repositoryId: repository.id, kind: "workstation", workstationId: "ws-1" });
-    assert.equal(await f.receiverUsers.consumeBootstrapPassword("ws-1"), workstation.password);
-    assert.equal(await f.receiverUsers.consumeBootstrapPassword("ws-1"), null);
+    assert.equal(workstation.password.length >= 20, true);
+    assert.equal(await f.db.prepare("SELECT bootstrap_password FROM receiver_users WHERE id=?").bind(workstation.user.id).first("bootstrap_password"), null);
     const reset = await f.receiverUsers.resetPassword(workstation.user.id, "fresh-workstation-bootstrap-password");
     assert.equal(Object.hasOwn(reset, "password"), false);
     assert.equal(await f.receiverUsers.authenticate(workstation.user.username, "fresh-workstation-bootstrap-password").then((user) => user.id), workstation.user.id);

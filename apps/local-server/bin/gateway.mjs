@@ -219,16 +219,8 @@ const gateway = createServer(async (request, response) => {
       const workstation = (await workstationService.list()).find((item) => item.id === device.id);
       const receiver = (await receiverUserService.list()).find((item) => item.workstationId === device.id);
       if (!workstation?.policy?.repositoryId || !receiver) throw statusError(409, "Workstation repository is not configured");
-      const receiverPassword = await receiverUserService.consumeBootstrapPassword(device.id);
-      const authority = singleHeader(request.headers.host) || `127.0.0.1:${publicPort}`;
-      const host = new URL(`http://${authority}`).hostname;
       sendJson(response, 200, {
         mode: "flat-file",
-        transport: "webdav",
-        receiverHost: host,
-        receiverPort: publicPort,
-        receiverUsername: receiver.username,
-        ...(receiverPassword ? { receiverPassword } : {}),
         repositoryId: workstation.policy.repositoryId,
         destinationFolder: workstation.policy.destinationFolder || workstation.name,
       });

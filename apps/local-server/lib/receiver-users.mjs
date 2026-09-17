@@ -21,10 +21,8 @@ export function createReceiverUserService({ db, repositories, now = () => new Da
     const at = nowDate(now).toISOString();
     const userId = requireId(id());
     try {
-      const bootstrapPassword = input.kind === "workstation" ? password : null;
-      const bootstrapExpiresAt = bootstrapPassword ? new Date(Date.parse(at) + 15 * 60 * 1000).toISOString() : null;
       await db.prepare(`INSERT INTO receiver_users(id,username,password_hash,bootstrap_password,bootstrap_expires_at,repository_id,relative_subpath,enabled,kind,workstation_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,1,?,?,?,?)`)
-        .bind(userId, username, await hashPassword(password), bootstrapPassword, bootstrapExpiresAt, repository.id, relativeSubpath, input.kind === "workstation" ? "workstation" : "manual", input.workstationId ?? null, at, at).run();
+        .bind(userId, username, await hashPassword(password), null, null, repository.id, relativeSubpath, input.kind === "workstation" ? "workstation" : "manual", input.workstationId ?? null, at, at).run();
     } catch (error) { if (/UNIQUE/i.test(String(error))) throw statusError(409, "Receiver username is already in use"); throw error; }
     return { user: await get(userId), password };
   }
@@ -35,19 +33,10 @@ export function createReceiverUserService({ db, repositories, now = () => new Da
   async function resetPassword(userId, password = generatedPassword()) {
     const next = requirePassword(password);
     const at = nowDate(now).toISOString();
-    const bootstrapExpiresAt = new Date(Date.parse(at) + 15 * 60 * 1000).toISOString();
-    const result = await db.prepare("UPDATE receiver_users SET password_hash=?,bootstrap_password=CASE WHEN kind='workstation' THEN ? ELSE bootstrap_password END,bootstrap_expires_at=CASE WHEN kind='workstation' THEN ? ELSE bootstrap_expires_at END,updated_at=? WHERE id=?").bind(await hashPassword(next), next, bootstrapExpiresAt, at, requireId(userId)).run();
+    const result = await db.prepare("UPDATE receiver_users SET password_hash=?,bootstrap_password=NULL,bootstrap_expires_at=NULL,updated_at=? WHERE id=?").bind(await hashPassword(next), at, requireId(userId)).run();
     if (Number(result.meta?.changes ?? 0) !== 1) throw statusError(404, "Receiver user not found");
     const user = await get(userId);
     return user.kind === "workstation" ? { user } : { user, password: next };
-  }
-  async function consumeBootstrapPassword(workstationId) {
-    const at = nowDate(now).toISOString();
-    const row = await db.prepare("SELECT bootstrap_password FROM receiver_users WHERE workstation_id=? AND kind='workstation' AND enabled=1 AND bootstrap_password IS NOT NULL AND bootstrap_expires_at>? LIMIT 1").bind(requireId(workstationId), at).first();
-    if (!row?.bootstrap_password) return null;
-    const password = String(row.bootstrap_password);
-    const result = await db.prepare("UPDATE receiver_users SET bootstrap_password=NULL,updated_at=? WHERE workstation_id=? AND kind='workstation' AND enabled=1 AND bootstrap_password=?").bind(at, requireId(workstationId), password).run();
-    return Number(result.meta?.changes ?? 0) === 1 ? password : null;
   }
   async function setEnabled(userId, enabled) {
     if (typeof enabled !== "boolean") throw new RangeError("enabled must be boolean");
@@ -89,7 +78,7 @@ export function createReceiverUserService({ db, repositories, now = () => new Da
     const resolved = await repositories.paths.resolveRelative(relativePath);
     return { ...root, ...resolved, relativePath: resolved.relative };
   }
-  return { list, get, create, resetPassword, consumeBootstrapPassword, setEnabled, remove, updateWorkstationRoot, authenticate, rootFor, resolvePath };
+  return { list, get, create, resetPassword, setEnabled, remove, updateWorkstationRoot, authenticate, rootFor, resolvePath };
 }
 
 export function normalizeUsername(value) {

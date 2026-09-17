@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { readFile, rm, stat } from "node:fs/promises";
 import { D1JobRepository } from "../../control-plane/dist/index.js";
@@ -8,10 +8,13 @@ const LOCAL_AGENT_ID = "nexus-local-executor";
 const RESERVED_RCLONE_FLAGS = new Set(["-n", "--config", "--dry-run", "--use-json-log", "--partial-suffix", "--backup-dir", "--compare-dest", "--copy-dest", "--suffix", "--suffix-keep-extension", "--log-file", "--password-command"]);
 
 // Repository destinations are executed by the gateway process. The job record is
-// retained for UI/history, but no agent registration, token, or lease service is
-// required to make the transfer run.
-export function createLocalRepositoryTransferExecutor({ db, repositories, enqueueJob, loadConfig, command = runCommand, now = () => new Date(), id = () => randomUUID() } = {}) {
+// retained for UI/history and its lease is renewed for the duration of work so a
+// long rclone process cannot be recovered and re-run concurrently.
+export function createLocalRepositoryTransferExecutor({ db, repositories, enqueueJob, loadConfig, command = runCommand, now = () => new Date(), id = () => randomUUID(), leaseTtlMs = 600_000, leaseHeartbeatMs } = {}) {
   if (!db || !repositories || typeof enqueueJob !== "function" || typeof loadConfig !== "function") throw new TypeError("local repository transfer dependencies are required");
+  if (!Number.isSafeInteger(leaseTtlMs) || leaseTtlMs < 1) throw new RangeError("leaseTtlMs must be a positive integer");
+  const heartbeatMs = leaseHeartbeatMs ?? Math.max(1000, Math.floor(leaseTtlMs / 3));
+  if (!Number.isSafeInteger(heartbeatMs) || heartbeatMs < 1) throw new RangeError("leaseHeartbeatMs must be a positive integer");
   const jobs = new JobService(new D1JobRepository(db), { eventIdFactory: id });
 
   async function execute(payload) {
@@ -21,13 +24,13 @@ export function createLocalRepositoryTransferExecutor({ db, repositories, enqueu
       type: "managed-transfer",
       payload: normalized.payload,
     });
-    const acquired = await jobs.acquire({ jobId: String(job.id), agentId: LOCAL_AGENT_ID, token: id(), now: date(now), ttlMs: 600_000 });
+    const acquired = await jobs.acquire({ jobId: String(job.id), agentId: LOCAL_AGENT_ID, token: id(), now: date(now), ttlMs: leaseTtlMs });
     const token = acquired.lease?.token;
     if (!token) throw new Error("local transfer job did not acquire a lease");
     let current = await jobs.transition(acquired.id, LOCAL_AGENT_ID, token, "preparing", date(now));
     try {
       current = await jobs.transition(current.id, LOCAL_AGENT_ID, token, "running", date(now));
-      await transfer({ ...normalized.payload, jobId: current.id }, { signal: new AbortController().signal });
+      await withLeaseHeartbeat(current.id, token, (signal) => transfer({ ...normalized.payload, jobId: current.id }, { signal }));
       current = await jobs.transition(current.id, LOCAL_AGENT_ID, token, "finalizing", date(now));
       current = await jobs.transition(current.id, LOCAL_AGENT_ID, token, "completed", date(now));
       return { job: current, completed: true };
@@ -45,13 +48,13 @@ export function createLocalRepositoryTransferExecutor({ db, repositories, enqueu
       type: "rclone-discovery",
       payload,
     });
-    const acquired = await jobs.acquire({ jobId: String(job.id), agentId: LOCAL_AGENT_ID, token: id(), now: date(now), ttlMs: 600_000 });
+    const acquired = await jobs.acquire({ jobId: String(job.id), agentId: LOCAL_AGENT_ID, token: id(), now: date(now), ttlMs: leaseTtlMs });
     const token = acquired.lease?.token;
     if (!token) throw new Error("local discovery job did not acquire a lease");
     let current = await jobs.transition(acquired.id, LOCAL_AGENT_ID, token, "preparing", date(now));
     try {
       current = await jobs.transition(current.id, LOCAL_AGENT_ID, token, "running", date(now));
-      const event = await discover(payload);
+      const event = await withLeaseHeartbeat(current.id, token, (signal) => discover(payload, signal));
       current = await jobs.transition(current.id, LOCAL_AGENT_ID, token, "finalizing", date(now));
       current = await jobs.transition(current.id, LOCAL_AGENT_ID, token, "completed", date(now));
       return { job: current, event };
@@ -62,13 +65,13 @@ export function createLocalRepositoryTransferExecutor({ db, repositories, enqueu
     }
   }
 
-  async function discover(payload) {
+  async function discover(payload, signal) {
     const config = await loadConfig();
     const endpoint = (config.rcloneEndpoints ?? []).find((item) => String(item.id) === payload.sourceEndpointId);
     if (!endpoint?.fs) throw new Error(`unknown sourceEndpointId: ${payload.sourceEndpointId}`);
     const source = joinTarget(String(endpoint.fs), safeBase(payload.sourcePath));
     const tool = config.tools ?? {};
-    const result = await invoke(tool, ["lsjson", source, "--recursive", "--files-only", "--no-mimetype", ...(tool.rcloneArgs ?? [])], command, new AbortController().signal);
+    const result = await invoke(tool, ["lsjson", source, "--recursive", "--files-only", "--no-mimetype", ...(tool.rcloneArgs ?? [])], command, signal);
     let raw; try { raw = JSON.parse(result.stdout); } catch { throw new Error("rclone discovery returned invalid JSON"); }
     if (!Array.isArray(raw)) throw new Error("rclone discovery did not return a JSON file list");
     const entries = [];
@@ -121,23 +124,53 @@ export function createLocalRepositoryTransferExecutor({ db, repositories, enqueu
     }
   }
 
+  async function withLeaseHeartbeat(jobId, token, work) {
+    const controller = new AbortController();
+    let heartbeatError = null;
+    let heartbeatPromise = Promise.resolve();
+    const heartbeat = async () => {
+      if (heartbeatError) return;
+      try {
+        await jobs.heartbeat({ jobId: String(jobId), agentId: LOCAL_AGENT_ID, token, now: date(now), ttlMs: leaseTtlMs });
+      } catch (error) {
+        heartbeatError = error;
+        controller.abort(error);
+      }
+    };
+    const timer = setInterval(() => {
+      heartbeatPromise = heartbeatPromise.then(heartbeat, heartbeat);
+    }, heartbeatMs);
+    timer.unref?.();
+    let result;
+    try {
+      result = await work(controller.signal);
+    } finally {
+      clearInterval(timer);
+      await heartbeatPromise;
+    }
+    if (heartbeatError) throw heartbeatError;
+    return result;
+  }
+
   async function executeCleanup(payload) {
     const normalized = normalizeCleanupPayload(payload);
     const job = await enqueueJob({ operationKey: normalized.operationKey, type: "managed-cleanup", payload: normalized.payload });
-    const acquired = await jobs.acquire({ jobId: String(job.id), agentId: LOCAL_AGENT_ID, token: id(), now: date(now), ttlMs: 600_000 });
+    const acquired = await jobs.acquire({ jobId: String(job.id), agentId: LOCAL_AGENT_ID, token: id(), now: date(now), ttlMs: leaseTtlMs });
     const token = acquired.lease?.token;
     if (!token) throw new Error("local cleanup job did not acquire a lease");
     let current = await jobs.transition(acquired.id, LOCAL_AGENT_ID, token, "preparing", date(now));
     try {
       current = await jobs.transition(current.id, LOCAL_AGENT_ID, token, "running", date(now));
-      const repository = await repositories.get(normalized.payload.destinationRepositoryId);
-      if (!repository) throw new Error(`repository not found: ${normalized.payload.destinationRepositoryId}`);
-      const target = await repositories.resolve(normalized.payload.destinationRepositoryId, joinRelative(normalized.payload.destinationPath, normalized.payload.relPath));
-      const info = await stat(target.absolute);
-      if (!info.isFile()) throw new Error("cleanup target is not a regular file");
-      if (info.size !== normalized.payload.expectedSize) throw new Error(`cleanup refused modified destination: expected ${normalized.payload.expectedSize} bytes, got ${info.size}`);
-      if (info.mtimeMs !== Date.parse(normalized.payload.expectedModTime)) throw new Error(`cleanup refused modified destination: expected modification time ${normalized.payload.expectedModTime}, got ${info.mtime.toISOString()}`);
-      await rm(target.absolute);
+      await withLeaseHeartbeat(current.id, token, async () => {
+        const repository = await repositories.get(normalized.payload.destinationRepositoryId);
+        if (!repository) throw new Error(`repository not found: ${normalized.payload.destinationRepositoryId}`);
+        const target = await repositories.resolve(normalized.payload.destinationRepositoryId, joinRelative(normalized.payload.destinationPath, normalized.payload.relPath));
+        const info = await stat(target.absolute);
+        if (!info.isFile()) throw new Error("cleanup target is not a regular file");
+        if (info.size !== normalized.payload.expectedSize) throw new Error(`cleanup refused modified destination: expected ${normalized.payload.expectedSize} bytes, got ${info.size}`);
+        if (info.mtimeMs !== Date.parse(normalized.payload.expectedModTime)) throw new Error(`cleanup refused modified destination: expected modification time ${normalized.payload.expectedModTime}, got ${info.mtime.toISOString()}`);
+        await rm(target.absolute);
+      });
       current = await jobs.transition(current.id, LOCAL_AGENT_ID, token, "finalizing", date(now));
       current = await jobs.transition(current.id, LOCAL_AGENT_ID, token, "completed", date(now));
       return { job: current, completed: true };
@@ -156,17 +189,20 @@ export async function loadLocalRcloneConfig(path) {
   return { rcloneEndpoints: Array.isArray(value?.rcloneEndpoints) ? value.rcloneEndpoints : [], tools: isRecord(value?.tools) ? value.tools : {} };
 }
 
-function normalizeTransferPayload(value) {
+export function normalizeTransferPayload(value) {
   if (!isRecord(value)) throw new RangeError("managed transfer payload must be an object");
-  const items = Array.isArray(value.items) ? value.items.map((item) => ({ relPath: safePath(item.relPath), size: nonNegative(item.size, "item.size") })) : [];
+  const items = Array.isArray(value.items) ? value.items.map((item) => ({ relPath: safePath(item.relPath), size: nonNegative(item.size, "item.size"), objectKey: requireObjectKey(item.objectKey, "item.objectKey") })) : [];
   if (!items.length) throw new RangeError("managed transfer requires at least one item");
   const rcloneArgs = Array.isArray(value.rcloneArgs) ? value.rcloneArgs.map(String) : [];
   for (const arg of rcloneArgs) if (RESERVED_RCLONE_FLAGS.has(arg.split("=", 1)[0]) || arg.startsWith("--stats") || arg.startsWith("--multi-thread") || arg.startsWith("--delete-")) throw new RangeError(`rcloneArgs may not override managed transfer safety flag: ${arg}`);
   const destinationRepositoryId = requireId(value.destinationRepositoryId, "destinationRepositoryId");
   const ruleId = requireId(value.ruleId, "ruleId");
   const attempt = positive(value.transferAttempt, "transferAttempt");
+  const identity = items.length === 1
+    ? items[0].objectKey
+    : createHash("sha256").update(items.map((item) => item.objectKey).sort().join("\n")).digest("hex");
   return {
-    operationKey: `transfer:${ruleId}:${String(value.objectKey ?? items[0].relPath)}:attempt:${attempt}`,
+    operationKey: `transfer:${ruleId}:${identity}:attempt:${attempt}`,
     payload: {
       ruleId,
       sourceEndpointId: requireId(value.sourceEndpointId, "sourceEndpointId"),
@@ -230,6 +266,7 @@ function joinRelative(...parts) { return parts.filter(Boolean).map((part) => Str
 function safePath(value) { if (typeof value !== "string") throw new RangeError("transfer path must be a string"); const normalized = value.replaceAll("\\", "/").replace(/^\/+|\/+$/g, ""); if (!normalized || normalized.split("/").some((part) => !part || part === "." || part === "..")) throw new RangeError("transfer path must be safe and relative"); return normalized; }
 function safeBase(value) { if (value === undefined || value === null || value === "") return ""; if (typeof value !== "string") throw new RangeError("transfer base path must be a string"); const normalized = value.trim().replaceAll("\\", "/").replace(/^\/+|\/+$/g, ""); if (normalized.split("/").some((part) => !part || part === "." || part === "..")) throw new RangeError("transfer base path may not contain dot segments"); return normalized; }
 function requireId(value, name) { if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(value.trim())) throw new RangeError(`${name} is invalid`); return value.trim(); }
+function requireObjectKey(value, name) { if (typeof value !== "string" || value.length < 1 || value.length > 1024 || value.includes("\0")) throw new RangeError(`${name} is invalid`); return value; }
 function positive(value, name) { const result = Number(value); if (!Number.isSafeInteger(result) || result < 1) throw new RangeError(`${name} must be positive`); return result; }
 function nonNegative(value, name) { const result = Number(value); if (!Number.isSafeInteger(result) || result < 0) throw new RangeError(`${name} must be non-negative`); return result; }
 function date(now) { const result = new Date(now()); if (!Number.isFinite(result.getTime())) throw new TypeError("now() must return a valid date"); return result; }

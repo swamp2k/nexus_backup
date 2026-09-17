@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -16,10 +17,11 @@ import (
 )
 
 type apiClient struct {
-	baseURL string
-	mu      sync.RWMutex
-	token   string
-	http    *http.Client
+	baseURL    string
+	mu         sync.RWMutex
+	token      string
+	http       *http.Client
+	uploadHTTP *http.Client
 }
 
 type deviceReport struct {
@@ -90,10 +92,25 @@ type backupProgress struct {
 }
 
 func newAPIClient(baseURL, token string) *apiClient {
+	transport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		IdleConnTimeout:       90 * time.Second,
+	}
 	return &apiClient{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		token:   token,
-		http:    &http.Client{Timeout: 45 * time.Second},
+		http:    &http.Client{Timeout: 45 * time.Second, Transport: transport},
+		// Uploads can legitimately take longer than the control-plane request
+		// timeout. The request context still cancels a stopped run, while the
+		// transport keeps connection, TLS, and response-header timeouts.
+		uploadHTTP: &http.Client{Transport: transport},
 	}
 }
 
@@ -164,7 +181,7 @@ func (c *apiClient) uploadFileWithMtime(ctx context.Context, relativePath string
 	if !mtime.IsZero() {
 		req.Header.Set("X-Nexus-Source-Mtime", fmt.Sprintf("%d", mtime.UnixMilli()))
 	}
-	resp, err := c.http.Do(req)
+	resp, err := c.uploadHTTP.Do(req)
 	if err != nil {
 		return err
 	}

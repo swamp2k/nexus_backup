@@ -1,10 +1,15 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestAPIClientUsesBearerAndDeviceReportShape(t *testing.T) {
@@ -125,5 +130,38 @@ func TestFinishRunCarriesLeaseToken(t *testing.T) {
 	client := newAPIClient(server.URL, "nxbdev_test-token-1234567890")
 	if err := client.finishRun("run-1", "nxbws_abcdefghijklmnopqrstuvwxyz", "success", map[string]any{"snapshotId": "abc"}, ""); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestUploadUsesStreamingClientWithoutShortTotalTimeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut {
+			t.Fatalf("method = %s, want PUT", r.Method)
+		}
+		if _, err := io.Copy(io.Discard, r.Body); err != nil {
+			t.Fatalf("read upload: %v", err)
+		}
+		time.Sleep(50 * time.Millisecond)
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer server.Close()
+
+	client := newAPIClient(server.URL, "test-token")
+	client.http.Timeout = 10 * time.Millisecond
+	filePath := filepath.Join(t.TempDir(), "upload.bin")
+	if err := os.WriteFile(filePath, []byte("payload"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.Open(filePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+
+	if err := client.uploadFileWithMtime(context.Background(), "upload.bin", file, 7, time.Time{}); err != nil {
+		t.Fatalf("upload failed despite streaming client: %v", err)
+	}
+	if client.uploadHTTP.Timeout != 0 {
+		t.Fatalf("upload client timeout = %s, want no total timeout", client.uploadHTTP.Timeout)
 	}
 }
