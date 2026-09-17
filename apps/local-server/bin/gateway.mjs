@@ -499,7 +499,7 @@ async function proxyReceiverWebDav(request, response, path, search) {
     duplex: "half",
   });
   response.statusCode = upstream.status;
-  for (const [name, value] of upstream.headers) if (!["connection", "transfer-encoding"].includes(name.toLowerCase())) response.setHeader(name, value);
+  for (const [name, value] of upstream.headers) if (!["connection", "transfer-encoding", "content-length"].includes(name.toLowerCase())) response.setHeader(name, value);
   if (!upstream.body) { response.end(); return; }
   await pipeline(upstream.body, response);
 }
