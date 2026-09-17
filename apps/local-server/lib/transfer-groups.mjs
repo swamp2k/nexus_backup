@@ -6,7 +6,7 @@ const GROUP_HOLD_AT = "9999-12-31T23:59:59.999Z";
 const PASSIVE_STATES = new Set(["ignored", "done", "cleaned"]);
 const BLOCKING_STATES = new Set(["queued", "failed", "cancelled"]);
 
-export function createTransferGroupService({ db, enqueueJob, now = () => new Date() }) {
+export function createTransferGroupService({ db, enqueueJob, executeRepositoryTransfer = null, now = () => new Date() }) {
   if (!db) throw new TypeError("db is required");
   if (typeof enqueueJob !== "function") throw new TypeError("enqueueJob is required");
 
@@ -21,6 +21,7 @@ export function createTransferGroupService({ db, enqueueJob, now = () => new Dat
         r.source_path,
         r.destination_endpoint_id,
         r.destination_path,
+        r.destination_repository_id,
         r.mode,
         r.verification,
         r.multi_thread_streams,
@@ -78,15 +79,13 @@ export function createTransferGroupService({ db, enqueueJob, now = () => new Dat
         const objectKeys = pending.map((member) => String(member.object_key)).sort();
         const manifestFingerprint = sha256(objectKeys.join("\n"));
         const groupFingerprint = sha256(groupKey);
-        const job = await enqueueJob({
-          operationKey: `transfer-group:${ruleId}:${groupFingerprint}:${manifestFingerprint}:attempt:${attempt}`,
-          type: "managed-transfer",
-          payload: {
+        const payload = {
             ruleId,
             sourceEndpointId: String(row.source_endpoint_id),
             sourcePath: String(row.source_path),
             destinationEndpointId: String(row.destination_endpoint_id),
             destinationPath: String(row.destination_path),
+            ...(row.destination_repository_id ? { destinationRepositoryId: String(row.destination_repository_id) } : {}),
             mode: "copy",
             verification: String(row.verification),
             transferAttempt: attempt,
@@ -100,8 +99,15 @@ export function createTransferGroupService({ db, enqueueJob, now = () => new Dat
               modTime: String(member.mod_time),
               objectKey: String(member.object_key),
             })),
-          },
-        });
+          };
+        const jobResult = row.destination_repository_id && typeof executeRepositoryTransfer === "function"
+          ? await executeRepositoryTransfer(payload)
+          : { job: await enqueueJob({
+          operationKey: `transfer-group:${ruleId}:${groupFingerprint}:${manifestFingerprint}:attempt:${attempt}`,
+          type: "managed-transfer",
+          payload,
+        }) };
+        const job = jobResult.job;
 
         await db.batch(pending.map((member) => db.prepare(`
           UPDATE transfer_objects

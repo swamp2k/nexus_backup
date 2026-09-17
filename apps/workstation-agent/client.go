@@ -2,11 +2,14 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -141,6 +144,29 @@ func (c *apiClient) finishRun(runID, leaseToken, status string, result map[strin
 		payload["error"] = errorMessage
 	}
 	return c.doJSON(http.MethodPost, "/v1/device/workstation/runs/"+runID+"/result", payload, nil)
+}
+
+func (c *apiClient) uploadFile(ctx context.Context, relativePath string, file *os.File, size int64) error {
+	requestURL := c.baseURL + "/v1/device/workstation/files?path=" + url.QueryEscape(relativePath)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, requestURL, file)
+	if err != nil {
+		return err
+	}
+	req.ContentLength = size
+	req.Header.Set("Authorization", "Bearer "+c.currentToken())
+	req.Header.Set("Content-Type", "application/octet-stream")
+	req.Header.Set("Accept", "application/json")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+		return &apiError{Method: http.MethodPut, Path: "/v1/device/workstation/files", StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(data))}
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return nil
 }
 
 func (c *apiClient) doJSON(method, path string, body any, out any) error {

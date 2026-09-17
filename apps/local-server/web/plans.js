@@ -114,7 +114,7 @@ function openEditor(plan=null){
   modal.classList.remove("hidden");
   modal.querySelector("#plan-modal-title").textContent=plan?"Edit backup plan":"New backup plan";
   field("name").value=plan?.name||"";
-  field("jobType").value=plan?.jobType||"restic-backup";
+  field("jobType").value="rclone-transfer";
   field("timezone").value=plan?.timezone||Intl.DateTimeFormat().resolvedOptions().timeZone||"UTC";
   field("scheduleKind").value=plan?.schedule?.kind||"daily";
   field("scheduleTime").value=plan?.schedule?.time||"03:00";
@@ -133,6 +133,7 @@ function ensureModal(){
   const shell=document.createElement("div");
   shell.innerHTML=`<div class="modal-backdrop hidden" id="plan-modal"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="plan-modal-title"><div class="modal-header"><div><p class="eyebrow">Automation</p><h2 id="plan-modal-title">New backup plan</h2></div><button class="icon-button" type="button" data-close>×</button></div><form id="plan-form"><p class="plan-modal-copy">Plans reference local source/repository IDs only. Credentials stay inside the agent.</p><div class="plan-form-grid"><label class="full"><span>Name</span><input name="name" maxlength="120" required placeholder="Nightly appdata"></label><label><span>Backup type</span><select name="jobType"><option value="restic-backup">Local → Restic</option><option value="rclone-restic-backup">Remote mount → Restic</option><option value="rclone-transfer">Rclone copy</option></select></label><label><span>Timezone</span><input name="timezone" required></label><div class="full" id="plan-payload"></div><div class="plan-section full"><strong>Schedule</strong><div class="plan-form-grid"><label><span>Frequency</span><select name="scheduleKind"><option value="daily">Daily</option><option value="weekly">Weekly</option></select></label><label><span>Local time</span><input type="time" name="scheduleTime" required></label><div class="full" id="plan-weekdays"></div></div></div><div class="plan-section full" id="retention-section"><strong>Retention policy</strong><div class="retention-grid"><label><span>Daily</span><input type="number" name="keepDaily" min="0" max="3650"></label><label><span>Weekly</span><input type="number" name="keepWeekly" min="0" max="3650"></label><label><span>Monthly</span><input type="number" name="keepMonthly" min="0" max="3650"></label></div><small>Stored now; enforcement arrives with maintenance jobs.</small></div><label class="enabled-row full"><input type="checkbox" name="enabled"><span>Enabled</span></label></div><div class="modal-actions"><button type="button" class="button ghost" data-close>Cancel</button><button type="submit" class="button primary">Save plan</button></div></form></section></div>`;
   modal=shell.firstElementChild;document.body.append(modal);form=modal.querySelector("#plan-form");
+  field("jobType").innerHTML='<option value="rclone-transfer">File transfer</option>';
   modal.querySelectorAll("[data-close]").forEach(button=>button.addEventListener("click",closeEditor));
   modal.addEventListener("click",event=>{if(event.target===modal)closeEditor();});
   field("jobType").addEventListener("change",()=>{renderPayload();toggleSections();});

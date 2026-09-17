@@ -24,6 +24,13 @@ const defaultConfigName = "workstation.json"
 type config struct {
 	ServerURL          string `json:"serverUrl"`
 	DeviceToken        string `json:"deviceToken"`
+	ReceiverProtocol   string `json:"receiverProtocol,omitempty"`
+	ReceiverHost       string `json:"receiverHost,omitempty"`
+	ReceiverPort       int    `json:"receiverPort,omitempty"`
+	ReceiverUsername   string `json:"receiverUsername,omitempty"`
+	ReceiverPassword   string `json:"receiverPassword,omitempty"`
+	RepositoryID       string `json:"repositoryId,omitempty"`
+	DestinationFolder  string `json:"destinationFolder,omitempty"`
 	Repository         string `json:"repository"`
 	PasswordFile       string `json:"passwordFile"`
 	ResticPath         string `json:"resticPath"`
@@ -125,7 +132,7 @@ func (a *agent) run() error {
 
 func (a *agent) report() error {
 	hostname, _ := os.Hostname()
-	capabilities := []string{"workstation.backup.v1", "workstation.recovery.v1", "workstation.restore-staging.v1", "workstation.integrity.v1", "restic.v1", "windows-vss.v1"}
+	capabilities := []string{"workstation.backup.v1", "workstation.flat-file.v1", "windows-vss.v1"}
 	if runtime.GOOS == "windows" {
 		capabilities = append(capabilities, "workstation.source-scan.v1")
 	}
@@ -168,7 +175,7 @@ func (a *agent) reportStatus() error {
 	a.mu.Unlock()
 	status := workstationStatus{
 		RepositoryConfigured: a.repositoryReady(),
-		RepositoryKind:       repositoryKind(a.cfg.Repository),
+		RepositoryKind:       repositoryKindForConfig(a.cfg),
 		AgentState:           "idle",
 		LocalDrives:          availableDriveRoots(),
 		CurrentRunID:         runningID,
@@ -178,7 +185,7 @@ func (a *agent) reportStatus() error {
 		LastError:            state.LastError,
 	}
 	if !status.RepositoryConfigured {
-		status.AgentState = "needs-storage"
+		status.AgentState = "needs-repository"
 	} else if runningID != "" {
 		status.AgentState = "running"
 	}
@@ -229,7 +236,7 @@ func (a *agent) executeBackup(run workstationRun) {
 			return
 		}
 		if isStaleLease(err) {
-			log.Printf("run %s lease rejected as stale; cancelling local restic process", run.ID)
+			log.Printf("run %s lease rejected as stale; cancelling local backup", run.ID)
 			cancel()
 		}
 	}
@@ -254,7 +261,11 @@ func (a *agent) executeBackup(run workstationRun) {
 		}
 	}()
 
-	result := executeResticBackup(ctx, a.cfg, run, func(progress backupProgress) {
+	execute := executeResticBackup
+	if strings.TrimSpace(a.cfg.RepositoryID) != "" {
+		execute = executeFlatFileBackup
+	}
+	result := execute(ctx, a.cfg, run, func(progress backupProgress) {
 		err := a.client.reportProgress(run.ID, run.LeaseToken, progress)
 		if err != nil {
 			log.Printf("run %s progress report failed: %v", run.ID, err)
@@ -313,6 +324,9 @@ func (a *agent) executeBackup(run workstationRun) {
 }
 
 func (a *agent) repositoryReady() bool {
+	if strings.TrimSpace(a.cfg.RepositoryID) != "" {
+		return strings.TrimSpace(a.cfg.ServerURL) != "" && strings.TrimSpace(a.cfg.DeviceToken) != ""
+	}
 	return validateRepositoryConfig(a.cfg) == nil
 }
 
@@ -343,6 +357,12 @@ func loadConfig(path string) (config, error) {
 	}
 	cfg.ServerURL = strings.TrimRight(strings.TrimSpace(cfg.ServerURL), "/")
 	cfg.DeviceToken = strings.TrimSpace(cfg.DeviceToken)
+	cfg.ReceiverProtocol = strings.ToLower(strings.TrimSpace(cfg.ReceiverProtocol))
+	cfg.ReceiverHost = strings.TrimSpace(cfg.ReceiverHost)
+	cfg.ReceiverUsername = strings.TrimSpace(cfg.ReceiverUsername)
+	cfg.ReceiverPassword = strings.TrimSpace(cfg.ReceiverPassword)
+	cfg.RepositoryID = strings.TrimSpace(cfg.RepositoryID)
+	cfg.DestinationFolder = strings.Trim(strings.TrimSpace(cfg.DestinationFolder), `/\\`)
 	cfg.Repository = strings.TrimSpace(cfg.Repository)
 	cfg.PasswordFile = strings.TrimSpace(cfg.PasswordFile)
 	cfg.ResticPath = strings.TrimSpace(cfg.ResticPath)
@@ -354,6 +374,12 @@ func loadConfig(path string) (config, error) {
 	}
 	if len(cfg.DeviceToken) < 24 {
 		return config{}, errors.New("deviceToken is missing or invalid")
+	}
+	if cfg.ReceiverProtocol == "" {
+		cfg.ReceiverProtocol = "webdav"
+	}
+	if cfg.RepositoryID != "" && (cfg.ReceiverProtocol != "webdav" || cfg.ReceiverHost == "") {
+		return config{}, errors.New("flat-file configuration requires a receiver host and webdav protocol")
 	}
 	if (cfg.RestUsername == "") != (cfg.RestPassword == "") {
 		return config{}, errors.New("REST transport username and password must be configured together")
@@ -426,6 +452,13 @@ func repositoryKind(repository string) string {
 		}
 	}
 	return "remote"
+}
+
+func repositoryKindForConfig(cfg config) string {
+	if strings.TrimSpace(cfg.RepositoryID) != "" {
+		return "flat-file"
+	}
+	return repositoryKind(cfg.Repository)
 }
 
 func agentVersion() string {

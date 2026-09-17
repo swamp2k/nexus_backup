@@ -8,6 +8,7 @@ const toastStack=document.querySelector("#toast-stack");
 const ACTIVE=new Set(["queued","leased","preparing","running","finalizing"]);
 let rules=[];
 let endpoints=[];
+let repositories=[];
 let available=false;
 let loading=false;
 let editing=null;
@@ -52,8 +53,8 @@ async function refresh(quiet=false){
   if(loading)return;loading=true;
   if(!quiet&&isActive())refreshButton.textContent="Refreshing…";
   try{
-    const result=await api("/v1/local/transfers");
-    rules=result.rules??[];endpoints=result.endpoints??[];available=Boolean(result.available);
+    const [result,repositoryResult]=await Promise.all([api("/v1/local/transfers"),api("/v1/local/repositories")]);
+    rules=result.rules??[];endpoints=result.endpoints??[];repositories=repositoryResult.repositories??[];available=Boolean(result.available);
     render();
     for(const id of expanded)void loadObjects(id,true);
   }catch(error){if(!quiet)toast("Transfers refresh failed",error.message,true)}
@@ -85,7 +86,7 @@ function ruleCard(rule){
   const open=expanded.has(rule.id);
   const scanActive=rule.lastScanJob&&ACTIVE.has(rule.lastScanJob.state);
   const source=`${rule.sourceEndpointId}${rule.sourcePath?`/${rule.sourcePath}`:""}`;
-  const destination=`${rule.destinationEndpointId}${rule.destinationPath?`/${rule.destinationPath}`:""}`;
+  const destination=rule.destinationRepositoryId?`${repositories.find(repo=>repo.id===rule.destinationRepositoryId)?.name||rule.destinationRepositoryId}${rule.destinationPath?`/${rule.destinationPath}`:""}`:`${rule.destinationEndpointId}${rule.destinationPath?`/${rule.destinationPath}`:""}`;
   const total=count(rule,"done")+count(rule,"discovered")+count(rule,"ignored")+count(rule,"queued")+count(rule,"retry_wait")+count(rule,"failed")+count(rule,"cancelled")+count(rule,"superseded");
   return `<section class="card transfer-card" data-rule="${attr(rule.id)}">
     <div class="transfer-head"><div class="transfer-title"><span class="transfer-state${rule.enabled?"":" paused"}"></span><div><h2>${esc(rule.name)}</h2><span>${esc(rule.mode.toUpperCase())} · ${rule.enabled?"Enabled":"Paused"}</span></div></div><div class="transfer-actions"><span class="badge ${scanActive?"blue":rule.lastError?"danger":rule.initializedAt?"success":"warn"}">${scanActive?"Scanning":rule.lastError?"Scan failed":rule.initializedAt?"Watching":"Not initialized"}</span><button class="button ghost compact" data-action="scan" data-id="${attr(rule.id)}" ${scanActive||!rule.enabled?"disabled":""}>${scanActive?"Scanning…":"Scan now"}</button><button class="button ghost compact" data-action="edit" data-id="${attr(rule.id)}">Edit</button><button class="button ghost compact" data-action="toggle" data-id="${attr(rule.id)}">${rule.enabled?"Pause":"Enable"}</button></div></div>
@@ -146,13 +147,14 @@ async function loadObjects(ruleId,quiet=true){
 
 function openEditor(rule=null){
   if(!available){toast("Agent config unavailable","Wait for the local agent configuration before creating a transfer rule.",true);return;}
-  ensureModal();editing=rule;modal.classList.remove("hidden");
+  ensureModal();ensureDestinationRepositoryField();editing=rule;modal.classList.remove("hidden");
   modal.querySelector("#transfer-modal-title").textContent=rule?"Edit transfer rule":"New transfer rule";
   field("name").value=rule?.name||"";
   field("sourceEndpointId").value=rule?.sourceEndpointId||endpoints[0]?.id||"";
   field("sourcePath").value=rule?.sourcePath||"";
-  field("destinationEndpointId").value=rule?.destinationEndpointId||endpoints[1]?.id||endpoints[0]?.id||"";
+  field("destinationEndpointId").value=rule?.destinationRepositoryId?endpoints[0]?.id||"":rule?.destinationEndpointId||endpoints[1]?.id||endpoints[0]?.id||"";
   field("destinationPath").value=rule?.destinationPath||"";
+  field("destinationRepositoryId").value=rule?.destinationRepositoryId||"";
   field("mode").value=rule?.mode||"copy";
   field("initialBehavior").value=rule?.initialBehavior||"ignore_existing";
   field("stabilitySeconds").value=rule?.stabilitySeconds??600;
@@ -169,6 +171,14 @@ function openEditor(rule=null){
   updateMoveHint();
 }
 function closeEditor(){modal?.classList.add("hidden");editing=null;}
+
+function ensureDestinationRepositoryField(){
+  if(form.elements.namedItem("destinationRepositoryId"))return;
+  const endpoint=field("destinationEndpointId");
+  const label=document.createElement("label");
+  label.innerHTML=`<span>Destination repository <small>optional</small></span><select name="destinationRepositoryId"><option value="">Use endpoint</option>${repositories.map(repo=>`<option value="${attr(repo.id)}">${esc(repo.name)}</option>`).join("")}</select>`;
+  endpoint.closest("label")?.after(label);
+}
 
 function ensureModal(){
   if(modal)return;
@@ -195,6 +205,8 @@ async function save(event){
       retryCount:Number(data.get("retryCount")),retryWaitSeconds:Number(data.get("retryWaitSeconds")),
       rcloneArgs:lines(data.get("rcloneArgs")),includes:patterns(data.get("includes")),excludes:patterns(data.get("excludes")),
     };
+    payload.destinationRepositoryId=String(data.get("destinationRepositoryId")||"")||null;
+    if(payload.destinationRepositoryId)payload.destinationEndpointId="repository";
     if(editing)await api(`/v1/local/transfers/${encodeURIComponent(editing.id)}`,{method:"PUT",body:payload});else await api("/v1/local/transfers",{method:"POST",body:payload});
     toast(editing?"Transfer rule updated":"Transfer rule created",payload.name);closeEditor();await refresh(true);
   }catch(error){toast("Could not save transfer rule",error.message,true)}finally{button.disabled=false;button.textContent="Save rule";}

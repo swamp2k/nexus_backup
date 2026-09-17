@@ -138,18 +138,25 @@ test("emergency export refuses overlapping destinations and existing bundles", a
     }
 
     const linkedParent = join(f.root, "linked-control");
-    await symlink(f.configDir, linkedParent);
-    await assert.rejects(
-      () => createEmergencyBundle({ configDir: f.configDir, agentConfigDir: f.agentConfigDir, outputDir: join(linkedParent, "bundle") }),
-      /must not overlap control config/,
-    );
+    let symlinksAvailable = true;
+    try { await symlink(f.configDir, linkedParent); }
+    catch (error) {
+      if (process.platform === "win32" && error?.code === "EPERM") symlinksAvailable = false;
+      else throw error;
+    }
+    if (symlinksAvailable) {
+      await assert.rejects(
+        () => createEmergencyBundle({ configDir: f.configDir, agentConfigDir: f.agentConfigDir, outputDir: join(linkedParent, "bundle") }),
+        /must not overlap control config/,
+      );
 
-    const nestedOutput = join(linkedParent, "new-parent", "bundle");
-    await assert.rejects(
-      () => createEmergencyBundle({ configDir: f.configDir, agentConfigDir: f.agentConfigDir, outputDir: nestedOutput }),
-      /must not overlap control config/,
-    );
-    await assert.rejects(() => lstat(join(f.configDir, "new-parent")), /ENOENT/);
+      const nestedOutput = join(linkedParent, "new-parent", "bundle");
+      await assert.rejects(
+        () => createEmergencyBundle({ configDir: f.configDir, agentConfigDir: f.agentConfigDir, outputDir: nestedOutput }),
+        /must not overlap control config/,
+      );
+      await assert.rejects(() => lstat(join(f.configDir, "new-parent")), /ENOENT/);
+    }
 
     const existing = join(f.root, "existing");
     await mkdir(existing);
@@ -160,11 +167,18 @@ test("emergency export refuses overlapping destinations and existing bundles", a
   } finally { await f.close(); }
 });
 
-test("emergency export refuses symlinks so a bundle cannot silently depend on another host path", async () => {
+test("emergency export refuses symlinks so a bundle cannot silently depend on another host path", async (t) => {
   const f = await fixture();
   try {
     await writeFile(join(f.root, "external-secret"), "outside\n");
-    await symlink(join(f.root, "external-secret"), join(f.agentConfigDir, "secrets", "linked-secret"));
+    try { await symlink(join(f.root, "external-secret"), join(f.agentConfigDir, "secrets", "linked-secret")); }
+    catch (error) {
+      if (process.platform === "win32" && error?.code === "EPERM") {
+        t.skip("Windows symlink creation requires Developer Mode or elevated privilege");
+        return;
+      }
+      throw error;
+    }
     const outputDir = join(f.root, "off-host", "bundle");
     await assert.rejects(
       () => createEmergencyBundle({ configDir: f.configDir, agentConfigDir: f.agentConfigDir, outputDir }),
