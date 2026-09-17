@@ -14,7 +14,11 @@ printf 'protocol smoke\n' > "$tmp/protocol.txt"
 
 docker run -d --name "$name" -p 18787:8787 -p 12222:2222 -p 12121:2121 -v "$config:/config" -v "$state:/state" -v "$backup:/backup" "$image" >/dev/null
 for _ in $(seq 1 60); do curl -fsS http://127.0.0.1:18787/healthz >/dev/null && break; sleep 1; done
-curl -fsS http://127.0.0.1:18787/healthz >/dev/null
+if ! curl -fsS http://127.0.0.1:18787/healthz >/dev/null; then
+  docker inspect "$name" --format '{{json .State}}' >&2 || true
+  docker logs "$name" >&2 || true
+  exit 1
+fi
 setup_token="$(docker logs "$name" 2>&1 | sed -n 's/.*"setupToken":"\([^"]*\)".*/\1/p' | head -1)"
 test -n "$setup_token"
 curl -fsS -c "$tmp/cookies" -H 'content-type: application/json' -d "{\"setupToken\":\"$setup_token\",\"password\":\"smoke-admin-password-123\"}" http://127.0.0.1:18787/v1/local/auth/setup > "$tmp/setup.json"
