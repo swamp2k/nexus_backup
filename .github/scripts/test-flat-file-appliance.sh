@@ -47,7 +47,7 @@ curl --fail --silent --show-error --user "alpha-user:$alpha_password" ftp://127.
 
 if docker exec "$name" sh -ec 'ps 2>/dev/null | grep -E "restic|rest-server|agent" | grep -v grep'; then echo 'retired process found in appliance' >&2; exit 1; fi
 receiver_pid="$(docker exec "$name" sh -ec 'pidof sftpgo')"
-docker exec "$name" kill -TERM "$receiver_pid"
+docker exec "$name" sh -ec "kill -TERM $receiver_pid"
 for _ in $(seq 1 20); do [ "$(docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null || true)" = false ] && exit 0; sleep 1; done
 echo 'appliance did not fail after SFTPGo stopped' >&2
 exit 1
