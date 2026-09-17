@@ -22,17 +22,11 @@ var (
 const defaultConfigName = "workstation.json"
 
 type config struct {
-	ServerURL         string `json:"serverUrl"`
-	DeviceToken       string `json:"deviceToken"`
-	ReceiverProtocol  string `json:"receiverProtocol,omitempty"`
-	ReceiverHost      string `json:"receiverHost,omitempty"`
-	ReceiverPort      int    `json:"receiverPort,omitempty"`
-	ReceiverUsername  string `json:"receiverUsername,omitempty"`
-	ReceiverPassword  string `json:"receiverPassword,omitempty"`
-	RepositoryID      string `json:"repositoryId,omitempty"`
-	DestinationFolder string `json:"destinationFolder,omitempty"`
-	PollSeconds       int    `json:"pollSeconds"`
-	ReportSeconds     int    `json:"reportSeconds"`
+	ServerURL     string `json:"serverUrl"`
+	DeviceToken   string `json:"deviceToken"`
+	RepositoryID  string `json:"repositoryId,omitempty"`
+	PollSeconds   int    `json:"pollSeconds"`
+	ReportSeconds int    `json:"reportSeconds"`
 }
 
 type localState struct {
@@ -342,23 +336,12 @@ func loadConfig(path string) (config, error) {
 	}
 	cfg.ServerURL = strings.TrimRight(strings.TrimSpace(cfg.ServerURL), "/")
 	cfg.DeviceToken = strings.TrimSpace(cfg.DeviceToken)
-	cfg.ReceiverProtocol = strings.ToLower(strings.TrimSpace(cfg.ReceiverProtocol))
-	cfg.ReceiverHost = strings.TrimSpace(cfg.ReceiverHost)
-	cfg.ReceiverUsername = strings.TrimSpace(cfg.ReceiverUsername)
-	cfg.ReceiverPassword = strings.TrimSpace(cfg.ReceiverPassword)
 	cfg.RepositoryID = strings.TrimSpace(cfg.RepositoryID)
-	cfg.DestinationFolder = strings.Trim(strings.TrimSpace(cfg.DestinationFolder), `/\\`)
 	if cfg.ServerURL == "" || (!strings.HasPrefix(cfg.ServerURL, "http://") && !strings.HasPrefix(cfg.ServerURL, "https://")) {
 		return config{}, errors.New("serverUrl must be http(s)")
 	}
 	if len(cfg.DeviceToken) < 24 {
 		return config{}, errors.New("deviceToken is missing or invalid")
-	}
-	if cfg.ReceiverProtocol == "" {
-		cfg.ReceiverProtocol = "webdav"
-	}
-	if cfg.RepositoryID != "" && (cfg.ReceiverProtocol != "webdav" || cfg.ReceiverHost == "") {
-		return config{}, errors.New("flat-file configuration requires a receiver host and webdav protocol")
 	}
 	if cfg.PollSeconds < 5 {
 		cfg.PollSeconds = 15

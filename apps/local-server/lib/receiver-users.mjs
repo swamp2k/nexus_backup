@@ -38,7 +38,8 @@ export function createReceiverUserService({ db, repositories, now = () => new Da
     const bootstrapExpiresAt = new Date(Date.parse(at) + 15 * 60 * 1000).toISOString();
     const result = await db.prepare("UPDATE receiver_users SET password_hash=?,bootstrap_password=CASE WHEN kind='workstation' THEN ? ELSE bootstrap_password END,bootstrap_expires_at=CASE WHEN kind='workstation' THEN ? ELSE bootstrap_expires_at END,updated_at=? WHERE id=?").bind(await hashPassword(next), next, bootstrapExpiresAt, at, requireId(userId)).run();
     if (Number(result.meta?.changes ?? 0) !== 1) throw statusError(404, "Receiver user not found");
-    return { user: await get(userId), password: next };
+    const user = await get(userId);
+    return user.kind === "workstation" ? { user } : { user, password: next };
   }
   async function consumeBootstrapPassword(workstationId) {
     const at = nowDate(now).toISOString();

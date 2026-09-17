@@ -25,8 +25,8 @@ export function createRemoteConnectionService({ db, now = () => new Date() } = {
   async function allowsHost(hostHeader) {
     const config = await get();
     const host = normalizeHostHeader(hostHeader);
-    if (!config.enabled) return isLocalHost(host);
-    return host === config.allowedHostname || isLocalHost(host);
+    if (!config.enabled) return isLanHost(host);
+    return host === config.allowedHostname || isLanHost(host);
   }
   return { get, update, allowsHost };
 }
@@ -39,5 +39,10 @@ export function normalizeHostname(value) {
   return hostname;
 }
 function normalizeHostHeader(value) { try { return new URL(`http://${String(value || "")}`).hostname.toLowerCase().replace(/\.$/, ""); } catch { return ""; } }
-function isLocalHost(host) { if (host === "localhost" || host === "::1") return true; const version = isIP(host); if (version === 4) { const [a,b] = host.split(".").map(Number); return a === 10 || a === 127 || (a === 192 && b === 168) || (a === 172 && b >= 16 && b <= 31); } return false; }
+function isLanHost(host) {
+  if (host === "localhost" || host === "::1") return true;
+  const version = isIP(host);
+  if (version === 4) { const [a,b] = host.split(".").map(Number); return a === 10 || a === 127 || (a === 192 && b === 168) || (a === 172 && b >= 16 && b <= 31); }
+  return host.length > 0 && (host.endsWith(".local") || !host.includes("."));
+}
 function requireBoolean(value, name) { if (typeof value !== "boolean") throw new RangeError(`${name} must be boolean`); return value; }

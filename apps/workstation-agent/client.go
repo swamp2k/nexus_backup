@@ -150,7 +150,10 @@ func (c *apiClient) uploadFile(ctx context.Context, relativePath string, file *o
 
 func (c *apiClient) uploadFileWithMtime(ctx context.Context, relativePath string, file *os.File, size int64, mtime time.Time) error {
 	requestURL := c.baseURL + "/v1/device/workstation/files?path=" + url.QueryEscape(relativePath)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, requestURL, file)
+	// Keep ownership of the source file with the backup loop. The default
+	// transport closes an *os.File request body, which would make the caller's
+	// post-upload close look like a source failure.
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, requestURL, io.NopCloser(file))
 	if err != nil {
 		return err
 	}

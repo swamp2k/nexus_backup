@@ -11,6 +11,8 @@ import { createRemoteConnectionService } from "../lib/remote-connection.mjs";
 import { openSqliteD1 } from "../lib/sqlite-d1.mjs";
 
 const migrationsDir = fileURLToPath(new URL("../../../migrations/", import.meta.url));
+const repositoriesWebPath = fileURLToPath(new URL("../web/repositories.js", import.meta.url));
+const installerPath = fileURLToPath(new URL("../web/install.ps1", import.meta.url));
 
 async function fixture() {
   const dir = await mkdtemp(join(tmpdir(), "nexus-flat-file-"));
@@ -33,6 +35,19 @@ test("repository creation creates a browsable folder and rejects traversal", asy
   } finally { await f.close(); }
 });
 
+test("repository browser consumes typed directory entries and workstation installer omits receiver transport secrets", async () => {
+  const browser = await readFile(repositoriesWebPath, "utf8");
+  assert.match(browser, /filter\(item=>item\.type==="directory"\)/);
+  assert.doesNotMatch(browser, /filter\(item=>item\.directory\)/);
+  const installer = await readFile(installerPath, "utf8");
+  assert.match(installer, /repositoryId=/);
+  assert.doesNotMatch(installer, /receiverProtocol=/);
+  assert.doesNotMatch(installer, /receiverHost=/);
+  assert.doesNotMatch(installer, /receiverPassword=/);
+  assert.doesNotMatch(installer, /@\('pollSeconds','reportSeconds','receiverPassword'\)/);
+  assert.match(browser, /user\.kind==="manual"/);
+});
+
 test("receiver users get random credentials and a restricted root", async () => {
   const f = await fixture();
   try {
@@ -50,6 +65,9 @@ test("receiver users get random credentials and a restricted root", async () => 
     const workstation = await f.receiverUsers.create({ username: "Balder PC", repositoryId: repository.id, kind: "workstation", workstationId: "ws-1" });
     assert.equal(await f.receiverUsers.consumeBootstrapPassword("ws-1"), workstation.password);
     assert.equal(await f.receiverUsers.consumeBootstrapPassword("ws-1"), null);
+    const reset = await f.receiverUsers.resetPassword(workstation.user.id, "fresh-workstation-bootstrap-password");
+    assert.equal(Object.hasOwn(reset, "password"), false);
+    assert.equal(await f.receiverUsers.authenticate(workstation.user.username, "fresh-workstation-bootstrap-password").then((user) => user.id), workstation.user.id);
   } finally { await f.close(); }
 });
 
@@ -82,6 +100,9 @@ test("remote HTTP access stays LAN-only until an exact hostname is enabled", asy
   try {
     const remote = createRemoteConnectionService({ db: f.db });
     assert.equal(await remote.allowsHost("192.168.1.20:8787"), true);
+    assert.equal(await remote.allowsHost("tower:8787"), true);
+    assert.equal(await remote.allowsHost("nexusbackup"), true);
+    assert.equal(await remote.allowsHost("nexusbackup.local:8787"), true);
     assert.equal(await remote.allowsHost("outside.example:8787"), false);
     await assert.rejects(() => remote.update({ enabled: true, allowedHostname: "*.example.com" }), /hostname/);
     await remote.update({ enabled: true, allowedHostname: "backup.example.com" });

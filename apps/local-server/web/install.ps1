@@ -45,8 +45,11 @@ try {
     if([string]::IsNullOrWhiteSpace($deviceToken)){Fail 'Nexus did not return a workstation device token.'}
   }
   $profile=Invoke-RestMethod -UseBasicParsing -Method Get -Uri "$serverUrl/v1/device/workstation/repository-profile" -Headers @{Authorization="Bearer $deviceToken"}
-  $config=[ordered]@{serverUrl=$serverUrl;deviceToken=$deviceToken;receiverProtocol=([string]$profile.transport);receiverHost=([string]$profile.receiverHost);receiverPort=[int]$profile.receiverPort;receiverUsername=([string]$profile.receiverUsername);receiverPassword=([string](Get-OptionalProperty $profile 'receiverPassword'));repositoryId=([string]$profile.repositoryId);destinationFolder=([string]$profile.destinationFolder);pollSeconds=15;reportSeconds=60}
-  if($old){foreach($name in @('pollSeconds','reportSeconds','receiverPassword')){$value = Get-OptionalProperty $old $name;if($null -ne $value){$config[$name]=$value}}}
+  # Workstation backups use the device-token file endpoint. Receiver accounts
+  # remain available for external/manual clients, but their transport details
+  # are not part of the workstation agent configuration.
+  $config=[ordered]@{serverUrl=$serverUrl;deviceToken=$deviceToken;repositoryId=([string]$profile.repositoryId);pollSeconds=15;reportSeconds=60}
+  if($old){foreach($name in @('pollSeconds','reportSeconds')){$value = Get-OptionalProperty $old $name;if($null -ne $value){$config[$name]=$value}}}
   Write-Config $configPath $config
   try{Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue}catch{}
   Start-Sleep -Milliseconds 300

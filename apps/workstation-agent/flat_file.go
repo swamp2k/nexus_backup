@@ -47,11 +47,6 @@ func executeFlatFileBackup(ctx context.Context, cfg config, run workstationRun, 
 		result.Duration = time.Since(started)
 		return result
 	}
-	if strings.ToLower(strings.TrimSpace(cfg.ReceiverProtocol)) != "webdav" {
-		result.Err = fmt.Errorf("unsupported flat-file receiver protocol %q", cfg.ReceiverProtocol)
-		result.Duration = time.Since(started)
-		return result
-	}
 	client := newAPIClient(cfg.ServerURL, cfg.DeviceToken)
 
 	type sourceFile struct {
@@ -119,11 +114,13 @@ func executeFlatFileBackup(ctx context.Context, cfg config, run workstationRun, 
 	if result.Err == nil {
 		var bytesTotal, bytesDone, filesDone int64
 		for _, item := range files {
+			bytesTotal += item.info.Size()
+		}
+		for _, item := range files {
 			if err := ctx.Err(); err != nil {
 				result.Err = err
 				break
 			}
-			bytesTotal += item.info.Size()
 			metadata, exists, err := client.fileMetadata(ctx, item.uploadPath)
 			if err != nil {
 				result.Err = fmt.Errorf("inspect remote %q: %w", item.uploadPath, err)
@@ -132,6 +129,8 @@ func executeFlatFileBackup(ctx context.Context, cfg config, run workstationRun, 
 			if exists && metadata.Size == item.info.Size() && metadata.Mtime.UnixMilli() == item.info.ModTime().UnixMilli() {
 				result.FilesUnmodified++
 				bytesDone += item.info.Size()
+				filesDone++
+				reportBackupProgress(report, item.uploadPath, bytesDone, bytesTotal, filesDone, int64(len(files)))
 				continue
 			}
 			file, err := os.Open(item.path)
@@ -157,21 +156,26 @@ func executeFlatFileBackup(ctx context.Context, cfg config, run workstationRun, 
 				result.FilesNew++
 			}
 			result.DataAdded += item.info.Size()
-			if report != nil {
-				percent := float64(0)
-				if bytesTotal > 0 {
-					percent = float64(bytesDone) / float64(bytesTotal) * 100
-				}
-				report(backupProgress{Phase: "uploading", Percent: percent, BytesDone: bytesDone, BytesTotal: bytesTotal, FilesDone: filesDone, FilesTotal: int64(len(files)), CurrentPath: item.uploadPath})
-			}
+			reportBackupProgress(report, item.uploadPath, bytesDone, bytesTotal, filesDone, int64(len(files)))
 		}
 	}
 	if result.Err != nil && (errors.Is(result.Err, context.Canceled) || errors.Is(result.Err, context.DeadlineExceeded)) {
 		result.Cancelled = true
 	}
 	result.Duration = time.Since(started)
-	result.Partial = result.Err != nil && result.FilesNew > 0 && !result.Cancelled
+	result.Partial = result.Err != nil && result.FilesNew+result.FilesChanged > 0 && !result.Cancelled
 	return result
+}
+
+func reportBackupProgress(report func(backupProgress), path string, bytesDone, bytesTotal, filesDone, filesTotal int64) {
+	if report == nil {
+		return
+	}
+	percent := float64(0)
+	if bytesTotal > 0 {
+		percent = float64(bytesDone) / float64(bytesTotal) * 100
+	}
+	report(backupProgress{Phase: "uploading", Percent: percent, BytesDone: bytesDone, BytesTotal: bytesTotal, FilesDone: filesDone, FilesTotal: filesTotal, CurrentPath: path})
 }
 
 func excludedFlatFilePath(relative, base string, patterns []string) bool {
