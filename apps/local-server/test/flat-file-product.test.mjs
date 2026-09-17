@@ -14,6 +14,10 @@ const migrationsDir = fileURLToPath(new URL("../../../migrations/", import.meta.
 const repositoriesWebPath = fileURLToPath(new URL("../web/repositories.js", import.meta.url));
 const installerPath = fileURLToPath(new URL("../web/install.ps1", import.meta.url));
 const gatewayPath = fileURLToPath(new URL("../bin/gateway.mjs", import.meta.url));
+const serverPath = fileURLToPath(new URL("../bin/server.mjs", import.meta.url));
+const indexPath = fileURLToPath(new URL("../web/index.html", import.meta.url));
+const appPath = fileURLToPath(new URL("../web/app.js", import.meta.url));
+const sessionPath = fileURLToPath(new URL("../web/session.js", import.meta.url));
 
 async function fixture() {
   const dir = await mkdtemp(join(tmpdir(), "nexus-flat-file-"));
@@ -49,6 +53,20 @@ test("repository browser consumes typed directory entries and workstation instal
   assert.doesNotMatch(installer, /@\('pollSeconds','reportSeconds','receiverPassword'\)/);
   assert.doesNotMatch(gateway, /consumeBootstrapPassword|receiverPassword/);
   assert.match(browser, /user\.kind==="manual"/);
+});
+
+test("retired Plans, generic Agent, and Restic product surfaces stay out of the shipped appliance", async () => {
+  const [server, index, app, session] = await Promise.all([
+    readFile(serverPath, "utf8"),
+    readFile(indexPath, "utf8"),
+    readFile(appPath, "utf8"),
+    readFile(sessionPath, "utf8"),
+  ]);
+  assert.doesNotMatch(server, /\/v1\/local\/(?:plans|maintenance|agents)/);
+  assert.doesNotMatch(server, /startsWith\("\/v1\/agent\//);
+  assert.doesNotMatch(index, /plans-nav|plans\.js|telemetry\.js|restic-backup/);
+  assert.doesNotMatch(app, /restic-backup|rclone-restic-backup|Agent heartbeat|Restic repository/);
+  assert.doesNotMatch(session, /receiver password|Restic|snapshot-specific|Keep daily|Keep weekly|Keep monthly/);
 });
 
 test("receiver users get random credentials and a restricted root", async () => {

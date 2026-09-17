@@ -48,6 +48,55 @@ test("local transfer identity preserves object keys and changes with file genera
   assert.deepEqual(grouped.payload.items.map((item) => item.objectKey), ["object-b", "object-a"]);
 });
 
+test("local discovery applies the configured rTorrent readiness gate", async () => {
+  const root = await mkdtemp(join(tmpdir(), "nexus-local-discovery-"));
+  const db = await openSqliteD1({ filename: join(root, "backup.sqlite"), migrationsDir });
+  try {
+    const repositories = createRepositoryService({ db, backupRoot: join(root, "backup"), id: () => "repo-family" });
+    let sequence = 0;
+    async function enqueueJob(input) {
+      const id = `scan-${++sequence}`;
+      const at = new Date().toISOString();
+      await db.prepare(`INSERT INTO backup_jobs(id,operation_key,type,state,attempt,revision,payload_json,created_at,updated_at,last_mutation_id) VALUES(?,?,?,'queued',0,0,?,?,?,?)`)
+        .bind(id, input.operationKey, input.type, JSON.stringify(input.payload), at, at, `mutation-${id}`).run();
+      await db.prepare("INSERT INTO backup_job_events(id,job_id,type,at,data_json) VALUES(?,?,?,?,?)")
+        .bind(`event-${id}`, id, "job.created", at, JSON.stringify({ state: "queued" })).run();
+      return { id, state: "queued" };
+    }
+    const hash = "a".repeat(40);
+    const xml = `<?xml version="1.0"?><methodResponse><params><param><value><array><data>
+      <value><array><data><value><string>${hash}</string></value><value><string>Show</string></value><value><int>0</int></value><value><string>/complete/Show</string></value></data></array></value>
+      <value><array><data><value><string>${"b".repeat(40)}</string></value><value><string>Done</string></value><value><int>1</int></value><value><string>/complete/Done</string></value></data></array></value>
+    </data></array></value></param></params></methodResponse>`;
+    const executor = createLocalRepositoryTransferExecutor({
+      db,
+      repositories,
+      enqueueJob,
+      loadConfig: async () => ({
+        rcloneEndpoints: [{ id: "seedbox", fs: "sftp://seedbox" }],
+        rtorrentGates: [{ id: "seedbox-gate", url: "http://rtorrent/rpc", sourceBasePath: "/complete", required: true }],
+        tools: {},
+      }),
+      command: async (_executable, args) => args[0] === "lsjson" ? {
+        code: 0,
+        stdout: JSON.stringify([
+          { Path: "Show/episode.mkv", Size: 7, ModTime: "2026-09-17T10:00:00.000Z" },
+          { Path: "Done/episode.mkv", Size: 8, ModTime: "2026-09-17T10:00:00.000Z" },
+          { Path: "Other/readme.txt", Size: 2, ModTime: "2026-09-17T10:00:00.000Z" },
+        ]),
+        stderr: "",
+      } : { code: 0, stdout: "", stderr: "" },
+      fetchImpl: async () => ({ ok: true, status: 200, text: async () => xml }),
+    });
+    const result = await executor.executeDiscovery({ ruleId: "rule-family", sourceEndpointId: "seedbox", sourcePath: "complete", includes: [], excludes: [], rtorrentGateId: "seedbox-gate" });
+    assert.deepEqual(result.event.entries.map((entry) => entry.relPath), ["Done/episode.mkv", "Other/readme.txt"]);
+    assert.deepEqual(result.groups.groups.map((group) => ({ key: group.key, root: group.root })), [{ key: "b".repeat(40), root: "Done" }]);
+  } finally {
+    db.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("repository-targeted legacy rclone transfer executes inside Nexus and resolves below /backup", async () => {
   const root = await mkdtemp(join(tmpdir(), "nexus-local-transfer-"));
   const sourceRoot = join(root, "source");

@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import { nextScheduleAt } from "./backup-plans.mjs";
+import { nextScheduleAt } from "./schedules.mjs";
 import { safeName } from "./backup-paths.mjs";
 
 const ACTIVE_STATES = new Set(["queued", "leased", "running"]);

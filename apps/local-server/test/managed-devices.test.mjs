@@ -80,13 +80,13 @@ test("pcwatch-shaped report updates bounded capability metadata and online state
     f.setNow("2026-09-12T19:01:00Z");
     const result=await f.service.report(created.token,{
       version:"0.2.2",
-      capabilities:["rclone.v1","rclone-mount.v1","gdocs-export.v1","restic-local.v1"],
+      capabilities:["workstation.files.v1","rclone.v1","gdocs-export.v1"],
       remotes:["gdrive:","seedbox:"],
       runtime_settings:{rclone:{tpslimit:8,max_transfer:"850G",password:"ignored-not-persisted"}},
     });
     assert.equal(result.device.online,true);
     assert.equal(result.device.version,"0.2.2");
-    assert.deepEqual(result.device.capabilities,["rclone.v1","rclone-mount.v1","gdocs-export.v1","restic-local.v1"]);
+    assert.deepEqual(result.device.capabilities,["workstation.files.v1","rclone.v1","gdocs-export.v1"]);
     assert.deepEqual(result.device.remotes,["gdrive:","seedbox:"]);
     const raw=JSON.stringify((await f.db.prepare("SELECT * FROM managed_devices WHERE id=?").bind(created.device.id).first()));
     assert.doesNotMatch(raw,/ignored-not-persisted/);

@@ -5,9 +5,7 @@ import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createApi, D1JobRepository } from "../../control-plane/dist/index.js";
-import { createBackupPlanService } from "../lib/backup-plans.mjs";
-import { createPlanMaintenanceService, enrichPlanJob } from "../lib/plan-maintenance.mjs";
-import { listJobs, loadSanitizedAgentConfig } from "../lib/dashboard-data.mjs";
+import { listJobs, loadSanitizedIntegrationConfig } from "../lib/dashboard-data.mjs";
 import { getRuntimeTelemetry } from "../lib/runtime-telemetry.mjs";
 import { openSqliteD1 } from "../lib/sqlite-d1.mjs";
 
@@ -24,10 +22,6 @@ const recoveryIntervalMs = positiveInteger(
   process.env.NEXUS_BACKUP_RECOVERY_INTERVAL_MS ?? "30000",
   "NEXUS_BACKUP_RECOVERY_INTERVAL_MS",
 );
-const schedulerIntervalMs = positiveInteger(
-  process.env.NEXUS_BACKUP_SCHEDULER_INTERVAL_MS ?? "15000",
-  "NEXUS_BACKUP_SCHEDULER_INTERVAL_MS",
-);
 
 await mkdir(configDir, { recursive: true });
 
@@ -42,7 +36,7 @@ const env = {
 };
 
 async function enqueueJob(input) {
-  const { operationKey, type, payload } = enrichPlanJob(input);
+  const { operationKey, type, payload } = input;
   const webResponse = await api.fetch(new Request("http://nexus-backup.local/v1/jobs", {
     method: "POST",
     headers: {
@@ -62,59 +56,21 @@ async function enqueueJob(input) {
   return (await webResponse.json()).job;
 }
 
-const planService = createBackupPlanService({
-  db,
-  enqueueJob,
-  loadAgentConfig: () => loadSanitizedAgentConfig(integrationConfigPath),
-});
-const maintenanceService = createPlanMaintenanceService({ db, enqueueJob });
-
 const recoveryTimer = setInterval(() => {
   api.recover(env).catch((error) => log("error", "lease recovery failed", { error: serializeError(error) }));
 }, recoveryIntervalMs);
 recoveryTimer.unref();
-
-let schedulerRunning = false;
-async function runPlanScheduler() {
-  if (schedulerRunning) return;
-  schedulerRunning = true;
-  try {
-    const result = await planService.runDue();
-    if (result.enqueued > 0) log("info", "scheduled backup plans enqueued", { count: result.enqueued });
-    for (const failure of result.failures) {
-      log("error", "scheduled backup plan enqueue failed", failure);
-    }
-
-    const maintenance = await maintenanceService.runDue();
-    if (maintenance.enqueued > 0) log("info", "retention maintenance jobs enqueued", { count: maintenance.enqueued });
-    for (const failure of maintenance.failures) {
-      log("error", "retention maintenance enqueue failed", failure);
-    }
-  } catch (error) {
-    log("error", "backup plan scheduler failed", { error: serializeError(error) });
-  } finally {
-    schedulerRunning = false;
-  }
-}
-const schedulerTimer = setInterval(() => void runPlanScheduler(), schedulerIntervalMs);
-schedulerTimer.unref();
-void runPlanScheduler();
 
 const STATIC_FILES = new Map([
   ["/", ["index.html", "text/html; charset=utf-8"]],
   ["/index.html", ["index.html", "text/html; charset=utf-8"]],
   ["/session.js", ["session.js", "text/javascript; charset=utf-8"]],
   ["/app.js", ["app.js", "text/javascript; charset=utf-8"]],
-  ["/telemetry.js", ["telemetry.js", "text/javascript; charset=utf-8"]],
-  ["/plans.js", ["plans.js", "text/javascript; charset=utf-8"]],
-  ["/maintenance.js", ["maintenance.js", "text/javascript; charset=utf-8"]],
   ["/remote-connection.js", ["remote-connection.js", "text/javascript; charset=utf-8"]],
   ["/transfers.js", ["transfers.js", "text/javascript; charset=utf-8"]],
   ["/repositories.js", ["repositories.js", "text/javascript; charset=utf-8"]],
+  ["/maintenance.js", ["maintenance.js", "text/javascript; charset=utf-8"]],
   ["/styles.css", ["styles.css", "text/css; charset=utf-8"]],
-  ["/telemetry.css", ["telemetry.css", "text/css; charset=utf-8"]],
-  ["/plans.css", ["plans.css", "text/css; charset=utf-8"]],
-  ["/maintenance.css", ["maintenance.css", "text/css; charset=utf-8"]],
   ["/transfers.css", ["transfers.css", "text/css; charset=utf-8"]],
   ["/favicon.svg", ["favicon.svg", "image/svg+xml"]],
 ]);
@@ -135,9 +91,7 @@ const server = createServer(async (request, response) => {
         selfContained: true,
         remoteControl: "optional",
         pollIntervalMs: 5000,
-        telemetryPollIntervalMs: 1000,
-        schedulerIntervalMs,
-        retentionEnforcement: true,
+        localExecution: true,
         repositories: true,
         receiverUsers: true,
         workstationBackups: true,
@@ -146,62 +100,8 @@ const server = createServer(async (request, response) => {
     }
 
     if (path === "/v1/local/config" && request.method === "GET") {
-      sendJson(response, 200, await loadSanitizedAgentConfig(integrationConfigPath));
+      sendJson(response, 200, await loadSanitizedIntegrationConfig(integrationConfigPath));
       return;
-    }
-
-    if (path === "/v1/local/agents" && request.method === "GET") {
-      sendJson(response, 200, { agents: [] });
-      return;
-    }
-
-    if (path === "/v1/local/plans" && request.method === "GET") {
-      sendJson(response, 200, { plans: await planService.list() });
-      return;
-    }
-
-    if (path === "/v1/local/plans" && request.method === "POST") {
-      sendJson(response, 201, { plan: await planService.create(await readJsonBody(request)) });
-      return;
-    }
-
-    if (path === "/v1/local/maintenance" && request.method === "GET") {
-      sendJson(response, 200, { maintenance: await maintenanceService.list() });
-      return;
-    }
-
-    const planMaintenanceMatch = path.match(/^\/v1\/local\/plans\/([^/]+)\/maintenance$/);
-    if (request.method === "POST" && planMaintenanceMatch) {
-      const planId = decodePathPart(planMaintenanceMatch[1]);
-      sendJson(response, 202, await maintenanceService.runNow(planId));
-      return;
-    }
-
-    const planRunMatch = path.match(/^\/v1\/local\/plans\/([^/]+)\/run$/);
-    if (request.method === "POST" && planRunMatch) {
-      const planId = decodePathPart(planRunMatch[1]);
-      sendJson(response, 202, await planService.runNow(planId));
-      return;
-    }
-
-    const planMatch = path.match(/^\/v1\/local\/plans\/([^/]+)$/);
-    if (planMatch) {
-      const planId = decodePathPart(planMatch[1]);
-      if (request.method === "GET") {
-        const plan = await planService.get(planId);
-        if (!plan) throw statusError(404, `Backup plan not found: ${planId}`);
-        sendJson(response, 200, { plan });
-        return;
-      }
-      if (request.method === "PUT") {
-        sendJson(response, 200, { plan: await planService.update(planId, await readJsonBody(request)) });
-        return;
-      }
-      if (request.method === "PATCH") {
-        const body = await readJsonBody(request);
-        sendJson(response, 200, { plan: await planService.setEnabled(planId, body.enabled) });
-        return;
-      }
     }
 
     if (path === "/v1/local/jobs" && request.method === "GET") {
@@ -283,7 +183,7 @@ await new Promise((resolve, reject) => {
   server.once("error", reject);
   server.listen(port, host, resolve);
 });
-log("info", "local control plane online", { host, port, databasePath, schedulerIntervalMs });
+log("info", "local control plane online", { host, port, databasePath, localExecution: true });
 
 let stopping = false;
 async function shutdown(signal) {
@@ -291,7 +191,6 @@ async function shutdown(signal) {
   stopping = true;
   log("info", "shutdown requested", { signal });
   clearInterval(recoveryTimer);
-  clearInterval(schedulerTimer);
   await new Promise((resolve) => server.close(resolve));
   db.close();
   log("info", "local control plane stopped");

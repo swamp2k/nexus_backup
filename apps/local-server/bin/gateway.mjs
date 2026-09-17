@@ -5,7 +5,7 @@ import { mkdir, open, readFile, rename, rm, stat, utimes } from "node:fs/promise
 import { pipeline } from "node:stream/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadSanitizedAgentConfig } from "../lib/dashboard-data.mjs";
+import { loadSanitizedIntegrationConfig } from "../lib/dashboard-data.mjs";
 import { createLocalAuth } from "../lib/local-auth.mjs";
 import { createManagedDeviceService } from "../lib/managed-devices.mjs";
 import { createRepositoryService } from "../lib/repositories.mjs";
@@ -14,7 +14,7 @@ import { createRemoteConnectionService } from "../lib/remote-connection.mjs";
 import { resolvePublicOrigin } from "../lib/public-origin.mjs";
 import { openSqliteD1 } from "../lib/sqlite-d1.mjs";
 import { createTransferCleanupService } from "../lib/transfer-cleanup.mjs";
-import { createTransferGroupService } from "../lib/transfer-groups.mjs";
+import { createTransferGroupService, persistTransferGroups } from "../lib/transfer-groups.mjs";
 import { createTransferRuleService } from "../lib/transfer-rules.mjs";
 import { persistTransferDiscovery } from "../lib/transfer-rules.mjs";
 import { createLocalRepositoryTransferExecutor, loadLocalRcloneConfig } from "../lib/local-repository-transfer.mjs";
@@ -56,12 +56,13 @@ const localRepositoryTransferExecutor = createLocalRepositoryTransferExecutor({
 const transferService = createTransferRuleService({
   db,
   enqueueJob,
-  loadAgentConfig: () => loadSanitizedAgentConfig(integrationConfigPath),
+  loadAgentConfig: () => loadSanitizedIntegrationConfig(integrationConfigPath),
   repositories: repositoryService,
   executeRepositoryTransfer: localRepositoryTransferExecutor.execute,
   executeRepositoryDiscovery: async (payload) => {
     const result = await localRepositoryTransferExecutor.executeDiscovery(payload);
     await persistTransferDiscovery(db, { jobId: result.job.id, expectedRuleId: payload.ruleId, event: result.event });
+    if (result.groups) await persistTransferGroups(db, { jobId: result.job.id, expectedRuleId: payload.ruleId, event: result.groups });
     return result;
   },
 });
@@ -249,7 +250,7 @@ const gateway = createServer(async (request, response) => {
       return;
     }
 
-    if (path === "/healthz" || path.startsWith("/v1/agent/")) {
+    if (path === "/healthz") {
       await proxy(request, response, url);
       return;
     }
@@ -378,7 +379,7 @@ const gateway = createServer(async (request, response) => {
       return;
     }
     if (path === "/v1/local/transfers" && request.method === "GET") {
-      const config = await loadSanitizedAgentConfig(integrationConfigPath);
+      const config = await loadSanitizedIntegrationConfig(integrationConfigPath);
       sendJson(response, 200, { rules: await transferService.list(), endpoints: config.endpoints ?? [], available: config.available });
       return;
     }

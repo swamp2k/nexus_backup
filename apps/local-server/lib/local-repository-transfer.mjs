@@ -10,7 +10,7 @@ const RESERVED_RCLONE_FLAGS = new Set(["-n", "--config", "--dry-run", "--use-jso
 // Repository destinations are executed by the gateway process. The job record is
 // retained for UI/history and its lease is renewed for the duration of work so a
 // long rclone process cannot be recovered and re-run concurrently.
-export function createLocalRepositoryTransferExecutor({ db, repositories, enqueueJob, loadConfig, command = runCommand, now = () => new Date(), id = () => randomUUID(), leaseTtlMs = 600_000, leaseHeartbeatMs } = {}) {
+export function createLocalRepositoryTransferExecutor({ db, repositories, enqueueJob, loadConfig, command = runCommand, fetchImpl = fetch, now = () => new Date(), id = () => randomUUID(), leaseTtlMs = 600_000, leaseHeartbeatMs } = {}) {
   if (!db || !repositories || typeof enqueueJob !== "function" || typeof loadConfig !== "function") throw new TypeError("local repository transfer dependencies are required");
   if (!Number.isSafeInteger(leaseTtlMs) || leaseTtlMs < 1) throw new RangeError("leaseTtlMs must be a positive integer");
   const heartbeatMs = leaseHeartbeatMs ?? Math.max(1000, Math.floor(leaseTtlMs / 3));
@@ -42,7 +42,6 @@ export function createLocalRepositoryTransferExecutor({ db, repositories, enqueu
   }
 
   async function executeDiscovery(payload) {
-    if (payload.rtorrentGateId) throw new Error("rTorrent readiness gates are not available in the self-contained executor");
     const job = await enqueueJob({
       operationKey: `transfer-scan:${payload.ruleId}:${Date.now()}:${id()}`,
       type: "rclone-discovery",
@@ -54,10 +53,10 @@ export function createLocalRepositoryTransferExecutor({ db, repositories, enqueu
     let current = await jobs.transition(acquired.id, LOCAL_AGENT_ID, token, "preparing", date(now));
     try {
       current = await jobs.transition(current.id, LOCAL_AGENT_ID, token, "running", date(now));
-      const event = await withLeaseHeartbeat(current.id, token, (signal) => discover(payload, signal));
+      const discovered = await withLeaseHeartbeat(current.id, token, (signal) => discover(payload, signal));
       current = await jobs.transition(current.id, LOCAL_AGENT_ID, token, "finalizing", date(now));
       current = await jobs.transition(current.id, LOCAL_AGENT_ID, token, "completed", date(now));
-      return { job: current, event };
+      return { job: current, ...discovered };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       current = await jobs.transition(current.id, LOCAL_AGENT_ID, token, "failed", date(now), message);
@@ -74,7 +73,7 @@ export function createLocalRepositoryTransferExecutor({ db, repositories, enqueu
     const result = await invoke(tool, ["lsjson", source, "--recursive", "--files-only", "--no-mimetype", ...(tool.rcloneArgs ?? [])], command, signal);
     let raw; try { raw = JSON.parse(result.stdout); } catch { throw new Error("rclone discovery returned invalid JSON"); }
     if (!Array.isArray(raw)) throw new Error("rclone discovery did not return a JSON file list");
-    const entries = [];
+    let entries = [];
     for (const item of raw) {
       if (!isRecord(item) || item.IsDir === true) continue;
       const relPath = safePath(item.Path);
@@ -85,7 +84,31 @@ export function createLocalRepositoryTransferExecutor({ db, repositories, enqueu
       if (entries.length >= 5000) throw new Error("transfer discovery exceeds 5000 files; narrow the rule with include/exclude filters");
       entries.push({ relPath, size, modTime: modTime.toISOString() });
     }
-    return { type: "transfer-discovery", tool: "rclone", ruleId: payload.ruleId, at: new Date().toISOString(), entries };
+    let groups = null;
+    if (payload.rtorrentGateId) {
+      const gate = (config.rtorrentGates ?? []).find((item) => String(item.id) === String(payload.rtorrentGateId));
+      if (!gate) throw new Error(`unknown rtorrentGateId: ${payload.rtorrentGateId}`);
+      try {
+        const torrents = await fetchRtorrentTorrents(gate, signal, fetchImpl);
+        const groupMap = new Map();
+        entries = entries.flatMap((entry) => {
+          const match = torrentForPath(entry.relPath, torrents, gate.sourceBasePath);
+          if (!match) return [entry];
+          if (!match.torrent.complete) return [];
+          const key = requireTorrentKey(match.torrent.hash);
+          const name = compactGroupName(match.torrent.name, match.root);
+          const existing = groupMap.get(key);
+          if (existing && existing.root !== match.root) throw new Error(`rtorrent group ${key} resolved to multiple roots`);
+          if (!existing) groupMap.set(key, { kind: "torrent", key, name, root: match.root });
+          return [entry];
+        });
+        groups = { type: "transfer-groups", tool: "rclone", ruleId: payload.ruleId, at: new Date().toISOString(), groups: [...groupMap.values()].sort((left, right) => left.root.localeCompare(right.root)) };
+      } catch (error) {
+        if (gate.required === true) throw new Error(`rtorrent required: ${error instanceof Error ? error.message : String(error)}`);
+        groups = { type: "transfer-groups", tool: "rclone", ruleId: payload.ruleId, at: new Date().toISOString(), groups: [] };
+      }
+    }
+    return { event: { type: "transfer-discovery", tool: "rclone", ruleId: payload.ruleId, at: new Date().toISOString(), entries }, groups };
   }
 
   async function transfer(payload, { signal }) {
@@ -186,7 +209,7 @@ export function createLocalRepositoryTransferExecutor({ db, repositories, enqueu
 
 export async function loadLocalRcloneConfig(path) {
   const value = JSON.parse(await readFile(path, "utf8"));
-  return { rcloneEndpoints: Array.isArray(value?.rcloneEndpoints) ? value.rcloneEndpoints : [], tools: isRecord(value?.tools) ? value.tools : {} };
+  return { rcloneEndpoints: Array.isArray(value?.rcloneEndpoints) ? value.rcloneEndpoints : [], rtorrentGates: Array.isArray(value?.rtorrentGates) ? value.rtorrentGates : [], tools: isRecord(value?.tools) ? value.tools : {} };
 }
 
 export function normalizeTransferPayload(value) {
@@ -273,3 +296,61 @@ function date(now) { const result = new Date(now()); if (!Number.isFinite(result
 function isRecord(value) { return typeof value === "object" && value !== null && !Array.isArray(value); }
 function pathAllowed(rel, includes, excludes) { if (includes.length && !includes.some((pattern) => filterMatch(pattern, rel))) return false; return !excludes.some((pattern) => filterMatch(pattern, rel)); }
 function filterMatch(pattern, rel) { const value = String(pattern).trim().replace(/^\/+/, ""); if (!value) return false; const regex = new RegExp(`^${value.replace(/[.+()|[\]{}^$\\]/g, "\\$&").replace(/\*\*/g, ".*").replace(/\*/g, "[^/]*").replace(/\?/g, "[^/]")}$`); return regex.test(rel) || (!value.includes("/") && regex.test(rel.split("/").at(-1) ?? rel)); }
+
+async function fetchRtorrentTorrents(gate, signal, fetchImpl) {
+  if (!gate || typeof gate.url !== "string" || !gate.url.trim()) throw new Error("rTorrent gate has no URL");
+  const view = typeof gate.view === "string" && gate.view.trim() ? gate.view.trim() : "main";
+  const body = `<?xml version="1.0"?><methodCall><methodName>d.multicall2</methodName><params><param><value><string></string></value></param><param><value><string>${escapeXml(view)}</string></value></param><param><value><string>d.hash=</string></value></param><param><value><string>d.name=</string></value></param><param><value><string>d.complete=</string></value></param><param><value><string>d.base_path=</string></value></param></params></methodCall>`;
+  const headers = { "content-type": "text/xml" };
+  if (gate.username) headers.authorization = `Basic ${Buffer.from(`${gate.username}:${gate.password ?? ""}`, "utf8").toString("base64")}`;
+  const timeout = AbortSignal.timeout(15_000);
+  const response = await fetchImpl(gate.url, { method: "POST", headers, body, signal: AbortSignal.any([signal, timeout]) });
+  if (!response.ok) {
+    const text = (await response.text()).slice(0, 4096).trim();
+    throw new Error(`rtorrent HTTP ${response.status}${text ? `: ${text}` : ""}`);
+  }
+  return parseRtorrentResponse(await response.text());
+}
+
+function parseRtorrentResponse(xml) {
+  if (typeof xml !== "string" || !xml.trim()) throw new Error("empty rtorrent XML-RPC response");
+  if (/<fault\b/i.test(xml)) throw new Error(`rtorrent XML-RPC fault: ${compactXmlText(xml)}`);
+  const marker = /<params>\s*<param>\s*<value>\s*<array>\s*<data>/i.exec(xml);
+  const bodyStart = marker ? marker.index + marker[0].length : -1;
+  const bodyEnd = xml.lastIndexOf("</data>");
+  if (bodyStart < 0 || bodyEnd < bodyStart) throw new Error("unexpected rtorrent XML-RPC response");
+  const rows = [];
+  const rowRe = /<value>\s*<array>\s*<data>([\s\S]*?)<\/data>\s*<\/array>\s*<\/value>/gi;
+  for (const match of xml.slice(bodyStart, bodyEnd).matchAll(rowRe)) {
+    const values = [...(match[1] ?? "").matchAll(/<value>\s*(?:<(string|int|i4|i8)>([\s\S]*?)<\/\1>|([^<]*))\s*<\/value>/gi)].map((item) => {
+      const raw = decodeXml((item[2] ?? item[3] ?? "").trim());
+      return item[1] && /^(?:int|i4|i8)$/i.test(item[1]) ? Number(raw) || 0 : raw;
+    });
+    if (values.length >= 4) rows.push({ hash: String(values[0]), name: String(values[1]), complete: Number(values[2]) !== 0, basePath: String(values[3]) });
+  }
+  return rows;
+}
+
+function torrentForPath(relPath, torrents, sourceBasePath) {
+  let best = null;
+  for (const torrent of torrents) {
+    const root = torrentRelativeRoot(torrent.basePath, sourceBasePath);
+    if (!root || !pathWithinRoot(relPath, root)) continue;
+    if (!best || root.length > best.root.length) best = { torrent, root };
+  }
+  return best;
+}
+function torrentRelativeRoot(basePath, sourceBasePath) {
+  let value = String(basePath ?? "").trim().replaceAll("\\", "/").replace(/\/+$/g, "");
+  const base = String(sourceBasePath ?? "").trim().replaceAll("\\", "/").replace(/\/+$/g, "");
+  if (!value || !base) return "";
+  if (value === base) return value.split("/").filter(Boolean).at(-1) ?? "";
+  const prefix = `${base}/`;
+  return value.startsWith(prefix) ? value.slice(prefix.length).replace(/^\/+|\/+$/g, "") : "";
+}
+function pathWithinRoot(relPath, root) { const rel = relPath.replace(/^\/+|\/+$/g, ""), normalized = root.replace(/^\/+|\/+$/g, ""); return rel === normalized || rel.startsWith(`${normalized}/`); }
+function compactGroupName(name, root) { return (String(name ?? "").trim() || root.split("/").filter(Boolean).at(-1) || "torrent").slice(0, 240); }
+function requireTorrentKey(value) { const key = String(value ?? "").trim(); if (!/^(?:[A-Fa-f0-9]{40}|[A-Fa-f0-9]{64})$/.test(key)) throw new Error("rtorrent returned an invalid torrent info hash"); return key.toLowerCase(); }
+function escapeXml(value) { return String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&apos;"); }
+function decodeXml(value) { return String(value).replace(/&(amp|lt|gt|quot|apos|#\d+|#x[0-9a-f]+);/gi, (entity, code) => { const lower = code.toLowerCase(); if (lower === "amp") return "&"; if (lower === "lt") return "<"; if (lower === "gt") return ">"; if (lower === "quot") return '"'; if (lower === "apos") return "'"; const number = lower.startsWith("#x") ? Number.parseInt(lower.slice(2), 16) : Number.parseInt(lower.slice(1), 10); return Number.isFinite(number) ? String.fromCodePoint(number) : entity; }); }
+function compactXmlText(xml) { return decodeXml(String(xml).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim()).slice(0, 400) || "fault response"; }

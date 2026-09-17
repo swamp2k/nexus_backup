@@ -40,7 +40,6 @@ function activate(){
     return;
   }
   document.querySelectorAll("[data-view]").forEach(item=>item.classList.remove("active"));
-  document.querySelector("#plans-nav")?.classList.remove("active");
   nav?.classList.add("active");
   if(title)title.textContent="Transfers";
   if(eyebrow)eyebrow.textContent="Copyarr engine";
@@ -64,7 +63,6 @@ async function refresh(quiet=false){
 function render(){
   if(!isActive())return;
   document.querySelectorAll("[data-view]").forEach(item=>item.classList.remove("active"));
-  document.querySelector("#plans-nav")?.classList.remove("active");
   nav?.classList.add("active");
   if(title)title.textContent="Transfers";
   if(eyebrow)eyebrow.textContent="Copyarr engine";
@@ -77,7 +75,7 @@ function render(){
     <div class="transfer-hero"><div><p class="eyebrow">Persistent transfer automation</p><h2>Transfer rules</h2><p>Discover new objects, wait until they are stable, stage and verify them, then commit to the destination. State survives restarts.</p></div><span class="badge success">Copyarr recipe</span></div>
     <div class="grid metrics">${metric("Enabled",enabled,`${rules.length} rules`)}${metric("Waiting",waiting,"Stable/discovery queue",waiting?"warn":"")}${metric("Active",active,"Queued or transferring",active?"blue":"")}${metric("Failed",failed,failed?"Needs attention":"No failed objects",failed?"danger":"")}</div>
     <div class="transfer-stack section-gap">${rules.map(ruleCard).join("")||empty()}</div>
-    <div class="transfer-note"><strong>Current M5 safety boundary:</strong> staging + exact-size verification + commit is active. Move deletes only the exact source files after final verification. Cleanup-days are stored as policy but destination cleanup is not executed yet; rTorrent-complete gating is the next slice.</div>
+    <div class="transfer-note"><strong>Transfer safety boundary:</strong> staging + exact-size verification + commit is active. Move deletes only the exact source files after final verification. Cleanup-days are stored as policy; optional rTorrent readiness gates can hold incomplete torrent files until completion.</div>
   </div>`;
   bindActions();
 }
@@ -146,7 +144,7 @@ async function loadObjects(ruleId,quiet=true){
 }
 
 function openEditor(rule=null){
-  if(!available){toast("Agent config unavailable","Wait for the local agent configuration before creating a transfer rule.",true);return;}
+  if(!available){toast("Local configuration unavailable","Wait for the local configuration before creating a transfer rule.",true);return;}
   ensureModal();ensureDestinationRepositoryField();editing=rule;modal.classList.remove("hidden");
   modal.querySelector("#transfer-modal-title").textContent=rule?"Edit transfer rule":"New transfer rule";
   field("name").value=rule?.name||"";
