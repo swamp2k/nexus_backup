@@ -39,7 +39,7 @@ RUN apt-get update \
       rclone \
       tini \
     && rm -rf /var/lib/apt/lists/* \
-    && mkdir -p /usr/local/lib/nexus-receivers /etc/sftpgo /var/lib/sftpgo /srv/sftpgo/data /srv/sftpgo/backups
+    && mkdir -p /usr/local/lib/nexus-receivers /etc/sftpgo /var/lib/sftpgo /usr/share/sftpgo /srv/sftpgo/data /srv/sftpgo/backups
 
 WORKDIR /app
 
@@ -53,8 +53,13 @@ COPY migrations ./migrations
 COPY appliance/docker-entrypoint.sh /usr/local/bin/nexus-backup-entrypoint
 COPY --from=receiver /usr/local/bin/sftpgo /usr/local/bin/sftpgo
 COPY --from=receiver /etc/sftpgo/sftpgo.json /etc/sftpgo/sftpgo.json
+COPY --from=receiver /usr/share/sftpgo/templates /usr/share/sftpgo/templates
+COPY --from=receiver /usr/share/sftpgo/static /usr/share/sftpgo/static
+COPY --from=receiver /usr/share/sftpgo/openapi /usr/share/sftpgo/openapi
 COPY --from=workstation /out/nexus-backup-workstation-windows-amd64.exe ./apps/local-server/web/workstation/nexus-backup-workstation-windows-amd64.exe
 COPY --from=workstation /out/nexus-backup-workstation-windows-amd64.exe.sha256 ./apps/local-server/web/workstation/nexus-backup-workstation-windows-amd64.exe.sha256
+
+RUN sed -i 's|"templates_path": "templates"|"templates_path": "/usr/share/sftpgo/templates"|g; s|"static_files_path": "static"|"static_files_path": "/usr/share/sftpgo/static"|g; s|"openapi_path": "openapi"|"openapi_path": "/usr/share/sftpgo/openapi"|g' /etc/sftpgo/sftpgo.json
 
 RUN build_revision="$(printf '%s' "$NEXUS_BACKUP_REVISION" | cut -c1-8)" \
     && build_identity="${NEXUS_BACKUP_VERSION} · ${build_revision}" \
