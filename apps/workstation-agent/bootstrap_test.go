@@ -42,10 +42,8 @@ func TestAgentPersistsRotatedDeviceTokenAndUsesItImmediately(t *testing.T) {
 	cfg := config{
 		ServerURL:     server.URL,
 		DeviceToken:   bootstrapToken,
-		ResticPath:    "restic.exe",
 		PollSeconds:   15,
 		ReportSeconds: 60,
-		AutoInit:      true,
 	}
 	if err := saveConfig(configPath, cfg); err != nil {
 		t.Fatal(err)

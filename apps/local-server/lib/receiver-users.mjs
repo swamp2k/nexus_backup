@@ -59,6 +59,16 @@ export function createReceiverUserService({ db, repositories, now = () => new Da
     if (Number(result.meta?.changes ?? 0) !== 1) throw statusError(404, "Receiver user not found");
     return { deleted: true, id: userId };
   }
+  async function updateWorkstationRoot(workstationId, repositoryId, relativeSubpath) {
+    const repository = await repositories.get(repositoryId);
+    if (!repository) throw statusError(404, "Repository not found");
+    const normalized = normalizeRelativePath(relativeSubpath ?? "");
+    await repositories.resolve(repository.id, normalized);
+    const result = await db.prepare("UPDATE receiver_users SET repository_id=?,relative_subpath=?,updated_at=? WHERE workstation_id=? AND kind='workstation'")
+      .bind(repository.id, normalized, nowDate(now).toISOString(), requireId(workstationId)).run();
+    if (Number(result.meta?.changes ?? 0) !== 1) throw statusError(404, "Workstation receiver user not found");
+    return get((await db.prepare("SELECT id FROM receiver_users WHERE workstation_id=? AND kind='workstation'").bind(requireId(workstationId)).first()).id);
+  }
   async function authenticate(username, password) {
     const row = await db.prepare("SELECT * FROM receiver_users WHERE username=? AND enabled=1").bind(normalizeUsername(username)).first();
     if (!row || !(await verifyPassword(password, String(row.password_hash)))) throw statusError(401, "Invalid receiver credentials");
@@ -78,7 +88,7 @@ export function createReceiverUserService({ db, repositories, now = () => new Da
     const resolved = await repositories.paths.resolveRelative(relativePath);
     return { ...root, ...resolved, relativePath: resolved.relative };
   }
-  return { list, get, create, resetPassword, consumeBootstrapPassword, setEnabled, remove, authenticate, rootFor, resolvePath };
+  return { list, get, create, resetPassword, consumeBootstrapPassword, setEnabled, remove, updateWorkstationRoot, authenticate, rootFor, resolvePath };
 }
 
 export function normalizeUsername(value) {

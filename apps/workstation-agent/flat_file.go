@@ -11,6 +11,25 @@ import (
 	"time"
 )
 
+type backupResult struct {
+	SnapshotID                              string
+	FilesNew, FilesChanged, FilesUnmodified int64
+	DataAdded                               int64
+	Duration                                time.Duration
+	Partial, Cancelled                      bool
+	Err                                     error
+}
+
+func validateRun(run workstationRun) error {
+	if strings.TrimSpace(run.ID) == "" || strings.TrimSpace(run.LeaseToken) == "" {
+		return errors.New("backup run lease is incomplete")
+	}
+	if len(run.SourcePaths) == 0 {
+		return errors.New("backup run has no source paths")
+	}
+	return nil
+}
+
 // executeFlatFileBackup copies source files into the workstation's restricted
 // repository folder through the device-token upload endpoint. The server uses
 // an atomic temporary-file rename, so an interrupted upload cannot replace a
@@ -35,7 +54,12 @@ func executeFlatFileBackup(ctx context.Context, cfg config, run workstationRun, 
 	}
 	client := newAPIClient(cfg.ServerURL, cfg.DeviceToken)
 
-	var bytesTotal, bytesDone, filesDone int64
+	type sourceFile struct {
+		path, uploadPath string
+		info             fs.FileInfo
+	}
+	var files []sourceFile
+	seenRoots := make(map[string]string)
 	for _, source := range run.SourcePaths {
 		rootInfo, err := os.Lstat(source)
 		if err != nil {
@@ -47,6 +71,12 @@ func executeFlatFileBackup(ctx context.Context, cfg config, run workstationRun, 
 			break
 		}
 		rootName := filepath.Base(filepath.Clean(source))
+		rootKey := strings.ToLower(rootName)
+		if previous, exists := seenRoots[rootKey]; exists {
+			result.Err = fmt.Errorf("source roots %q and %q have the same destination name %q; select distinct roots or rename them", previous, source, rootName)
+			break
+		}
+		seenRoots[rootKey] = source
 		err = filepath.WalkDir(source, func(path string, entry fs.DirEntry, walkErr error) error {
 			if walkErr != nil {
 				return walkErr
@@ -77,42 +107,67 @@ func executeFlatFileBackup(ctx context.Context, cfg config, run workstationRun, 
 			if err != nil {
 				return err
 			}
-			if info.Size() > 0 {
-				bytesTotal += info.Size()
-			}
 			uploadPath := filepath.ToSlash(filepath.Join(rootName, rel))
-			file, err := os.Open(path)
-			if err != nil {
-				return err
+			files = append(files, sourceFile{path: path, uploadPath: uploadPath, info: info})
+			return nil
+		})
+		if err != nil {
+			result.Err = err
+			break
+		}
+	}
+	if result.Err == nil {
+		var bytesTotal, bytesDone, filesDone int64
+		for _, item := range files {
+			if err := ctx.Err(); err != nil {
+				result.Err = err
+				break
 			}
-			err = client.uploadFile(ctx, uploadPath, file, info.Size())
+			bytesTotal += item.info.Size()
+			metadata, exists, err := client.fileMetadata(ctx, item.uploadPath)
+			if err != nil {
+				result.Err = fmt.Errorf("inspect remote %q: %w", item.uploadPath, err)
+				break
+			}
+			if exists && metadata.Size == item.info.Size() && metadata.Mtime.UnixMilli() == item.info.ModTime().UnixMilli() {
+				result.FilesUnmodified++
+				bytesDone += item.info.Size()
+				continue
+			}
+			file, err := os.Open(item.path)
+			if err != nil {
+				result.Err = err
+				break
+			}
+			err = client.uploadFileWithMtime(ctx, item.uploadPath, file, item.info.Size(), item.info.ModTime())
 			closeErr := file.Close()
 			if err != nil {
-				return fmt.Errorf("upload %q: %w", uploadPath, err)
+				result.Err = fmt.Errorf("upload %q: %w", item.uploadPath, err)
+				break
 			}
 			if closeErr != nil {
-				return fmt.Errorf("close source %q: %w", path, closeErr)
+				result.Err = fmt.Errorf("close source %q: %w", item.path, closeErr)
+				break
 			}
 			filesDone++
-			bytesDone += info.Size()
-			result.FilesNew++
-			result.DataAdded += info.Size()
+			bytesDone += item.info.Size()
+			if exists {
+				result.FilesChanged++
+			} else {
+				result.FilesNew++
+			}
+			result.DataAdded += item.info.Size()
 			if report != nil {
 				percent := float64(0)
 				if bytesTotal > 0 {
 					percent = float64(bytesDone) / float64(bytesTotal) * 100
 				}
-				report(backupProgress{Phase: "uploading", Percent: percent, BytesDone: bytesDone, BytesTotal: bytesTotal, FilesDone: filesDone, CurrentPath: uploadPath})
+				report(backupProgress{Phase: "uploading", Percent: percent, BytesDone: bytesDone, BytesTotal: bytesTotal, FilesDone: filesDone, FilesTotal: int64(len(files)), CurrentPath: item.uploadPath})
 			}
-			return nil
-		})
-		if err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				result.Cancelled = true
-			}
-			result.Err = err
-			break
 		}
+	}
+	if result.Err != nil && (errors.Is(result.Err, context.Canceled) || errors.Is(result.Err, context.DeadlineExceeded)) {
+		result.Cancelled = true
 	}
 	result.Duration = time.Since(started)
 	result.Partial = result.Err != nil && result.FilesNew > 0 && !result.Cancelled

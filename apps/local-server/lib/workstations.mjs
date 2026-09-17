@@ -102,6 +102,9 @@ export function createWorkstationService({
         at.toISOString(),
       ).run();
     }
+    if (receiverUsers && policy.repositoryId) {
+      await receiverUsers.updateWorkstationRoot(device.id, policy.repositoryId, policy.destinationFolder || device.name);
+    }
     return await getPolicy(device.id);
   }
 

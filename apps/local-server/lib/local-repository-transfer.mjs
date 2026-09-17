@@ -38,6 +38,53 @@ export function createLocalRepositoryTransferExecutor({ db, repositories, enqueu
     }
   }
 
+  async function executeDiscovery(payload) {
+    if (payload.rtorrentGateId) throw new Error("rTorrent readiness gates are not available in the self-contained executor");
+    const job = await enqueueJob({
+      operationKey: `transfer-scan:${payload.ruleId}:${Date.now()}:${id()}`,
+      type: "rclone-discovery",
+      payload,
+    });
+    const acquired = await jobs.acquire({ jobId: String(job.id), agentId: LOCAL_AGENT_ID, token: id(), now: date(now), ttlMs: 600_000 });
+    const token = acquired.lease?.token;
+    if (!token) throw new Error("local discovery job did not acquire a lease");
+    let current = await jobs.transition(acquired.id, LOCAL_AGENT_ID, token, "preparing", date(now));
+    try {
+      current = await jobs.transition(current.id, LOCAL_AGENT_ID, token, "running", date(now));
+      const event = await discover(payload);
+      current = await jobs.transition(current.id, LOCAL_AGENT_ID, token, "finalizing", date(now));
+      current = await jobs.transition(current.id, LOCAL_AGENT_ID, token, "completed", date(now));
+      return { job: current, event };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      current = await jobs.transition(current.id, LOCAL_AGENT_ID, token, "failed", date(now), message);
+      throw error;
+    }
+  }
+
+  async function discover(payload) {
+    const config = await loadConfig();
+    const endpoint = (config.rcloneEndpoints ?? []).find((item) => String(item.id) === payload.sourceEndpointId);
+    if (!endpoint?.fs) throw new Error(`unknown sourceEndpointId: ${payload.sourceEndpointId}`);
+    const source = joinTarget(String(endpoint.fs), safeBase(payload.sourcePath));
+    const tool = config.tools ?? {};
+    const result = await invoke(tool, ["lsjson", source, "--recursive", "--files-only", "--no-mimetype", ...(tool.rcloneArgs ?? [])], command, new AbortController().signal);
+    let raw; try { raw = JSON.parse(result.stdout); } catch { throw new Error("rclone discovery returned invalid JSON"); }
+    if (!Array.isArray(raw)) throw new Error("rclone discovery did not return a JSON file list");
+    const entries = [];
+    for (const item of raw) {
+      if (!isRecord(item) || item.IsDir === true) continue;
+      const relPath = safePath(item.Path);
+      const size = nonNegative(item.Size, "entry.size");
+      const modTime = new Date(item.ModTime);
+      if (!Number.isFinite(modTime.getTime())) throw new Error(`invalid rclone modification time for ${relPath}`);
+      if (!pathAllowed(relPath, payload.includes ?? [], payload.excludes ?? [])) continue;
+      if (entries.length >= 5000) throw new Error("transfer discovery exceeds 5000 files; narrow the rule with include/exclude filters");
+      entries.push({ relPath, size, modTime: modTime.toISOString() });
+    }
+    return { type: "transfer-discovery", tool: "rclone", ruleId: payload.ruleId, at: new Date().toISOString(), entries };
+  }
+
   async function transfer(payload, { signal }) {
     const config = await loadConfig();
     const endpoint = (config.rcloneEndpoints ?? []).find((item) => String(item.id) === payload.sourceEndpointId);
@@ -101,7 +148,7 @@ export function createLocalRepositoryTransferExecutor({ db, repositories, enqueu
     }
   }
 
-  return { execute, executeCleanup };
+  return { execute, executeDiscovery, executeCleanup };
 }
 
 export async function loadLocalRcloneConfig(path) {
@@ -187,3 +234,5 @@ function positive(value, name) { const result = Number(value); if (!Number.isSaf
 function nonNegative(value, name) { const result = Number(value); if (!Number.isSafeInteger(result) || result < 0) throw new RangeError(`${name} must be non-negative`); return result; }
 function date(now) { const result = new Date(now()); if (!Number.isFinite(result.getTime())) throw new TypeError("now() must return a valid date"); return result; }
 function isRecord(value) { return typeof value === "object" && value !== null && !Array.isArray(value); }
+function pathAllowed(rel, includes, excludes) { if (includes.length && !includes.some((pattern) => filterMatch(pattern, rel))) return false; return !excludes.some((pattern) => filterMatch(pattern, rel)); }
+function filterMatch(pattern, rel) { const value = String(pattern).trim().replace(/^\/+/, ""); if (!value) return false; const regex = new RegExp(`^${value.replace(/[.+()|[\]{}^$\\]/g, "\\$&").replace(/\*\*/g, ".*").replace(/\*/g, "[^/]*").replace(/\?/g, "[^/]")}$`); return regex.test(rel) || (!value.includes("/") && regex.test(rel.split("/").at(-1) ?? rel)); }

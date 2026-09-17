@@ -25,6 +25,8 @@ export NEXUS_BACKUP_URL=${NEXUS_BACKUP_URL:-http://127.0.0.1:8787}
 export NEXUS_BACKUP_BACKUP_ROOT=${NEXUS_BACKUP_BACKUP_ROOT:-/backup}
 export SFTPGO_SFTPD__BINDINGS__0__PORT=${NEXUS_BACKUP_SFTP_PORT:-2222}
 export SFTPGO_FTPD__BINDINGS__0__PORT=${NEXUS_BACKUP_FTP_PORT:-2121}
+export SFTPGO_WEBDAVD__BINDINGS__0__ADDRESS=127.0.0.1
+export SFTPGO_WEBDAVD__BINDINGS__0__PORT=${NEXUS_BACKUP_WEBDAV_INTERNAL_PORT:-8383}
 passive_ports=${NEXUS_BACKUP_FTP_PASSIVE_PORTS:-50000-50010}
 case "$passive_ports" in
   *-*) export SFTPGO_FTPD__PASSIVE_PORT_RANGE__START=${passive_ports%-*} SFTPGO_FTPD__PASSIVE_PORT_RANGE__END=${passive_ports#*-} ;;
@@ -35,8 +37,8 @@ if command -v sftpgo >/dev/null 2>&1; then
   sftpgo serve >/dev/stdout 2>/dev/stderr &
   receiver_pid=$!
 else
-  receiver_pid=
   log "Nexus Backup: receiver engine is unavailable"
+  exit 1
 fi
 
 log "Nexus Backup: starting single application runtime"
@@ -54,4 +56,14 @@ stop_all() {
 }
 trap stop_all EXIT INT TERM
 
-wait "$app_pid"
+while :; do
+  if ! kill -0 "$app_pid" 2>/dev/null; then
+    log "Nexus Backup: application runtime exited while receiver was running"
+    exit 1
+  fi
+  if ! kill -0 "$receiver_pid" 2>/dev/null; then
+    log "Nexus Backup: receiver engine exited; failing appliance"
+    exit 1
+  fi
+  sleep 1
+done

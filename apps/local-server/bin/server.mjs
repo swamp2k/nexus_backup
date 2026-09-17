@@ -8,9 +8,7 @@ import { createApi, D1JobRepository } from "../../control-plane/dist/index.js";
 import { createBackupPlanService } from "../lib/backup-plans.mjs";
 import { createPlanMaintenanceService, enrichPlanJob } from "../lib/plan-maintenance.mjs";
 import { listJobs, loadSanitizedAgentConfig } from "../lib/dashboard-data.mjs";
-import { listRepositoryInventories, queueRepositoryInventory } from "../lib/repository-inventory.mjs";
 import { getRuntimeTelemetry } from "../lib/runtime-telemetry.mjs";
-import { getSnapshotBrowse, queueRestorePreview, queueSnapshotBrowse } from "../lib/snapshot-restore.mjs";
 import { openSqliteD1 } from "../lib/sqlite-d1.mjs";
 
 const configDir = process.env.NEXUS_BACKUP_CONFIG_DIR?.trim() || "/config";
@@ -154,75 +152,6 @@ const server = createServer(async (request, response) => {
 
     if (path === "/v1/local/agents" && request.method === "GET") {
       sendJson(response, 200, { agents: [] });
-      return;
-    }
-
-    if (path === "/v1/local/repositories" && request.method === "GET") {
-      const config = await loadSanitizedAgentConfig(integrationConfigPath);
-      sendJson(response, 200, {
-        available: config.available,
-        restoreTargets: config.restoreTargets ?? [],
-        repositories: await listRepositoryInventories(db, config.repositories ?? []),
-      });
-      return;
-    }
-
-    const repositoryRefreshMatch = path.match(/^\/v1\/local\/repositories\/([^/]+)\/refresh$/);
-    if (request.method === "POST" && repositoryRefreshMatch) {
-      const repositoryId = decodePathPart(repositoryRefreshMatch[1]);
-      const config = await loadSanitizedAgentConfig(integrationConfigPath);
-      if (!config.available) throw statusError(409, "Integration configuration is unavailable");
-      sendJson(response, 202, await queueRepositoryInventory(db, {
-        repositoryId,
-        repositories: config.repositories ?? [],
-        enqueueJob,
-      }));
-      return;
-    }
-
-    const snapshotBrowseMatch = path.match(/^\/v1\/local\/repositories\/([^/]+)\/snapshots\/([^/]+)\/browse$/);
-    if (snapshotBrowseMatch) {
-      const repositoryId = decodePathPart(snapshotBrowseMatch[1]);
-      const snapshotId = decodePathPart(snapshotBrowseMatch[2]);
-      if (request.method === "GET") {
-        sendJson(response, 200, await getSnapshotBrowse(db, {
-          repositoryId,
-          snapshotId,
-          path: requestUrl.searchParams.get("path") ?? "/",
-        }));
-        return;
-      }
-      if (request.method === "POST") {
-        const config = await loadSanitizedAgentConfig(integrationConfigPath);
-        if (!config.available) throw statusError(409, "Integration configuration is unavailable");
-        const body = await readJsonBody(request);
-        sendJson(response, 202, await queueSnapshotBrowse(db, {
-          repositoryId,
-          snapshotId,
-          path: typeof body.path === "string" ? body.path : "/",
-          repositories: config.repositories ?? [],
-          enqueueJob,
-        }));
-        return;
-      }
-    }
-
-    const restorePreviewMatch = path.match(/^\/v1\/local\/repositories\/([^/]+)\/snapshots\/([^/]+)\/preview$/);
-    if (request.method === "POST" && restorePreviewMatch) {
-      const repositoryId = decodePathPart(restorePreviewMatch[1]);
-      const snapshotId = decodePathPart(restorePreviewMatch[2]);
-        const config = await loadSanitizedAgentConfig(integrationConfigPath);
-      if (!config.available) throw statusError(409, "Integration configuration is unavailable");
-      const body = await readJsonBody(request);
-      sendJson(response, 202, await queueRestorePreview(db, {
-        repositoryId,
-        snapshotId,
-        targetId: body.targetId,
-        path: body.path,
-        repositories: config.repositories ?? [],
-        restoreTargets: config.restoreTargets ?? [],
-        enqueueJob,
-      }));
       return;
     }
 

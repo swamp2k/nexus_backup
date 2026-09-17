@@ -7,7 +7,7 @@ const OBJECT_STATES = ["discovered", "ignored", "queued", "retry_wait", "done", 
 const MAX_DISCOVERY_OBJECTS = 5000;
 const MAX_DISCOVERY_JSON = 700_000;
 
-export function createTransferRuleService({ db, enqueueJob, loadAgentConfig, repositories = null, executeRepositoryTransfer = null, now = () => new Date(), id = () => randomUUID() }) {
+export function createTransferRuleService({ db, enqueueJob, loadAgentConfig, repositories = null, executeRepositoryTransfer = null, executeRepositoryDiscovery = null, now = () => new Date(), id = () => randomUUID() }) {
   if (!db) throw new TypeError("db is required");
   if (typeof enqueueJob !== "function") throw new TypeError("enqueueJob is required");
 
@@ -151,6 +151,20 @@ export function createTransferRuleService({ db, enqueueJob, loadAgentConfig, rep
 
   async function queueDiscovery(rule, at, manual) {
     const scheduled = rule.nextScanAt ?? at.toISOString();
+    if (typeof executeRepositoryDiscovery === "function") {
+      const result = await executeRepositoryDiscovery({
+        ruleId: rule.id,
+        sourceEndpointId: rule.sourceEndpointId,
+        sourcePath: rule.sourcePath,
+        includes: rule.includes,
+        excludes: rule.excludes,
+        ...(rule.rtorrentGateId ? { rtorrentGateId: rule.rtorrentGateId } : {}),
+      });
+      const nextScanAt = new Date(at.getTime() + rule.scanIntervalSeconds * 1000).toISOString();
+      await db.prepare(`UPDATE transfer_rules SET last_scan_started_at=?,last_scan_job_id=?,next_scan_at=?,last_error=NULL,updated_at=? WHERE id=?`)
+        .bind(at.toISOString(), result.job.id, nextScanAt, at.toISOString(), rule.id).run();
+      return result.job;
+    }
     const job = await enqueueJob({
       operationKey: manual ? `transfer-scan:${rule.id}:manual:${at.toISOString()}:${id()}` : `transfer-scan:${rule.id}:${scheduled}`,
       type: "rclone-discovery",

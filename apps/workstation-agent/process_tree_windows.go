@@ -62,7 +62,7 @@ var (
 // initializeAgentProcessTree places the workstation agent itself in a Windows
 // Job Object with KILL_ON_JOB_CLOSE. Descendants inherit job membership, so a
 // Scheduled Task stop, crash, update or hard agent restart cannot leave an
-// orphaned restic.exe continuing against a repository or staging directory.
+// orphaned child processes continuing against a repository or staging directory.
 // The handle intentionally stays open for the lifetime of the agent process.
 func initializeAgentProcessTree() error {
 	agentJobOnce.Do(func() {

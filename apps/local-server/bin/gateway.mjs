@@ -1,24 +1,23 @@
 #!/usr/bin/env node
 import { createServer } from "node:http";
-import { createReadStream, createWriteStream } from "node:fs";
-import { mkdir, open, readFile, rename, rm, stat } from "node:fs/promises";
+import { createWriteStream } from "node:fs";
+import { mkdir, open, readFile, rename, rm, stat, utimes } from "node:fs/promises";
 import { pipeline } from "node:stream/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadSanitizedAgentConfig } from "../lib/dashboard-data.mjs";
-import { confirmationPhrase, createLocalAuth } from "../lib/local-auth.mjs";
+import { createLocalAuth } from "../lib/local-auth.mjs";
 import { createManagedDeviceService } from "../lib/managed-devices.mjs";
 import { createRepositoryService } from "../lib/repositories.mjs";
 import { createReceiverUserService } from "../lib/receiver-users.mjs";
 import { createRemoteConnectionService } from "../lib/remote-connection.mjs";
 import { resolvePublicOrigin } from "../lib/public-origin.mjs";
-import { assertRecentRestorePreview, normalizeRestoreScope, queueRestoreExecution } from "../lib/restore-execution.mjs";
 import { openSqliteD1 } from "../lib/sqlite-d1.mjs";
 import { createTransferCleanupService } from "../lib/transfer-cleanup.mjs";
 import { createTransferGroupService } from "../lib/transfer-groups.mjs";
 import { createTransferRuleService } from "../lib/transfer-rules.mjs";
+import { persistTransferDiscovery } from "../lib/transfer-rules.mjs";
 import { createLocalRepositoryTransferExecutor, loadLocalRcloneConfig } from "../lib/local-repository-transfer.mjs";
-import { createWorkstationRecoveryHttp } from "../lib/workstation-recovery-http.mjs";
 import { createWorkstationService, workstationInstallCommand } from "../lib/workstations.mjs";
 
 const publicHost = process.env.NEXUS_BACKUP_HOST?.trim() || "0.0.0.0";
@@ -48,7 +47,6 @@ const repositoryService = createRepositoryService({ db, backupRoot });
 const receiverUserService = createReceiverUserService({ db, repositories: repositoryService });
 const remoteConnectionService = createRemoteConnectionService({ db });
 const workstationService = createWorkstationService({ db, deviceService, repositories: repositoryService, receiverUsers: receiverUserService });
-const workstationRecoveryHttp = createWorkstationRecoveryHttp({ workstationService });
 const localRepositoryTransferExecutor = createLocalRepositoryTransferExecutor({
   db,
   repositories: repositoryService,
@@ -61,6 +59,11 @@ const transferService = createTransferRuleService({
   loadAgentConfig: () => loadSanitizedAgentConfig(integrationConfigPath),
   repositories: repositoryService,
   executeRepositoryTransfer: localRepositoryTransferExecutor.execute,
+  executeRepositoryDiscovery: async (payload) => {
+    const result = await localRepositoryTransferExecutor.executeDiscovery(payload);
+    await persistTransferDiscovery(db, { jobId: result.job.id, expectedRuleId: payload.ruleId, event: result.event });
+    return result;
+  },
 });
 const transferGroupService = createTransferGroupService({ db, enqueueJob, executeRepositoryTransfer: localRepositoryTransferExecutor.execute });
 const transferCleanupService = createTransferCleanupService({ db, enqueueJob, executeRepositoryCleanup: localRepositoryTransferExecutor.executeCleanup });
@@ -182,19 +185,30 @@ const gateway = createServer(async (request, response) => {
       sendJson(response, 200, await workstationService.reportStatus(requireBearerToken(request), await readJsonBody(request)));
       return;
     }
-    if (path === "/v1/device/workstation/files" && request.method === "PUT") {
+    if (path === "/v1/device/workstation/files" && (request.method === "PUT" || request.method === "HEAD")) {
       const device = await deviceService.authenticate(requireBearerToken(request));
       if (device.kind !== "workstation") throw statusError(403, "Device token is not a workstation token");
       const receiver = (await receiverUserService.list()).find((item) => item.workstationId === device.id && item.enabled);
       if (!receiver) throw statusError(409, "Workstation receiver identity is not configured");
       const relativePath = url.searchParams.get("path") ?? "";
       const target = await receiverUserService.resolvePath(receiver.username, relativePath);
+      if (request.method === "HEAD") {
+        const info = await stat(target.absolute).catch((error) => { if (error?.code === "ENOENT") return null; throw error; });
+        if (!info?.isFile()) throw statusError(404, "Workstation file not found");
+        response.statusCode = 200;
+        response.setHeader("content-length", info.size);
+        response.setHeader("x-nexus-source-mtime", info.mtime.toISOString());
+        response.end();
+        return;
+      }
       await mkdir(dirname(target.absolute), { recursive: true });
       const temporary = `${target.absolute}.nexus-upload-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
       try {
         await pipeline(request, createWriteStream(temporary, { flags: "wx", mode: 0o600 }));
         const handle = await open(temporary, "r"); await handle.sync(); await handle.close();
         await rename(temporary, target.absolute);
+        const sourceMtime = Number(request.headers["x-nexus-source-mtime"]);
+        if (Number.isFinite(sourceMtime) && sourceMtime > 0) await utimes(target.absolute, new Date(sourceMtime), new Date(sourceMtime));
         sendJson(response, 201, { uploaded: true, path: relativePath });
       } catch (error) { await rm(temporary, { force: true }).catch(() => {}); throw error; }
       return;
@@ -221,9 +235,8 @@ const gateway = createServer(async (request, response) => {
       return;
     }
 
-    const davMatch = path.match(/^\/dav\/([^/]+)(?:\/(.*))?$/);
-    if (davMatch) {
-      await handleWebDav(request, response, decodePathPart(davMatch[1]), decodePathPart(davMatch[2] ?? ""));
+    if (path === "/dav" || path.startsWith("/dav/")) {
+      await proxyReceiverWebDav(request, response, path, url.search);
       return;
     }
     if (path === "/v1/device/workstation/poll" && request.method === "POST") {
@@ -256,7 +269,7 @@ const gateway = createServer(async (request, response) => {
       const upstream = await fetch(`${internalBase}/v1/local/info`, { headers: { accept: "application/json" } });
       const data = await upstream.json().catch(() => ({}));
       if (!upstream.ok) throw statusError(upstream.status, data.message || `Local info failed with ${upstream.status}`);
-      sendJson(response, 200, { ...data, localAuth: true, restoreExecution: true, transferRules: true, transferCleanup: true, transferTorrentGroups: true, deviceIntegration: true, workstationBackups: true, workstationRecovery: true, transferSchedulerIntervalMs, workstationSchedulerIntervalMs });
+      sendJson(response, 200, { ...data, localAuth: true, transferRules: true, transferCleanup: true, transferTorrentGroups: true, deviceIntegration: true, workstationBackups: true, transferSchedulerIntervalMs, workstationSchedulerIntervalMs });
       return;
     }
     if (path === "/v1/local/remote-connection" && request.method === "GET") {
@@ -350,7 +363,7 @@ const gateway = createServer(async (request, response) => {
         host: singleHeader(request.headers.host),
         fallbackHost: `127.0.0.1:${publicPort}`,
       });
-      sendJson(response, 201, { ...created, receiver: { username: receiver.user.username, password: receiver.password }, repository, installCommand: workstationInstallCommand(origin, created.token) });
+      sendJson(response, 201, { ...created, receiver: { username: receiver.user.username }, repository, installCommand: workstationInstallCommand(origin, created.token) });
       return;
     }
     const workstationSourceScanMatch = path.match(/^\/v1\/local\/workstations\/([^/]+)\/source-scan$/);
@@ -372,16 +385,6 @@ const gateway = createServer(async (request, response) => {
       sendJson(response, 202, { run: await workstationService.runNow(decodePathPart(workstationRunMatch[1])) });
       return;
     }
-    const workstationRecoveryRoute = workstationRecoveryHttp.match(request.method, path);
-    if (workstationRecoveryRoute) {
-      const body = workstationRecoveryRoute.method === "POST" && workstationRecoveryRoute.kind !== "inventory"
-        ? await readJsonBody(request)
-        : undefined;
-      const result = await workstationRecoveryHttp.execute(workstationRecoveryRoute, { searchParams: url.searchParams, body });
-      sendJson(response, result.status, result.body);
-      return;
-    }
-
     if (path === "/v1/local/transfers" && request.method === "GET") {
       const config = await loadSanitizedAgentConfig(integrationConfigPath);
       sendJson(response, 200, { rules: await transferService.list(), endpoints: config.endpoints ?? [], available: config.available });
@@ -420,41 +423,6 @@ const gateway = createServer(async (request, response) => {
         sendJson(response, 200, { rule: await transferService.setEnabled(ruleId, body.enabled) });
         return;
       }
-    }
-
-    if (path === "/v1/local/restore-authorizations" && request.method === "POST") {
-      const body = await readJsonBody(request);
-      const scope = normalizeRestoreScope(body);
-      const localConfig = await loadRestoreConfig(integrationConfigPath);
-      requireWriteTarget(scope.targetId, localConfig.restoreTargets);
-      await assertRecentRestorePreview(db, scope);
-      const expected = confirmationPhrase(scope);
-      if (body.confirmation !== expected) throw statusError(400, `Confirmation must exactly match: ${expected}`);
-      const grant = auth.issueRestoreGrant(session, scope);
-      sendJson(response, 201, { authorizationToken: grant.token, expiresAt: grant.expiresAt, scope });
-      return;
-    }
-
-    const restoreMatch = path.match(/^\/v1\/local\/repositories\/([^/]+)\/snapshots\/([^/]+)\/restore$/);
-    if (request.method === "POST" && restoreMatch) {
-      const body = await readJsonBody(request);
-      const scope = normalizeRestoreScope({
-        repositoryId: decodePathPart(restoreMatch[1]),
-        snapshotId: decodePathPart(restoreMatch[2]),
-        targetId: body.targetId,
-        path: body.path,
-      });
-      const restoreAuthorization = singleHeader(request.headers["x-nexus-restore-authorization"]);
-      auth.consumeRestoreGrant(session, restoreAuthorization, scope);
-      const localConfig = await loadRestoreConfig(integrationConfigPath);
-      requireWriteTarget(scope.targetId, localConfig.restoreTargets);
-      sendJson(response, 202, await queueRestoreExecution(db, {
-        ...scope,
-        repositories: localConfig.repositories,
-        restoreTargets: localConfig.restoreTargets,
-        enqueueJob,
-      }));
-      return;
     }
 
     if ((path === "/" || path === "/index.html") && request.method === "GET") {
@@ -514,82 +482,27 @@ async function enqueueJob(input) {
   return data.job ?? data;
 }
 
-async function loadRestoreConfig(path) {
-  let parsed;
-  try { parsed = JSON.parse(await readFile(path, "utf8")); }
-  catch { throw statusError(409, "Integration configuration is unavailable"); }
-  const repositories = Array.isArray(parsed?.resticRepositories)
-    ? parsed.resticRepositories.filter(isRecord).map((item) => ({ id: stringId(item.id) })).filter((item) => item.id)
-    : [];
-  const restoreTargets = Array.isArray(parsed?.restoreTargets)
-    ? parsed.restoreTargets.filter(isRecord).map((item) => ({
-        id: stringId(item.id),
-        label: typeof item.label === "string" && item.label.trim() ? item.label.trim() : stringId(item.id),
-        overwrite: typeof item.overwrite === "string" && item.overwrite.trim() ? item.overwrite.trim() : "never",
-        writeEnabled: item.allowWrite === true,
-      })).filter((item) => item.id)
-    : [];
-  return { repositories, restoreTargets };
+async function proxyReceiverWebDav(request, response, path, search) {
+  const internalPort = process.env.NEXUS_BACKUP_WEBDAV_INTERNAL_PORT || "8383";
+  const visiblePath = path === "/dav" ? "" : path.slice(5);
+  // The public URL includes the receiver username for a stable client-facing
+  // address. SFTPGo authenticates the Basic credentials and assigns the home
+  // directory, so remove that display-only segment before proxying.
+  const backendPath = visiblePath.includes("/") ? `/${visiblePath.slice(visiblePath.indexOf("/") + 1)}` : "/";
+  const target = new URL(`${backendPath}${search}`, `http://127.0.0.1:${internalPort}`);
+  const headers = { ...request.headers, host: target.host, "x-forwarded-prefix": "/dav" };
+  delete headers.connection;
+  const upstream = await fetch(target, {
+    method: request.method,
+    headers,
+    body: ["GET", "HEAD"].includes(request.method) ? undefined : request,
+    duplex: "half",
+  });
+  response.statusCode = upstream.status;
+  for (const [name, value] of upstream.headers) if (!["connection", "transfer-encoding"].includes(name.toLowerCase())) response.setHeader(name, value);
+  if (!upstream.body) { response.end(); return; }
+  await pipeline(upstream.body, response);
 }
-function requireWriteTarget(id, targets) {
-  const target = targets.find((candidate) => candidate.id === id);
-  if (!target) throw statusError(404, `Restore target not found: ${id}`);
-  if (target.overwrite !== "never") throw statusError(409, `Restore target ${id} is unsafe: overwrite must be never for staging-only restores`);
-  if (!target.writeEnabled) throw statusError(403, `Restore target is preview-only: ${id}`);
-  return target;
-}
-
-async function handleWebDav(request, response, username, subpath) {
-  const credentials = parseBasicAuthorization(request.headers.authorization);
-  if (!credentials || credentials.username !== username) throw statusError(401, "WebDAV receiver credentials are required");
-  const user = await receiverUserService.authenticate(credentials.username, credentials.password);
-  const target = await receiverUserService.resolvePath(user.username, subpath);
-  if (request.method === "PUT") {
-    await mkdir(dirname(target.absolute), { recursive: true });
-    const safeTarget = await receiverUserService.resolvePath(user.username, subpath);
-    const temporary = `${safeTarget.absolute}.nexus-upload-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    try {
-      await pipeline(request, createWriteStream(temporary, { flags: "wx", mode: 0o600 }));
-      const handle = await open(temporary, "r");
-      await handle.sync();
-      await handle.close();
-      await rename(temporary, safeTarget.absolute);
-      sendJson(response, 201, { uploaded: true, path: subpath });
-    } catch (error) {
-      await rm(temporary, { force: true }).catch(() => {});
-      throw error;
-    }
-    return;
-  }
-  if (request.method === "GET" || request.method === "HEAD") {
-    const info = await stat(target.absolute);
-    if (!info.isFile()) throw statusError(400, "WebDAV target is not a file");
-    response.statusCode = 200;
-    response.setHeader("content-length", info.size);
-    response.setHeader("content-type", "application/octet-stream");
-    if (request.method === "HEAD") { response.end(); return; }
-    createReadStream(target.absolute).pipe(response);
-    return;
-  }
-  if (request.method === "MKCOL") {
-    await mkdir(target.absolute, { recursive: true });
-    response.statusCode = 201; response.end(); return;
-  }
-  if (request.method === "PROPFIND") {
-    const entries = await repositoryService.paths.listDirectory(target.relative);
-    response.statusCode = 207;
-    response.setHeader("content-type", "application/xml; charset=utf-8");
-    response.end(`<?xml version="1.0" encoding="utf-8"?><d:multistatus xmlns:d="DAV:">${entries.map((entry) => `<d:response><d:href>/dav/${encodeURIComponent(user.username)}/${encodeURI(entry.relativePath)}</d:href><d:propstat><d:prop><d:displayname>${xmlEscape(entry.name)}</d:displayname><d:getcontentlength>${entry.size ?? 0}</d:getcontentlength></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>`).join("")}</d:multistatus>`);
-    return;
-  }
-  response.statusCode = 405; response.setHeader("allow", "GET, HEAD, PUT, MKCOL, PROPFIND"); response.end();
-}
-
-function parseBasicAuthorization(value) {
-  if (typeof value !== "string" || !/^Basic\s+/i.test(value)) return null;
-  try { const decoded = Buffer.from(value.replace(/^Basic\s+/i, ""), "base64").toString("utf8"); const split = decoded.indexOf(":"); if (split < 1) return null; return { username: decoded.slice(0, split), password: decoded.slice(split + 1) }; } catch { return null; }
-}
-function xmlEscape(value) { return String(value).replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" }[char])); }
 
 async function servePublic(path, response) {
   const [file, contentType] = PUBLIC_FILES.get(path);

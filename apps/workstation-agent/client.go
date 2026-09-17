@@ -51,9 +51,7 @@ type workstationStatus struct {
 }
 
 type recoveryRequest struct {
-	SnapshotID string   `json:"snapshotId,omitempty"`
-	Path       string   `json:"path,omitempty"`
-	Drives     []string `json:"drives,omitempty"`
+	Drives []string `json:"drives,omitempty"`
 }
 
 type workstationRun struct {
@@ -147,6 +145,10 @@ func (c *apiClient) finishRun(runID, leaseToken, status string, result map[strin
 }
 
 func (c *apiClient) uploadFile(ctx context.Context, relativePath string, file *os.File, size int64) error {
+	return c.uploadFileWithMtime(ctx, relativePath, file, size, time.Time{})
+}
+
+func (c *apiClient) uploadFileWithMtime(ctx context.Context, relativePath string, file *os.File, size int64, mtime time.Time) error {
 	requestURL := c.baseURL + "/v1/device/workstation/files?path=" + url.QueryEscape(relativePath)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, requestURL, file)
 	if err != nil {
@@ -156,6 +158,9 @@ func (c *apiClient) uploadFile(ctx context.Context, relativePath string, file *o
 	req.Header.Set("Authorization", "Bearer "+c.currentToken())
 	req.Header.Set("Content-Type", "application/octet-stream")
 	req.Header.Set("Accept", "application/json")
+	if !mtime.IsZero() {
+		req.Header.Set("X-Nexus-Source-Mtime", fmt.Sprintf("%d", mtime.UnixMilli()))
+	}
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return err
@@ -167,6 +172,37 @@ func (c *apiClient) uploadFile(ctx context.Context, relativePath string, file *o
 	}
 	_, _ = io.Copy(io.Discard, resp.Body)
 	return nil
+}
+
+type remoteFileMetadata struct {
+	Size  int64
+	Mtime time.Time
+}
+
+func (c *apiClient) fileMetadata(ctx context.Context, relativePath string) (remoteFileMetadata, bool, error) {
+	requestURL := c.baseURL + "/v1/device/workstation/files?path=" + url.QueryEscape(relativePath)
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, requestURL, nil)
+	if err != nil {
+		return remoteFileMetadata{}, false, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.currentToken())
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return remoteFileMetadata{}, false, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return remoteFileMetadata{}, false, nil
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+		return remoteFileMetadata{}, false, &apiError{Method: http.MethodHead, Path: "/v1/device/workstation/files", StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(data))}
+	}
+	mtime, err := time.Parse(time.RFC3339Nano, resp.Header.Get("X-Nexus-Source-Mtime"))
+	if err != nil {
+		return remoteFileMetadata{}, true, fmt.Errorf("invalid remote file mtime: %w", err)
+	}
+	return remoteFileMetadata{Size: resp.ContentLength, Mtime: mtime}, true, nil
 }
 
 func (c *apiClient) doJSON(method, path string, body any, out any) error {

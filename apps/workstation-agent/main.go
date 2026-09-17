@@ -22,25 +22,17 @@ var (
 const defaultConfigName = "workstation.json"
 
 type config struct {
-	ServerURL          string `json:"serverUrl"`
-	DeviceToken        string `json:"deviceToken"`
-	ReceiverProtocol   string `json:"receiverProtocol,omitempty"`
-	ReceiverHost       string `json:"receiverHost,omitempty"`
-	ReceiverPort       int    `json:"receiverPort,omitempty"`
-	ReceiverUsername   string `json:"receiverUsername,omitempty"`
-	ReceiverPassword   string `json:"receiverPassword,omitempty"`
-	RepositoryID       string `json:"repositoryId,omitempty"`
-	DestinationFolder  string `json:"destinationFolder,omitempty"`
-	Repository         string `json:"repository"`
-	PasswordFile       string `json:"passwordFile"`
-	ResticPath         string `json:"resticPath"`
-	RestUsername       string `json:"restUsername,omitempty"`
-	RestPassword       string `json:"restPassword,omitempty"`
-	CACertPath         string `json:"caCertPath,omitempty"`
-	PollSeconds        int    `json:"pollSeconds"`
-	ReportSeconds      int    `json:"reportSeconds"`
-	AutoInit           bool   `json:"autoInit"`
-	InsecureNoPassword bool   `json:"insecureNoPassword,omitempty"`
+	ServerURL         string `json:"serverUrl"`
+	DeviceToken       string `json:"deviceToken"`
+	ReceiverProtocol  string `json:"receiverProtocol,omitempty"`
+	ReceiverHost      string `json:"receiverHost,omitempty"`
+	ReceiverPort      int    `json:"receiverPort,omitempty"`
+	ReceiverUsername  string `json:"receiverUsername,omitempty"`
+	ReceiverPassword  string `json:"receiverPassword,omitempty"`
+	RepositoryID      string `json:"repositoryId,omitempty"`
+	DestinationFolder string `json:"destinationFolder,omitempty"`
+	PollSeconds       int    `json:"pollSeconds"`
+	ReportSeconds     int    `json:"reportSeconds"`
 }
 
 type localState struct {
@@ -261,11 +253,7 @@ func (a *agent) executeBackup(run workstationRun) {
 		}
 	}()
 
-	execute := executeResticBackup
-	if strings.TrimSpace(a.cfg.RepositoryID) != "" {
-		execute = executeFlatFileBackup
-	}
-	result := execute(ctx, a.cfg, run, func(progress backupProgress) {
+	result := executeFlatFileBackup(ctx, a.cfg, run, func(progress backupProgress) {
 		err := a.client.reportProgress(run.ID, run.LeaseToken, progress)
 		if err != nil {
 			log.Printf("run %s progress report failed: %v", run.ID, err)
@@ -324,10 +312,7 @@ func (a *agent) executeBackup(run workstationRun) {
 }
 
 func (a *agent) repositoryReady() bool {
-	if strings.TrimSpace(a.cfg.RepositoryID) != "" {
-		return strings.TrimSpace(a.cfg.ServerURL) != "" && strings.TrimSpace(a.cfg.DeviceToken) != ""
-	}
-	return validateRepositoryConfig(a.cfg) == nil
+	return strings.TrimSpace(a.cfg.RepositoryID) != "" && strings.TrimSpace(a.cfg.ServerURL) != "" && strings.TrimSpace(a.cfg.DeviceToken) != ""
 }
 
 func configPathFromArgs(args []string) string {
@@ -363,12 +348,6 @@ func loadConfig(path string) (config, error) {
 	cfg.ReceiverPassword = strings.TrimSpace(cfg.ReceiverPassword)
 	cfg.RepositoryID = strings.TrimSpace(cfg.RepositoryID)
 	cfg.DestinationFolder = strings.Trim(strings.TrimSpace(cfg.DestinationFolder), `/\\`)
-	cfg.Repository = strings.TrimSpace(cfg.Repository)
-	cfg.PasswordFile = strings.TrimSpace(cfg.PasswordFile)
-	cfg.ResticPath = strings.TrimSpace(cfg.ResticPath)
-	cfg.RestUsername = strings.TrimSpace(cfg.RestUsername)
-	cfg.RestPassword = strings.TrimSpace(cfg.RestPassword)
-	cfg.CACertPath = strings.TrimSpace(cfg.CACertPath)
 	if cfg.ServerURL == "" || (!strings.HasPrefix(cfg.ServerURL, "http://") && !strings.HasPrefix(cfg.ServerURL, "https://")) {
 		return config{}, errors.New("serverUrl must be http(s)")
 	}
@@ -380,15 +359,6 @@ func loadConfig(path string) (config, error) {
 	}
 	if cfg.RepositoryID != "" && (cfg.ReceiverProtocol != "webdav" || cfg.ReceiverHost == "") {
 		return config{}, errors.New("flat-file configuration requires a receiver host and webdav protocol")
-	}
-	if (cfg.RestUsername == "") != (cfg.RestPassword == "") {
-		return config{}, errors.New("REST transport username and password must be configured together")
-	}
-	if cfg.CACertPath != "" && !filepath.IsAbs(cfg.CACertPath) {
-		return config{}, errors.New("caCertPath must be an absolute local path")
-	}
-	if cfg.ResticPath == "" {
-		cfg.ResticPath = "restic.exe"
 	}
 	if cfg.PollSeconds < 5 {
 		cfg.PollSeconds = 15
@@ -458,7 +428,7 @@ func repositoryKindForConfig(cfg config) string {
 	if strings.TrimSpace(cfg.RepositoryID) != "" {
 		return "flat-file"
 	}
-	return repositoryKind(cfg.Repository)
+	return ""
 }
 
 func agentVersion() string {
