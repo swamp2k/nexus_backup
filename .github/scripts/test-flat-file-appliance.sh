@@ -40,8 +40,8 @@ if curl -fsS -u "alpha-user:$alpha_password" http://127.0.0.1:18787/dav/other-us
 curl -fsS -u "beta-user:$beta_password" -T "$tmp/protocol.txt" http://127.0.0.1:18787/dav/beta-user/beta-only.txt >/dev/null
 if curl -fsS -u "alpha-user:$alpha_password" http://127.0.0.1:18787/dav/beta-user/beta-only.txt >/dev/null 2>&1; then echo 'receiver A accessed receiver B data' >&2; exit 1; fi
 
-command -v sftp >/dev/null
-sftp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -P 12222 "alpha-user@127.0.0.1" <<< "put $tmp/protocol.txt native-sftp.txt" >/dev/null 2>&1 || { echo 'SFTP upload failed' >&2; exit 1; }
+curl --fail --silent --show-error --user "alpha-user:$alpha_password" --insecure --upload-file "$tmp/protocol.txt" sftp://127.0.0.1:12222/native-sftp.txt >/dev/null
+curl --fail --silent --show-error --user "alpha-user:$alpha_password" --insecure sftp://127.0.0.1:12222/native-sftp.txt | grep -F 'protocol smoke'
 curl --fail --silent --show-error --user "alpha-user:$alpha_password" --upload-file "$tmp/protocol.txt" ftp://127.0.0.1:12121/native-ftp.txt >/dev/null
 curl --fail --silent --show-error --user "alpha-user:$alpha_password" ftp://127.0.0.1:12121/native-ftp.txt | grep -F 'protocol smoke'
 
