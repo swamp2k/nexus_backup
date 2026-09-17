@@ -12,7 +12,7 @@ trap cleanup EXIT
 for volume in "$config" "$state" "$backup"; do docker volume create "$volume" >/dev/null; done
 printf 'protocol smoke\n' > "$tmp/protocol.txt"
 
-docker run -d --name "$name" -p 18787:8787 -p 12222:2222 -p 12121:2121 -v "$config:/config" -v "$state:/state" -v "$backup:/backup" "$image" >/dev/null
+docker run -d --name "$name" -p 18787:8787 -p 12222:2222 -p 12121:2121 -p 50000-50010:50000-50010 -v "$config:/config" -v "$state:/state" -v "$backup:/backup" "$image" >/dev/null
 for _ in $(seq 1 60); do curl -fsS http://127.0.0.1:18787/healthz >/dev/null && break; sleep 1; done
 if ! curl -fsS http://127.0.0.1:18787/healthz >/dev/null; then
   docker inspect "$name" --format '{{json .State}}' >&2 || true
