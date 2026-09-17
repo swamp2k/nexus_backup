@@ -12,11 +12,7 @@ services:
     restart: unless-stopped
     network_mode: host
     environment:
-      NEXUS_BACKUP_AGENT_ID: ${NEXUS_BACKUP_AGENT_ID:-local-agent}
       NEXUS_BACKUP_PUBLIC_URL: ${NEXUS_BACKUP_PUBLIC_URL:-}
-      NEXUS_BACKUP_REPOSITORY_HOST: ${NEXUS_BACKUP_REPOSITORY_HOST:-}
-      NEXUS_BACKUP_REPOSITORY_PORT: ${NEXUS_BACKUP_REPOSITORY_PORT:-8000}
-      NEXUS_BACKUP_REPOSITORY_INITIAL_USER: ${NEXUS_BACKUP_REPOSITORY_INITIAL_USER:-}
     volumes:
       - nexus-config:/config
       - nexus-state:/state

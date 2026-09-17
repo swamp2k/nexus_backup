@@ -4,44 +4,29 @@ import { randomBytes } from "node:crypto";
 import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createApi, D1AgentStore, D1JobRepository } from "../../control-plane/dist/index.js";
-import { createBackupPlanService } from "../lib/backup-plans.mjs";
-import { createPlanMaintenanceService, enrichPlanJob } from "../lib/plan-maintenance.mjs";
-import { listAgents, listJobs, loadSanitizedAgentConfig } from "../lib/dashboard-data.mjs";
-import { listRepositoryInventories, queueRepositoryInventory } from "../lib/repository-inventory.mjs";
-import { createRepositorySettingsService } from "../lib/repository-settings.mjs";
-import { getRuntimeTelemetry, recordRuntimeEvents } from "../lib/runtime-telemetry.mjs";
-import { getSnapshotBrowse, queueRestorePreview, queueSnapshotBrowse } from "../lib/snapshot-restore.mjs";
+import { createApi, D1JobRepository } from "../../control-plane/dist/index.js";
+import { listJobs, loadSanitizedIntegrationConfig } from "../lib/dashboard-data.mjs";
+import { getRuntimeTelemetry } from "../lib/runtime-telemetry.mjs";
 import { openSqliteD1 } from "../lib/sqlite-d1.mjs";
 
 const configDir = process.env.NEXUS_BACKUP_CONFIG_DIR?.trim() || "/config";
-const runtimeDir = process.env.NEXUS_BACKUP_RUNTIME_DIR?.trim() || "/run/nexus-backup";
 const databasePath = process.env.NEXUS_BACKUP_DB?.trim() || join(configDir, "nexus-backup.sqlite");
 const migrationsDir = process.env.NEXUS_BACKUP_MIGRATIONS?.trim()
   || fileURLToPath(new URL("../../../migrations/", import.meta.url));
 const webDir = process.env.NEXUS_BACKUP_WEB_DIR?.trim()
   || fileURLToPath(new URL("../web/", import.meta.url));
-const agentConfigPath = process.env.NEXUS_BACKUP_AGENT_CONFIG?.trim() || "/agent-config/agent.json";
+const integrationConfigPath = process.env.NEXUS_BACKUP_INTEGRATION_CONFIG?.trim() || "/config/integrations.json";
 const host = process.env.NEXUS_BACKUP_HOST?.trim() || "0.0.0.0";
 const port = positiveInteger(process.env.NEXUS_BACKUP_PORT ?? "8787", "NEXUS_BACKUP_PORT");
-const agentId = process.env.NEXUS_BACKUP_AGENT_ID?.trim() || "local-agent";
 const recoveryIntervalMs = positiveInteger(
   process.env.NEXUS_BACKUP_RECOVERY_INTERVAL_MS ?? "30000",
   "NEXUS_BACKUP_RECOVERY_INTERVAL_MS",
 );
-const schedulerIntervalMs = positiveInteger(
-  process.env.NEXUS_BACKUP_SCHEDULER_INTERVAL_MS ?? "15000",
-  "NEXUS_BACKUP_SCHEDULER_INTERVAL_MS",
-);
 
 await mkdir(configDir, { recursive: true });
-await mkdir(runtimeDir, { recursive: true });
 
 const db = await openSqliteD1({ filename: databasePath, migrationsDir });
 const controlToken = await ensureSecret(join(configDir, "control-token"));
-const agentToken = await ensureSecret(join(configDir, "agent-token"));
-await mirrorSecret(agentToken, join(runtimeDir, "agent-token"));
-await new D1AgentStore(db).register(agentId, "Local Nexus Backup agent", agentToken, new Date());
 
 const api = createApi();
 const env = {
@@ -51,7 +36,7 @@ const env = {
 };
 
 async function enqueueJob(input) {
-  const { operationKey, type, payload } = enrichPlanJob(input);
+  const { operationKey, type, payload } = input;
   const webResponse = await api.fetch(new Request("http://nexus-backup.local/v1/jobs", {
     method: "POST",
     headers: {
@@ -71,61 +56,21 @@ async function enqueueJob(input) {
   return (await webResponse.json()).job;
 }
 
-const planService = createBackupPlanService({
-  db,
-  enqueueJob,
-  loadAgentConfig: () => loadSanitizedAgentConfig(agentConfigPath),
-});
-const maintenanceService = createPlanMaintenanceService({ db, enqueueJob });
-const repositorySettingsService = createRepositorySettingsService();
-
 const recoveryTimer = setInterval(() => {
   api.recover(env).catch((error) => log("error", "lease recovery failed", { error: serializeError(error) }));
 }, recoveryIntervalMs);
 recoveryTimer.unref();
-
-let schedulerRunning = false;
-async function runPlanScheduler() {
-  if (schedulerRunning) return;
-  schedulerRunning = true;
-  try {
-    const result = await planService.runDue();
-    if (result.enqueued > 0) log("info", "scheduled backup plans enqueued", { count: result.enqueued });
-    for (const failure of result.failures) {
-      log("error", "scheduled backup plan enqueue failed", failure);
-    }
-
-    const maintenance = await maintenanceService.runDue();
-    if (maintenance.enqueued > 0) log("info", "retention maintenance jobs enqueued", { count: maintenance.enqueued });
-    for (const failure of maintenance.failures) {
-      log("error", "retention maintenance enqueue failed", failure);
-    }
-  } catch (error) {
-    log("error", "backup plan scheduler failed", { error: serializeError(error) });
-  } finally {
-    schedulerRunning = false;
-  }
-}
-const schedulerTimer = setInterval(() => void runPlanScheduler(), schedulerIntervalMs);
-schedulerTimer.unref();
-void runPlanScheduler();
 
 const STATIC_FILES = new Map([
   ["/", ["index.html", "text/html; charset=utf-8"]],
   ["/index.html", ["index.html", "text/html; charset=utf-8"]],
   ["/session.js", ["session.js", "text/javascript; charset=utf-8"]],
   ["/app.js", ["app.js", "text/javascript; charset=utf-8"]],
-  ["/telemetry.js", ["telemetry.js", "text/javascript; charset=utf-8"]],
-  ["/plans.js", ["plans.js", "text/javascript; charset=utf-8"]],
-  ["/maintenance.js", ["maintenance.js", "text/javascript; charset=utf-8"]],
-  ["/repository-inventory.js", ["repository-inventory.js", "text/javascript; charset=utf-8"]],
-  ["/repository-settings.js", ["repository-settings.js", "text/javascript; charset=utf-8"]],
+  ["/remote-connection.js", ["remote-connection.js", "text/javascript; charset=utf-8"]],
   ["/transfers.js", ["transfers.js", "text/javascript; charset=utf-8"]],
+  ["/repositories.js", ["repositories.js", "text/javascript; charset=utf-8"]],
+  ["/maintenance.js", ["maintenance.js", "text/javascript; charset=utf-8"]],
   ["/styles.css", ["styles.css", "text/css; charset=utf-8"]],
-  ["/telemetry.css", ["telemetry.css", "text/css; charset=utf-8"]],
-  ["/plans.css", ["plans.css", "text/css; charset=utf-8"]],
-  ["/maintenance.css", ["maintenance.css", "text/css; charset=utf-8"]],
-  ["/repository-inventory.css", ["repository-inventory.css", "text/css; charset=utf-8"]],
   ["/transfers.css", ["transfers.css", "text/css; charset=utf-8"]],
   ["/favicon.svg", ["favicon.svg", "image/svg+xml"]],
 ]);
@@ -145,154 +90,18 @@ const server = createServer(async (request, response) => {
         mode: "local",
         selfContained: true,
         remoteControl: "optional",
-        agentId,
         pollIntervalMs: 5000,
-        telemetryPollIntervalMs: 1000,
-        schedulerIntervalMs,
-        retentionEnforcement: true,
-        repositoryInventory: true,
-        snapshotBrowser: true,
-        restorePreview: true,
-        restoreExecution: false,
+        localExecution: true,
+        repositories: true,
+        receiverUsers: true,
+        workstationBackups: true,
       });
       return;
     }
 
     if (path === "/v1/local/config" && request.method === "GET") {
-      sendJson(response, 200, await loadSanitizedAgentConfig(agentConfigPath));
+      sendJson(response, 200, await loadSanitizedIntegrationConfig(integrationConfigPath));
       return;
-    }
-
-    if (path === "/v1/local/repository-settings" && request.method === "GET") {
-      sendJson(response, 200, await repositorySettingsService.get());
-      return;
-    }
-    if (path === "/v1/local/repository-settings" && request.method === "PUT") {
-      sendJson(response, 200, await repositorySettingsService.update(await readJsonBody(request)));
-      return;
-    }
-
-    if (path === "/v1/local/agents" && request.method === "GET") {
-      sendJson(response, 200, { agents: await listAgents(db) });
-      return;
-    }
-
-    if (path === "/v1/local/repositories" && request.method === "GET") {
-      const config = await loadSanitizedAgentConfig(agentConfigPath);
-      sendJson(response, 200, {
-        available: config.available,
-        restoreTargets: config.restoreTargets ?? [],
-        repositories: await listRepositoryInventories(db, config.repositories ?? []),
-      });
-      return;
-    }
-
-    const repositoryRefreshMatch = path.match(/^\/v1\/local\/repositories\/([^/]+)\/refresh$/);
-    if (request.method === "POST" && repositoryRefreshMatch) {
-      const repositoryId = decodePathPart(repositoryRefreshMatch[1]);
-      const config = await loadSanitizedAgentConfig(agentConfigPath);
-      if (!config.available) throw statusError(409, "Agent config is unavailable");
-      sendJson(response, 202, await queueRepositoryInventory(db, {
-        repositoryId,
-        repositories: config.repositories ?? [],
-        enqueueJob,
-      }));
-      return;
-    }
-
-    const snapshotBrowseMatch = path.match(/^\/v1\/local\/repositories\/([^/]+)\/snapshots\/([^/]+)\/browse$/);
-    if (snapshotBrowseMatch) {
-      const repositoryId = decodePathPart(snapshotBrowseMatch[1]);
-      const snapshotId = decodePathPart(snapshotBrowseMatch[2]);
-      if (request.method === "GET") {
-        sendJson(response, 200, await getSnapshotBrowse(db, {
-          repositoryId,
-          snapshotId,
-          path: requestUrl.searchParams.get("path") ?? "/",
-        }));
-        return;
-      }
-      if (request.method === "POST") {
-        const config = await loadSanitizedAgentConfig(agentConfigPath);
-        if (!config.available) throw statusError(409, "Agent config is unavailable");
-        const body = await readJsonBody(request);
-        sendJson(response, 202, await queueSnapshotBrowse(db, {
-          repositoryId,
-          snapshotId,
-          path: typeof body.path === "string" ? body.path : "/",
-          repositories: config.repositories ?? [],
-          enqueueJob,
-        }));
-        return;
-      }
-    }
-
-    const restorePreviewMatch = path.match(/^\/v1\/local\/repositories\/([^/]+)\/snapshots\/([^/]+)\/preview$/);
-    if (request.method === "POST" && restorePreviewMatch) {
-      const repositoryId = decodePathPart(restorePreviewMatch[1]);
-      const snapshotId = decodePathPart(restorePreviewMatch[2]);
-      const config = await loadSanitizedAgentConfig(agentConfigPath);
-      if (!config.available) throw statusError(409, "Agent config is unavailable");
-      const body = await readJsonBody(request);
-      sendJson(response, 202, await queueRestorePreview(db, {
-        repositoryId,
-        snapshotId,
-        targetId: body.targetId,
-        path: body.path,
-        repositories: config.repositories ?? [],
-        restoreTargets: config.restoreTargets ?? [],
-        enqueueJob,
-      }));
-      return;
-    }
-
-    if (path === "/v1/local/plans" && request.method === "GET") {
-      sendJson(response, 200, { plans: await planService.list() });
-      return;
-    }
-
-    if (path === "/v1/local/plans" && request.method === "POST") {
-      sendJson(response, 201, { plan: await planService.create(await readJsonBody(request)) });
-      return;
-    }
-
-    if (path === "/v1/local/maintenance" && request.method === "GET") {
-      sendJson(response, 200, { maintenance: await maintenanceService.list() });
-      return;
-    }
-
-    const planMaintenanceMatch = path.match(/^\/v1\/local\/plans\/([^/]+)\/maintenance$/);
-    if (request.method === "POST" && planMaintenanceMatch) {
-      const planId = decodePathPart(planMaintenanceMatch[1]);
-      sendJson(response, 202, await maintenanceService.runNow(planId));
-      return;
-    }
-
-    const planRunMatch = path.match(/^\/v1\/local\/plans\/([^/]+)\/run$/);
-    if (request.method === "POST" && planRunMatch) {
-      const planId = decodePathPart(planRunMatch[1]);
-      sendJson(response, 202, await planService.runNow(planId));
-      return;
-    }
-
-    const planMatch = path.match(/^\/v1\/local\/plans\/([^/]+)$/);
-    if (planMatch) {
-      const planId = decodePathPart(planMatch[1]);
-      if (request.method === "GET") {
-        const plan = await planService.get(planId);
-        if (!plan) throw statusError(404, `Backup plan not found: ${planId}`);
-        sendJson(response, 200, { plan });
-        return;
-      }
-      if (request.method === "PUT") {
-        sendJson(response, 200, { plan: await planService.update(planId, await readJsonBody(request)) });
-        return;
-      }
-      if (request.method === "PATCH") {
-        const body = await readJsonBody(request);
-        sendJson(response, 200, { plan: await planService.setEnabled(planId, body.enabled) });
-        return;
-      }
     }
 
     if (path === "/v1/local/jobs" && request.method === "GET") {
@@ -312,77 +121,6 @@ const server = createServer(async (request, response) => {
       });
       const webResponse = await api.fetch(webRequest, env);
       await fromWebResponse(webResponse, response);
-      return;
-    }
-
-    const runtimeWriteMatch = path.match(/^\/v1\/agent\/jobs\/([^/]+)\/runtime$/);
-    if (request.method === "POST" && runtimeWriteMatch) {
-      const jobId = decodePathPart(runtimeWriteMatch[1]);
-      const rawAgentToken = bearerToken(request);
-      if (!rawAgentToken) {
-        sendJson(response, 401, { code: "unauthorized", message: "Missing agent bearer token" });
-        return;
-      }
-
-      const agentStore = new D1AgentStore(db);
-      const agent = await agentStore.findByRawToken(rawAgentToken);
-      if (!agent) {
-        sendJson(response, 401, { code: "unauthorized", message: "Invalid or disabled agent token" });
-        return;
-      }
-
-      const body = await readJsonBody(request);
-      const leaseToken = requireBodyString(body.leaseToken, "leaseToken", 1, 512);
-      const repository = new D1JobRepository(db);
-      const job = await repository.get(jobId);
-      if (!job) {
-        sendJson(response, 404, { code: "job_not_found", message: `Job not found: ${jobId}` });
-        return;
-      }
-      if (!job.lease
-        || job.lease.agentId !== agent.id
-        || !constantTimeEqual(job.lease.token, leaseToken)
-        || Date.parse(job.lease.expiresAt) <= Date.now()) {
-        sendJson(response, 409, { code: "job_conflict", message: "Agent does not hold the active job lease" });
-        return;
-      }
-
-      const jobPayload = isRecord(job.payload) ? job.payload : {};
-      const inventoryJob = job.type === "restic-inventory";
-      const browseJob = job.type === "restic-browse";
-      const discoveryJob = job.type === "rclone-discovery";
-      const runtimeKind = inventoryJob
-        ? "inventory"
-        : browseJob
-          ? "snapshot-browse"
-          : discoveryJob
-            ? "transfer-discovery"
-            : "standard";
-      const expectedRepositoryId = (inventoryJob || browseJob) && typeof jobPayload.repositoryId === "string"
-        ? jobPayload.repositoryId
-        : undefined;
-      const expectedSnapshotId = browseJob && typeof jobPayload.snapshotId === "string"
-        ? jobPayload.snapshotId
-        : undefined;
-      const expectedPath = browseJob && typeof jobPayload.path === "string"
-        ? jobPayload.path
-        : undefined;
-      const expectedRuleId = discoveryJob && typeof jobPayload.ruleId === "string"
-        ? jobPayload.ruleId
-        : undefined;
-      const accepted = await recordRuntimeEvents(db, {
-        jobId,
-        attempt: job.attempt,
-        agentId: agent.id,
-        events: body.events,
-        runtimeKind,
-        expectedRepositoryId,
-        expectedSnapshotId,
-        expectedPath,
-        expectedRuleId,
-      });
-      await agentStore.touch(agent.id, new Date());
-      sendJson(response, 202, { accepted });
       return;
     }
 
@@ -445,7 +183,7 @@ await new Promise((resolve, reject) => {
   server.once("error", reject);
   server.listen(port, host, resolve);
 });
-log("info", "local control plane online", { host, port, databasePath, agentId, schedulerIntervalMs });
+log("info", "local control plane online", { host, port, databasePath, localExecution: true });
 
 let stopping = false;
 async function shutdown(signal) {
@@ -453,7 +191,6 @@ async function shutdown(signal) {
   stopping = true;
   log("info", "shutdown requested", { signal });
   clearInterval(recoveryTimer);
-  clearInterval(schedulerTimer);
   await new Promise((resolve) => server.close(resolve));
   db.close();
   log("info", "local control plane stopped");
@@ -548,49 +285,12 @@ async function ensureSecret(path) {
   return token;
 }
 
-async function mirrorSecret(secret, path) {
-  await mkdir(dirname(path), { recursive: true });
-  const temporary = `${path}.${process.pid}.tmp`;
-  await writeFile(temporary, `${secret}\n`, { mode: 0o600 });
-  await rename(temporary, path);
-  await chmod(path, 0o600);
-}
-
 function sendJson(response, status, value) {
   response.statusCode = status;
   response.setHeader("content-type", "application/json; charset=utf-8");
   response.setHeader("cache-control", "no-store");
   response.setHeader("x-content-type-options", "nosniff");
   response.end(JSON.stringify(value));
-}
-
-function bearerToken(request) {
-  const header = Array.isArray(request.headers.authorization)
-    ? request.headers.authorization[0]
-    : request.headers.authorization;
-  if (typeof header !== "string") return null;
-  const match = header.match(/^Bearer\s+(.+)$/i);
-  return match?.[1]?.trim() || null;
-}
-
-function requireBodyString(value, name, min, max) {
-  if (typeof value !== "string") throw new RangeError(`${name} must be a string`);
-  const normalized = value.trim();
-  if (normalized.length < min || normalized.length > max) {
-    throw new RangeError(`${name} must be ${min}-${max} characters`);
-  }
-  return normalized;
-}
-
-function constantTimeEqual(left, right) {
-  const a = Buffer.from(left);
-  const b = Buffer.from(right);
-  let diff = a.length ^ b.length;
-  const length = Math.max(a.length, b.length);
-  for (let index = 0; index < length; index += 1) {
-    diff |= (a[index] ?? 0) ^ (b[index] ?? 0);
-  }
-  return diff === 0;
 }
 
 function decodePathPart(value) {
@@ -616,10 +316,6 @@ function statusError(statusCode, message) {
 function serializeError(error) {
   if (error instanceof Error) return { name: error.name, message: error.message };
   return { name: "Error", message: String(error) };
-}
-
-function isRecord(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function log(level, message, data = {}) {

@@ -1,12 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { normalizeInventoryEvent, persistRepositoryInventory } from "./repository-inventory.mjs";
-import { normalizeSnapshotBrowseEvent, persistSnapshotBrowse } from "./snapshot-restore.mjs";
 import { normalizeTransferGroupsEvent, persistTransferGroups } from "./transfer-groups.mjs";
 import { normalizeTransferDiscoveryEvent, persistTransferDiscovery } from "./transfer-rules.mjs";
 
-const TOOLS = new Set(["restic", "rclone"]);
+const TOOLS = new Set(["rclone"]);
 const STREAMS = new Set(["stdout", "stderr"]);
-const RUNTIME_KINDS = new Set(["standard", "inventory", "snapshot-browse", "transfer-discovery"]);
+const RUNTIME_KINDS = new Set(["standard", "transfer-discovery"]);
 const MAX_BATCH = 100;
 const MAX_MESSAGE = 16_000;
 const MAX_SUMMARY_JSON = 65_536;
@@ -35,15 +33,11 @@ export async function recordRuntimeEvents(
     expectedRuleId,
   });
   const statements = [];
-  const inventories = [];
-  const browses = [];
   const discoveries = [];
   const transferGroups = [];
   let wroteLog = false;
 
   for (const event of normalized) {
-    if (event.type === "inventory") { inventories.push(event); continue; }
-    if (event.type === "snapshot-browse") { browses.push(event); continue; }
     if (event.type === "transfer-discovery") { discoveries.push(event); continue; }
     if (event.type === "transfer-groups") { transferGroups.push(event); continue; }
 
@@ -111,12 +105,6 @@ export async function recordRuntimeEvents(
   }
 
   if (statements.length > 0) await db.batch(statements);
-  for (const inventory of inventories) {
-    await persistRepositoryInventory(db, { jobId, attempt, agentId, expectedRepositoryId, event: inventory, at: now });
-  }
-  for (const browse of browses) {
-    await persistSnapshotBrowse(db, { jobId, attempt, agentId, expectedRepositoryId, expectedSnapshotId, expectedPath, event: browse, at: now });
-  }
   for (const discovery of discoveries) {
     await persistTransferDiscovery(db, { jobId, attempt, agentId, expectedRuleId, event: discovery, at: now });
   }
@@ -172,23 +160,9 @@ export function normalizeRuntimeEvents(value, now = new Date(), {
   const effectiveKind = runtimeKind ?? inferRuntimeKind({ expectedRepositoryId, expectedSnapshotId, expectedPath, expectedRuleId });
   if (!RUNTIME_KINDS.has(effectiveKind)) throw new RangeError("runtimeKind is invalid");
 
-  let inventoryCount = 0;
-  let browseCount = 0;
   let discoveryCount = 0;
   let transferGroupCount = 0;
   return value.map((event) => {
-    if (isRecord(event) && event.type === "inventory") {
-      if (effectiveKind !== "inventory") throw new RangeError("inventory events are only accepted from restic-inventory jobs");
-      inventoryCount += 1;
-      if (inventoryCount > 1) throw new RangeError("runtime batch may contain at most one inventory event");
-      return normalizeInventoryEvent(event, expectedRepositoryId, now);
-    }
-    if (isRecord(event) && event.type === "snapshot-browse") {
-      if (effectiveKind !== "snapshot-browse") throw new RangeError("snapshot browse events are only accepted from restic-browse jobs");
-      browseCount += 1;
-      if (browseCount > 1) throw new RangeError("runtime batch may contain at most one snapshot browse event");
-      return normalizeSnapshotBrowseEvent(event, { expectedRepositoryId, expectedSnapshotId, expectedPath, now });
-    }
     if (isRecord(event) && event.type === "transfer-discovery") {
       if (effectiveKind !== "transfer-discovery") throw new RangeError("transfer discovery events are only accepted from rclone-discovery jobs");
       discoveryCount += 1;
@@ -206,13 +180,8 @@ export function normalizeRuntimeEvents(value, now = new Date(), {
 }
 
 function inferRuntimeKind({ expectedRepositoryId, expectedSnapshotId, expectedPath, expectedRuleId }) {
-  if (expectedRuleId !== undefined) return "transfer-discovery";
-  if (expectedSnapshotId !== undefined || expectedPath !== undefined) {
-    return expectedRepositoryId !== undefined && expectedSnapshotId !== undefined && expectedPath !== undefined
-      ? "snapshot-browse"
-      : "standard";
-  }
-  return expectedRepositoryId !== undefined ? "inventory" : "standard";
+	if (expectedRuleId !== undefined) return "transfer-discovery";
+	return "standard";
 }
 
 function normalizeRuntimeEvent(value, now) {
@@ -249,7 +218,7 @@ function normalizeRuntimeEvent(value, now) {
     return { type, tool, data: value.data, at };
   }
 
-  throw new RangeError("runtime event type must be log, progress, summary, inventory, snapshot-browse, transfer-discovery, or transfer-groups");
+  throw new RangeError("runtime event type must be log, progress, summary, transfer-discovery, or transfer-groups");
 }
 
 function normalizeAt(value, fallback) { if (typeof value !== "string" || !Number.isFinite(Date.parse(value))) return fallback.toISOString(); return new Date(value).toISOString(); }

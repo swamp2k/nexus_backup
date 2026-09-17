@@ -1,10 +1,20 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 const script = fileURLToPath(new URL("../../../.github/scripts/resolve-release-version.sh", import.meta.url));
 const sha = "a".repeat(40);
+const bash = process.platform === "win32" && existsSync("C:\\Program Files\\Git\\bin\\bash.exe")
+  ? "C:\\Program Files\\Git\\bin\\bash.exe"
+  : "bash";
+
+function shellPath(path) {
+  if (process.platform !== "win32") return path;
+  const normalized = path.replaceAll("\\", "/");
+  return normalized.length > 2 && normalized[1] === ":" ? `/${normalized[0].toLowerCase()}${normalized.slice(2)}` : normalized;
+}
 
 function resolveRelease(overrides = {}) {
   const env = {
@@ -17,7 +27,7 @@ function resolveRelease(overrides = {}) {
     GITHUB_OUTPUT: "",
     ...overrides,
   };
-  return spawnSync("bash", [script], { env, encoding: "utf8" });
+  return spawnSync(bash, [shellPath(script)], { env, encoding: "utf8" });
 }
 
 function outputMap(stdout) {

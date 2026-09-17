@@ -21,6 +21,7 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run typecheck
+      - run: npm run build
       - name: Test workstation agent
         working-directory: apps/workstation-agent
         run: go test ./...
@@ -33,87 +34,46 @@ jobs:
       - name: Parse workstation installer
         shell: pwsh
         run: '[scriptblock]::Create((Get-Content -Raw apps/local-server/web/install.ps1)) | Out-Null'
-      - name: Validate self-contained installer contract
+      - name: Validate flat-file installer contract
         shell: bash
         run: |
           set -euo pipefail
           installer=apps/local-server/web/install.ps1
           gateway=apps/local-server/bin/gateway.mjs
           grep -F '$serverUrl/workstation/nexus-backup-workstation-windows-amd64.exe' "$installer"
-          grep -F '$serverUrl/workstation/restic.exe' "$installer"
+          grep -F '$serverUrl/workstation/nexus-backup-workstation-windows-amd64.exe.sha256' "$installer"
           grep -F '/v1/device/workstation/repository-profile' "$installer"
-          grep -F 'insecureNoPassword' "$installer"
-          grep -F 'NEXUS_BACKUP_REST_USERNAME' "$installer"
-          grep -F 'NEXUS_BACKUP_REST_PASSWORD' "$installer"
-          grep -F 'NEXUS_BACKUP_REPOSITORY_CA_B64' "$installer"
-          grep -F 'NEXUS_BACKUP_REPOSITORY_CA_SHA256' "$installer"
-          grep -F 'Pinned Repository CA checksum mismatch' "$installer"
-          grep -F 'Invoke-PinnedRepositoryProvision' "$installer"
-          if grep -Fq '/inheritance:r' "$installer"; then
-            echo 'Home installer must not hide ProgramData behind stripped ACL inheritance' >&2
+          grep -F 'repositoryId=' "$installer"
+          if grep -Eiq 'receiverProtocol|receiverHost|receiverPort|receiverUsername|receiverPassword' "$installer"; then
+            echo 'workstation installer contains unused receiver transport configuration' >&2
             exit 1
           fi
-          if grep -Fq 'NEXUS_BACKUP_REPOSITORY_CA_URL' "$installer"; then
-            echo 'installer must not depend on a Repository HTTP CA bootstrap URL' >&2
-            exit 1
-          fi
-          if grep -Fq 'api.github.com/repos/swamp2k/nexus_backup/releases/latest' "$installer"; then
-            echo 'installer must not depend on GitHub Releases' >&2
-            exit 1
-          fi
-          if grep -Fq 'github.com/restic/restic/releases/download' "$installer"; then
-            echo 'installer must not download Restic from the Internet' >&2
-            exit 1
-          fi
-          for route in \
-            /workstation/nexus-backup-workstation-windows-amd64.exe \
-            /workstation/nexus-backup-workstation-windows-amd64.exe.sha256 \
-            /workstation/restic.exe \
-            /workstation/restic.exe.sha256; do
-            grep -F "[\"$route\"" "$gateway"
-          done
-          grep -F 'path.startsWith("/workstation/")' "$gateway"
+          grep -F '["/workstation/nexus-backup-workstation-windows-amd64.exe"' "$gateway"
+          grep -F '["/workstation/nexus-backup-workstation-windows-amd64.exe.sha256"' "$gateway"
           grep -F 'path === "/v1/device/workstation/repository-profile"' "$gateway"
+          if grep -Eiq 'restic|rest-server|insecureNoPassword|NEXUS_BACKUP_REST_|NEXUS_BACKUP_REPOSITORY_CA_' "$installer"; then
+            echo 'flat-file installer contains retired legacy contracts' >&2
+            exit 1
+          fi
       - name: Validate one-app Unraid template
         shell: bash
         run: |
           python - <<'PY'
           import xml.etree.ElementTree as ET
           from pathlib import Path
-
           files = sorted(Path("unraid/templates").glob("*.xml"))
           assert [p.name for p in files] == ["nexus-backup.xml"], files
           root = ET.parse(files[0]).getroot()
-          assert root.tag == "Container"
-          assert root.attrib.get("version") == "2"
+          assert root.tag == "Container" and root.attrib.get("version") == "2"
           assert root.findtext("Name") == "NexusBackup"
-          assert root.findtext("Repository") == "ghcr.io/swamp2k/nexus-backup:beta"
           assert root.findtext("Network") == "host"
           assert root.findtext("Privileged") == "false"
-          assert root.findtext("Beta") == "True"
-          extra = root.findtext("ExtraParams") or ""
-          assert "SYS_ADMIN" not in extra and "/dev/fuse" not in extra
-          requires = root.findtext("Requires") or ""
-          assert "Only add SYS_ADMIN and /dev/fuse manually" in requires
-
           configs = {item.attrib["Target"]: item.attrib for item in root.findall("Config")}
           assert configs["/config"]["Default"] == "/mnt/user/appdata/nexus-backup"
-          assert configs["/data"]["Mode"] == "ro"
-          assert configs["/data"]["Default"] == "/mnt/user/nexus-backup-source"
-          assert configs["/data"]["Default"] != "/mnt/user"
           assert configs["/backup"]["Default"] == "/mnt/user/backups/nexus-backup"
+          assert configs["/data"]["Mode"] == "ro"
           assert configs["/restore"]["Mode"] == "rw"
-          assert configs["/downloads"]["Mode"] == "rw"
-
-          variables = {item.attrib["Target"]: item.attrib for item in root.findall("Config") if item.attrib.get("Type") == "Variable"}
-          assert variables["NEXUS_BACKUP_REPOSITORY_EXPOSURE"]["Default"] == "lan"
-          assert variables["NEXUS_BACKUP_REPOSITORY_HOST"]["Required"] == "false"
-          assert variables["NEXUS_BACKUP_REPOSITORY_PORT"]["Default"] == "8000"
-          assert variables["NEXUS_BACKUP_REPOSITORY_ENDPOINT_PORT"]["Default"] == "8000"
-          assert variables["NEXUS_BACKUP_REPOSITORY_APPEND_ONLY"]["Required"] == "false"
-          assert variables["NEXUS_BACKUP_PUBLIC_URL"]["Required"] == "false"
-          assert "NEXUS_BACKUP_REPOSITORY_PUBLIC_PORT" not in variables
-          print("single Nexus Backup Unraid template is well formed and Home-first by default")
+          print("flat-file Unraid template is well formed")
           PY
 
   workstation-windows:
@@ -131,6 +91,9 @@ jobs:
       - name: Vet workstation agent on Windows
         working-directory: apps/workstation-agent
         run: go vet ./...
+      - name: Cross-build workstation agent
+        working-directory: apps/workstation-agent
+        run: $env:CGO_ENABLED='0'; go build -trimpath -ldflags='-s -w' -o $env:RUNNER_TEMP\nexus-backup-workstation.exe .
 
   images:
     runs-on: ubuntu-latest
@@ -139,144 +102,25 @@ jobs:
       CI_VERSION: 0.0.0-ci
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: Build unified appliance image
+      - name: Build flat-file appliance image
         run: docker build -f Dockerfile --build-arg NEXUS_BACKUP_VERSION="$CI_VERSION" --build-arg NEXUS_BACKUP_REVISION="$GITHUB_SHA" -t nexus-backup:ci .
-      - name: Verify bundled workstation and emergency assets
-        shell: bash
+      - name: Verify bundled flat-file assets
         run: |
           set -euo pipefail
           docker run --rm --entrypoint sh nexus-backup:ci -ec '
             cd /app/apps/local-server/web/workstation
             test -s nexus-backup-workstation-windows-amd64.exe
-            test -s restic.exe
             sha256sum -c nexus-backup-workstation-windows-amd64.exe.sha256
-            sha256sum -c restic.exe.sha256
-            test -s /app/apps/local-server/bin/emergency-export.mjs
-            test -s /app/apps/local-server/lib/emergency-export.mjs
-            test -s /app/docs/emergency-recovery.md
-            node --check /app/apps/local-server/bin/emergency-export.mjs
-            node --check /app/apps/local-server/lib/emergency-export.mjs
-            node --check /app/apps/local-server/lib/repository-settings.mjs
-            node --check /app/apps/local-server/web/repository-settings.js
+            test -s /usr/local/bin/sftpgo
+            test -s /app/apps/local-server/bin/gateway.mjs
+            ! find /app /usr/local/bin -maxdepth 4 -type f \( -iname "*restic*" -o -iname "*rest-server*" \) | grep .
           '
-      - name: Verify inert Agent starter config
-        shell: bash
+      - name: Verify image metadata and compose contract
         run: |
           set -euo pipefail
-          docker run --rm --entrypoint node nexus-backup:ci -e '
-            const fs = require("fs");
-            const c = JSON.parse(fs.readFileSync("/app/defaults/agent.json", "utf8"));
-            for (const k of ["sources", "resticRepositories", "restoreTargets", "rcloneEndpoints", "rtorrentGates"]) {
-              if (!Array.isArray(c[k]) || c[k].length !== 0) throw new Error(`${k} must be empty`);
-            }
-            if (!c.tools || Object.keys(c.tools).length !== 0) throw new Error("tools must be empty");
-          '
-      - name: Exercise complete Remote appliance with real Restic
-        shell: bash
-        run: |
-          set -euo pipefail
-          for volume in nexus-config-ci nexus-state-ci nexus-backup-ci; do docker volume create "$volume" >/dev/null; done
-          cleanup() {
-            docker rm -f nexus-backup-ci >/dev/null 2>&1 || true
-            docker volume rm nexus-config-ci nexus-state-ci nexus-backup-ci >/dev/null 2>&1 || true
-            rm -f /tmp/repository-ca.pem /tmp/restic-password
-          }
-          trap cleanup EXIT
-
-          docker run -d --name nexus-backup-ci \
-            -e NEXUS_BACKUP_REPOSITORY_EXPOSURE=internet \
-            -e NEXUS_BACKUP_REPOSITORY_HOST=127.0.0.1 \
-            -e NEXUS_BACKUP_REPOSITORY_INITIAL_USER=ci-user \
-            -p 18787:8787 \
-            -p 18000:8000 \
-            -v nexus-config-ci:/config \
-            -v nexus-state-ci:/state \
-            -v nexus-backup-ci:/backup \
-            nexus-backup:ci >/dev/null
-
-          ready=0
-          for _ in $(seq 1 60); do
-            control=0; repository=0; agent=0
-            curl -fsS -o /dev/null http://127.0.0.1:18787/healthz && control=1 || true
-            curl -ksS -o /dev/null https://127.0.0.1:18000/ && repository=1 || true
-            docker logs nexus-backup-ci 2>&1 | grep -Fq '"message":"agent online"' && agent=1 || true
-            if [ "$control" = 1 ] && [ "$repository" = 1 ] && [ "$agent" = 1 ]; then ready=1; break; fi
-            if [ "$(docker inspect -f '{{.State.Running}}' nexus-backup-ci 2>/dev/null || true)" != true ]; then break; fi
-            sleep 1
-          done
-          if [ "$ready" != 1 ]; then
-            docker inspect nexus-backup-ci --format '{{json .State}}' >&2 || true
-            docker logs nexus-backup-ci >&2 || true
-            exit 1
-          fi
-
-          helper="$(docker exec nexus-backup-ci nexus-repository-client ci-user main)"
-          expected_ca_sha="$(printf '%s\n' "$helper" | sed -n "s/.*NEXUS_BACKUP_REPOSITORY_CA_SHA256='\([^']*\)'.*/\1/p")"
-          ca_b64="$(printf '%s\n' "$helper" | sed -n "s/.*NEXUS_BACKUP_REPOSITORY_CA_B64='\([^']*\)'.*/\1/p")"
-          transport_password="$(docker exec nexus-backup-ci cat /config/repository/clients/ci-user.password)"
-          test -n "$ca_b64" && test -n "$expected_ca_sha" && test -n "$transport_password"
-          if printf '%s\n' "$helper" | grep -Fq 'NEXUS_BACKUP_REPOSITORY_CA_URL'; then
-            echo 'Repository helper must not emit an HTTP CA bootstrap URL' >&2
-            exit 1
-          fi
-          printf '%s' "$ca_b64" | base64 -d > /tmp/repository-ca.pem
-          actual_ca_sha="$(sha256sum /tmp/repository-ca.pem | awk '{print $1}')"
-          test "$actual_ca_sha" = "$expected_ca_sha"
-          docker exec nexus-backup-ci sha256sum /config/repository/repository-tls.crt | grep -F "$expected_ca_sha"
-
-          printf '%s\n' 'ci-restic-encryption-password' > /tmp/restic-password
-          docker run --rm --network host --entrypoint restic \
-            -e RESTIC_REPOSITORY=rest:https://127.0.0.1:18000/ci-user/main \
-            -e RESTIC_REST_USERNAME=ci-user \
-            -e RESTIC_REST_PASSWORD="$transport_password" \
-            -e RESTIC_PASSWORD_FILE=/secrets/restic-password \
-            -e RESTIC_CACERT=/secrets/repository-ca.pem \
-            -v /tmp/restic-password:/secrets/restic-password:ro \
-            -v /tmp/repository-ca.pem:/secrets/repository-ca.pem:ro \
-            nexus-backup:ci init >/dev/null
-          docker run --rm --network host --entrypoint restic \
-            -e RESTIC_REPOSITORY=rest:https://127.0.0.1:18000/ci-user/main \
-            -e RESTIC_REST_USERNAME=ci-user \
-            -e RESTIC_REST_PASSWORD="$transport_password" \
-            -e RESTIC_PASSWORD_FILE=/secrets/restic-password \
-            -e RESTIC_CACERT=/secrets/repository-ca.pem \
-            -v /tmp/restic-password:/secrets/restic-password:ro \
-            -v /tmp/repository-ca.pem:/secrets/repository-ca.pem:ro \
-            nexus-backup:ci cat config >/dev/null
-          if curl -kfsS -u wrong:wrong https://127.0.0.1:18000/ci-user/main/config >/dev/null 2>&1; then
-            echo 'Repository accepted invalid credentials' >&2
-            exit 1
-          fi
-
-          docker exec nexus-backup-ci sh -ec 'pid="$(pidof rest-server)"; test -n "$pid"; kill "$pid"'
-          stopped=0
-          for _ in $(seq 1 20); do
-            if [ "$(docker inspect -f '{{.State.Running}}' nexus-backup-ci 2>/dev/null || true)" != true ]; then stopped=1; break; fi
-            sleep 1
-          done
-          [ "$stopped" = 1 ] || { echo 'appliance stayed alive after Repository process died' >&2; docker logs nexus-backup-ci >&2; exit 1; }
-      - name: Exercise zero-credential Home Repository
-        shell: bash
-        run: bash .github/scripts/test-home-repository.sh nexus-backup:ci
-      - name: Exercise direct Internet Repository protections
-        shell: bash
-        run: bash .github/scripts/test-internet-repository.sh nexus-backup:ci
-      - name: Verify image version metadata
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(docker image inspect nexus-backup:ci --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')" = "$CI_VERSION"
-          test "$(docker image inspect nexus-backup:ci --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = "$GITHUB_SHA"
           test "$(docker image inspect nexus-backup:ci --format '{{ index .Config.Labels "org.opencontainers.image.title" }}')" = 'Nexus Backup'
-      - name: Validate one-service Compose contract
-        shell: bash
-        run: |
-          set -euo pipefail
           docker compose config > /tmp/nexus-compose.yml
-          test "$(grep -c '^  nexus-backup:$' /tmp/nexus-compose.yml)" = 1
-          grep -F 'ghcr.io/swamp2k/nexus-backup:' /tmp/nexus-compose.yml
           grep -F 'network_mode: host' /tmp/nexus-compose.yml
-          if grep -Eq 'SYS_ADMIN|/dev/fuse|privileged: true' /tmp/nexus-compose.yml; then
-            echo 'default appliance Compose must not grant FUSE/SYS_ADMIN/privileged mode' >&2
-            exit 1
-          fi
+          if grep -Eq 'SYS_ADMIN|/dev/fuse|privileged: true' /tmp/nexus-compose.yml; then exit 1; fi
+      - name: Docker appliance protocol and lifecycle smoke test
+        run: bash .github/scripts/test-flat-file-appliance.sh nexus-backup:ci

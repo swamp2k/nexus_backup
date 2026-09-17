@@ -2,7 +2,7 @@ const TERMINAL_STATES = new Set(["completed", "partial", "failed", "cancelled", 
 const RETRYABLE_STATES = new Set(["partial", "failed", "interrupted"]);
 const MODIFIED_PREFIX = "cleanup refused modified destination:";
 
-export function createTransferCleanupService({ db, enqueueJob, now = () => new Date() }) {
+export function createTransferCleanupService({ db, enqueueJob, executeRepositoryCleanup = null, now = () => new Date() }) {
   if (!db) throw new TypeError("db is required");
   if (typeof enqueueJob !== "function") throw new TypeError("enqueueJob is required");
 
@@ -82,7 +82,7 @@ export function createTransferCleanupService({ db, enqueueJob, now = () => new D
   async function queue(at, limit, failures) {
     const rows = (await db.prepare(`
       SELECT o.rule_id,o.object_key,o.rel_path,o.size,o.mod_time,o.cleanup_attempt_count,
-             r.destination_endpoint_id,r.destination_path
+             r.destination_endpoint_id,r.destination_path,r.destination_repository_id
       FROM transfer_objects AS o
       JOIN transfer_rules AS r ON r.id=o.rule_id
       WHERE r.enabled=1 AND r.cleanup_days>0 AND o.state='done'
@@ -96,11 +96,9 @@ export function createTransferCleanupService({ db, enqueueJob, now = () => new D
       const ruleId = String(row.rule_id), objectKey = String(row.object_key);
       try {
         const attempt = Number(row.cleanup_attempt_count) + 1;
-        const job = await enqueueJob({
-          operationKey: `transfer-cleanup:${ruleId}:${objectKey}:attempt:${attempt}`,
-          type: "managed-cleanup",
-          payload: {
+        const payload = {
             ruleId,
+            ...(row.destination_repository_id ? { destinationRepositoryId: String(row.destination_repository_id) } : {}),
             destinationEndpointId: String(row.destination_endpoint_id),
             destinationPath: String(row.destination_path),
             relPath: String(row.rel_path),
@@ -108,8 +106,15 @@ export function createTransferCleanupService({ db, enqueueJob, now = () => new D
             expectedModTime: String(row.mod_time),
             objectKey,
             cleanupAttempt: attempt,
-          },
-        });
+          };
+        const jobResult = row.destination_repository_id && typeof executeRepositoryCleanup === "function"
+          ? await executeRepositoryCleanup(payload)
+          : { job: await enqueueJob({
+          operationKey: `transfer-cleanup:${ruleId}:${objectKey}:attempt:${attempt}`,
+          type: "managed-cleanup",
+          payload,
+        }) };
+        const job = jobResult.job;
         const result = await db.prepare(`
           UPDATE transfer_objects
           SET cleanup_job_id=?,cleanup_attempt_count=?,next_cleanup_retry_at=NULL,last_error=NULL

@@ -1,19 +1,23 @@
 #!/usr/bin/env node
 import { createServer } from "node:http";
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { createWriteStream } from "node:fs";
+import { mkdir, open, readFile, rename, rm, stat, utimes } from "node:fs/promises";
+import { pipeline } from "node:stream/promises";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadSanitizedAgentConfig } from "../lib/dashboard-data.mjs";
-import { confirmationPhrase, createLocalAuth } from "../lib/local-auth.mjs";
+import { loadSanitizedIntegrationConfig } from "../lib/dashboard-data.mjs";
+import { createLocalAuth } from "../lib/local-auth.mjs";
 import { createManagedDeviceService } from "../lib/managed-devices.mjs";
+import { createRepositoryService } from "../lib/repositories.mjs";
+import { createReceiverUserService } from "../lib/receiver-users.mjs";
+import { createRemoteConnectionService } from "../lib/remote-connection.mjs";
 import { resolvePublicOrigin } from "../lib/public-origin.mjs";
-import { createRepositorySettingsService } from "../lib/repository-settings.mjs";
-import { assertRecentRestorePreview, normalizeRestoreScope, queueRestoreExecution } from "../lib/restore-execution.mjs";
 import { openSqliteD1 } from "../lib/sqlite-d1.mjs";
 import { createTransferCleanupService } from "../lib/transfer-cleanup.mjs";
-import { createTransferGroupService } from "../lib/transfer-groups.mjs";
+import { createTransferGroupService, persistTransferGroups } from "../lib/transfer-groups.mjs";
 import { createTransferRuleService } from "../lib/transfer-rules.mjs";
-import { createWorkstationRecoveryHttp } from "../lib/workstation-recovery-http.mjs";
+import { persistTransferDiscovery } from "../lib/transfer-rules.mjs";
+import { createLocalRepositoryTransferExecutor, loadLocalRcloneConfig } from "../lib/local-repository-transfer.mjs";
 import { createWorkstationService, workstationInstallCommand } from "../lib/workstations.mjs";
 
 const publicHost = process.env.NEXUS_BACKUP_HOST?.trim() || "0.0.0.0";
@@ -24,7 +28,8 @@ const configDir = process.env.NEXUS_BACKUP_CONFIG_DIR?.trim() || "/config";
 const databasePath = process.env.NEXUS_BACKUP_DB?.trim() || join(configDir, "nexus-backup.sqlite");
 const migrationsDir = process.env.NEXUS_BACKUP_MIGRATIONS?.trim() || fileURLToPath(new URL("../../../migrations/", import.meta.url));
 const webDir = process.env.NEXUS_BACKUP_WEB_DIR?.trim() || fileURLToPath(new URL("../web/", import.meta.url));
-const agentConfigPath = process.env.NEXUS_BACKUP_AGENT_CONFIG?.trim() || "/agent-config/agent.json";
+const integrationConfigPath = process.env.NEXUS_BACKUP_INTEGRATION_CONFIG?.trim() || "/config/integrations.json";
+const backupRoot = process.env.NEXUS_BACKUP_BACKUP_ROOT?.trim() || "/backup";
 const transferSchedulerIntervalMs = positiveInteger(process.env.NEXUS_BACKUP_TRANSFER_INTERVAL_MS ?? "15000", "NEXUS_BACKUP_TRANSFER_INTERVAL_MS");
 const workstationSchedulerIntervalMs = positiveInteger(process.env.NEXUS_BACKUP_WORKSTATION_INTERVAL_MS ?? "15000", "NEXUS_BACKUP_WORKSTATION_INTERVAL_MS");
 const configuredPublicOrigin = process.env.NEXUS_BACKUP_PUBLIC_URL?.trim()
@@ -38,16 +43,31 @@ await import("./server.mjs");
 const db = await openSqliteD1({ filename: databasePath, migrationsDir });
 const auth = await createLocalAuth({ configDir, log });
 const deviceService = createManagedDeviceService({ db });
-const workstationService = createWorkstationService({ db, deviceService });
-const repositorySettingsService = createRepositorySettingsService();
-const workstationRecoveryHttp = createWorkstationRecoveryHttp({ workstationService });
+const repositoryService = createRepositoryService({ db, backupRoot });
+const receiverUserService = createReceiverUserService({ db, repositories: repositoryService });
+const remoteConnectionService = createRemoteConnectionService({ db });
+const workstationService = createWorkstationService({ db, deviceService, repositories: repositoryService, receiverUsers: receiverUserService });
+const localRepositoryTransferExecutor = createLocalRepositoryTransferExecutor({
+  db,
+  repositories: repositoryService,
+  enqueueJob,
+  loadConfig: () => loadLocalRcloneConfig(integrationConfigPath),
+});
 const transferService = createTransferRuleService({
   db,
   enqueueJob,
-  loadAgentConfig: () => loadSanitizedAgentConfig(agentConfigPath),
+  loadAgentConfig: () => loadSanitizedIntegrationConfig(integrationConfigPath),
+  repositories: repositoryService,
+  executeRepositoryTransfer: localRepositoryTransferExecutor.execute,
+  executeRepositoryDiscovery: async (payload) => {
+    const result = await localRepositoryTransferExecutor.executeDiscovery(payload);
+    await persistTransferDiscovery(db, { jobId: result.job.id, expectedRuleId: payload.ruleId, event: result.event });
+    if (result.groups) await persistTransferGroups(db, { jobId: result.job.id, expectedRuleId: payload.ruleId, event: result.groups });
+    return result;
+  },
 });
-const transferGroupService = createTransferGroupService({ db, enqueueJob });
-const transferCleanupService = createTransferCleanupService({ db, enqueueJob });
+const transferGroupService = createTransferGroupService({ db, enqueueJob, executeRepositoryTransfer: localRepositoryTransferExecutor.execute });
+const transferCleanupService = createTransferCleanupService({ db, enqueueJob, executeRepositoryCleanup: localRepositoryTransferExecutor.executeCleanup });
 
 let transferSchedulerRunning = false;
 async function runTransferScheduler() {
@@ -103,14 +123,14 @@ const PUBLIC_FILES = new Map([
   ["/install.ps1", ["install.ps1", "text/plain; charset=utf-8"]],
   ["/workstation/nexus-backup-workstation-windows-amd64.exe", ["workstation/nexus-backup-workstation-windows-amd64.exe", "application/octet-stream"]],
   ["/workstation/nexus-backup-workstation-windows-amd64.exe.sha256", ["workstation/nexus-backup-workstation-windows-amd64.exe.sha256", "text/plain; charset=utf-8"]],
-  ["/workstation/restic.exe", ["workstation/restic.exe", "application/octet-stream"]],
-  ["/workstation/restic.exe.sha256", ["workstation/restic.exe.sha256", "text/plain; charset=utf-8"]],
 ]);
 
 const gateway = createServer(async (request, response) => {
   try {
     const url = new URL(request.url || "/", `http://${request.headers.host || `127.0.0.1:${publicPort}`}`);
     const path = url.pathname;
+
+    if (!await remoteConnectionService.allowsHost(singleHeader(request.headers.host))) throw statusError(403, "Remote connection hostname is not allowed");
 
     if (request.method === "GET" && PUBLIC_FILES.has(path)) {
       await servePublic(path, response);
@@ -144,34 +164,72 @@ const gateway = createServer(async (request, response) => {
       sendJson(response, 200, await deviceService.report(requireBearerToken(request), body));
       return;
     }
+    if (path === "/v1/internal/receiver-auth" && request.method === "POST") {
+      const remoteAddress = request.socket?.remoteAddress ?? "";
+      if (!["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(remoteAddress)) throw statusError(404, "Not found");
+      const body = await readJsonBody(request);
+      const user = await receiverUserService.authenticate(body.username, body.password);
+      const root = await receiverUserService.resolvePath(user.username, "");
+      sendJson(response, 200, {
+        status: 1,
+        username: user.username,
+        home_dir: root.absolute,
+        uid: 0,
+        gid: 0,
+        permissions: { "/": ["*"], "/.nexus": [] },
+        expiration_date: 0,
+        external_auth_cache_time: 0,
+      });
+      return;
+    }
     if (path === "/v1/device/workstation/status" && request.method === "POST") {
       sendJson(response, 200, await workstationService.reportStatus(requireBearerToken(request), await readJsonBody(request)));
+      return;
+    }
+    if (path === "/v1/device/workstation/files" && (request.method === "PUT" || request.method === "HEAD")) {
+      const device = await deviceService.authenticate(requireBearerToken(request));
+      if (device.kind !== "workstation") throw statusError(403, "Device token is not a workstation token");
+      const receiver = (await receiverUserService.list()).find((item) => item.workstationId === device.id && item.enabled);
+      if (!receiver) throw statusError(409, "Workstation receiver identity is not configured");
+      const relativePath = url.searchParams.get("path") ?? "";
+      const target = await receiverUserService.resolvePath(receiver.username, relativePath);
+      if (request.method === "HEAD") {
+        const info = await stat(target.absolute).catch((error) => { if (error?.code === "ENOENT") return null; throw error; });
+        if (!info?.isFile()) throw statusError(404, "Workstation file not found");
+        response.statusCode = 200;
+        response.setHeader("content-length", info.size);
+        response.setHeader("x-nexus-source-mtime", info.mtime.toISOString());
+        response.end();
+        return;
+      }
+      await mkdir(dirname(target.absolute), { recursive: true });
+      const temporary = `${target.absolute}.nexus-upload-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      try {
+        await pipeline(request, createWriteStream(temporary, { flags: "wx", mode: 0o600 }));
+        const handle = await open(temporary, "r"); await handle.sync(); await handle.close();
+        await rename(temporary, target.absolute);
+        const sourceMtime = Number(request.headers["x-nexus-source-mtime"]);
+        if (Number.isFinite(sourceMtime) && sourceMtime > 0) await utimes(target.absolute, new Date(sourceMtime), new Date(sourceMtime));
+        sendJson(response, 201, { uploaded: true, path: relativePath });
+      } catch (error) { await rm(temporary, { force: true }).catch(() => {}); throw error; }
       return;
     }
     if (path === "/v1/device/workstation/repository-profile" && request.method === "GET") {
       const device = await deviceService.authenticate(requireBearerToken(request));
       if (device.kind !== "workstation") throw statusError(403, "Device token is not a workstation token");
-      const settings = await repositorySettingsService.get();
-      if (settings.configured.exposure !== "lan") {
-        sendJson(response, 200, { mode: "remote", automatic: false });
-        return;
-      }
-      const authority = singleHeader(request.headers.host) || `127.0.0.1:${publicPort}`;
-      let controlHost;
-      try {
-        controlHost = new URL(`http://${authority}`).hostname;
-      } catch {
-        throw statusError(400, "Invalid Control host");
-      }
-      const repositoryHost = settings.configured.host || controlHost;
-      const repositoryPort = settings.configured.endpointPort || settings.configured.listenPort;
+      const workstation = (await workstationService.list()).find((item) => item.id === device.id);
+      const receiver = (await receiverUserService.list()).find((item) => item.workstationId === device.id);
+      if (!workstation?.policy?.repositoryId || !receiver) throw statusError(409, "Workstation repository is not configured");
       sendJson(response, 200, {
-        mode: "home",
-        automatic: true,
-        repository: `rest:http://${repositoryHost}:${repositoryPort}/${encodeURIComponent(device.id)}`,
-        insecureNoPassword: true,
-        autoInit: true,
+        mode: "flat-file",
+        repositoryId: workstation.policy.repositoryId,
+        destinationFolder: workstation.policy.destinationFolder || workstation.name,
       });
+      return;
+    }
+
+    if (path === "/dav" || path.startsWith("/dav/")) {
+      await proxyReceiverWebDav(request, response, path, url.search);
       return;
     }
     if (path === "/v1/device/workstation/poll" && request.method === "POST") {
@@ -192,7 +250,7 @@ const gateway = createServer(async (request, response) => {
       return;
     }
 
-    if (path === "/healthz" || path.startsWith("/v1/agent/")) {
+    if (path === "/healthz") {
       await proxy(request, response, url);
       return;
     }
@@ -204,7 +262,57 @@ const gateway = createServer(async (request, response) => {
       const upstream = await fetch(`${internalBase}/v1/local/info`, { headers: { accept: "application/json" } });
       const data = await upstream.json().catch(() => ({}));
       if (!upstream.ok) throw statusError(upstream.status, data.message || `Local info failed with ${upstream.status}`);
-      sendJson(response, 200, { ...data, localAuth: true, restoreExecution: true, transferRules: true, transferCleanup: true, transferTorrentGroups: true, deviceIntegration: true, workstationBackups: true, workstationRecovery: true, transferSchedulerIntervalMs, workstationSchedulerIntervalMs });
+      sendJson(response, 200, { ...data, localAuth: true, transferRules: true, transferCleanup: true, transferTorrentGroups: true, deviceIntegration: true, workstationBackups: true, transferSchedulerIntervalMs, workstationSchedulerIntervalMs });
+      return;
+    }
+    if (path === "/v1/local/remote-connection" && request.method === "GET") {
+      sendJson(response, 200, await remoteConnectionService.get());
+      return;
+    }
+    if (path === "/v1/local/remote-connection" && request.method === "PUT") {
+      sendJson(response, 200, await remoteConnectionService.update(await readJsonBody(request)));
+      return;
+    }
+
+    if (path === "/v1/local/repositories" && request.method === "GET") {
+      sendJson(response, 200, { repositories: await repositoryService.list() });
+      return;
+    }
+    if (path === "/v1/local/repositories" && request.method === "POST") {
+      sendJson(response, 201, { repository: await repositoryService.create(await readJsonBody(request)) });
+      return;
+    }
+    if (path === "/v1/local/repositories/browse" && request.method === "GET") {
+      sendJson(response, 200, await repositoryService.browse(url.searchParams.get("path") ?? ""));
+      return;
+    }
+    if (path === "/v1/local/repositories/folders" && request.method === "POST") {
+      const body = await readJsonBody(request);
+      sendJson(response, 201, await repositoryService.createFolder(body.path ?? "", body));
+      return;
+    }
+    if (path === "/v1/local/receiver-users" && request.method === "GET") {
+      sendJson(response, 200, { users: await receiverUserService.list() });
+      return;
+    }
+    if (path === "/v1/local/receiver-users" && request.method === "POST") {
+      sendJson(response, 201, await receiverUserService.create(await readJsonBody(request)));
+      return;
+    }
+    const receiverUserMatch = path.match(/^\/v1\/local\/receiver-users\/([^/]+)$/);
+    if (receiverUserMatch && request.method === "PATCH") {
+      const body = await readJsonBody(request);
+      sendJson(response, 200, { user: await receiverUserService.setEnabled(decodePathPart(receiverUserMatch[1]), body.enabled) });
+      return;
+    }
+    if (receiverUserMatch && request.method === "DELETE") {
+      sendJson(response, 200, await receiverUserService.remove(decodePathPart(receiverUserMatch[1])));
+      return;
+    }
+    const receiverResetMatch = path.match(/^\/v1\/local\/receiver-users\/([^/]+)\/reset-password$/);
+    if (receiverResetMatch && request.method === "POST") {
+      const body = await readJsonBody(request);
+      sendJson(response, 200, await receiverUserService.resetPassword(decodePathPart(receiverResetMatch[1]), body.password));
       return;
     }
 
@@ -237,13 +345,18 @@ const gateway = createServer(async (request, response) => {
     }
     if (path === "/v1/local/workstations/enroll" && request.method === "POST") {
       const body = await readJsonBody(request);
+      if (!body.repositoryId) throw statusError(400, "repositoryId is required when enrolling a workstation");
+      const repository = await repositoryService.get(body.repositoryId);
+      if (!repository) throw statusError(404, "Repository not found");
       const created = await deviceService.create({ name: body.name, kind: "workstation" });
+      const receiver = await receiverUserService.create({ username: body.name, repositoryId: repository.id, relativeSubpath: body.destinationFolder || body.name, kind: "workstation", workstationId: created.device.id });
+      await workstationService.putPolicy(created.device.id, { enabled: false, sourcePaths: [], repositoryId: repository.id, destinationFolder: body.destinationFolder || body.name });
       const origin = resolvePublicOrigin({
         configured: configuredPublicOrigin,
         host: singleHeader(request.headers.host),
         fallbackHost: `127.0.0.1:${publicPort}`,
       });
-      sendJson(response, 201, { ...created, installCommand: workstationInstallCommand(origin, created.token) });
+      sendJson(response, 201, { ...created, receiver: { username: receiver.user.username }, repository, installCommand: workstationInstallCommand(origin, created.token) });
       return;
     }
     const workstationSourceScanMatch = path.match(/^\/v1\/local\/workstations\/([^/]+)\/source-scan$/);
@@ -265,18 +378,8 @@ const gateway = createServer(async (request, response) => {
       sendJson(response, 202, { run: await workstationService.runNow(decodePathPart(workstationRunMatch[1])) });
       return;
     }
-    const workstationRecoveryRoute = workstationRecoveryHttp.match(request.method, path);
-    if (workstationRecoveryRoute) {
-      const body = workstationRecoveryRoute.method === "POST" && workstationRecoveryRoute.kind !== "inventory"
-        ? await readJsonBody(request)
-        : undefined;
-      const result = await workstationRecoveryHttp.execute(workstationRecoveryRoute, { searchParams: url.searchParams, body });
-      sendJson(response, result.status, result.body);
-      return;
-    }
-
     if (path === "/v1/local/transfers" && request.method === "GET") {
-      const config = await loadSanitizedAgentConfig(agentConfigPath);
+      const config = await loadSanitizedIntegrationConfig(integrationConfigPath);
       sendJson(response, 200, { rules: await transferService.list(), endpoints: config.endpoints ?? [], available: config.available });
       return;
     }
@@ -313,41 +416,6 @@ const gateway = createServer(async (request, response) => {
         sendJson(response, 200, { rule: await transferService.setEnabled(ruleId, body.enabled) });
         return;
       }
-    }
-
-    if (path === "/v1/local/restore-authorizations" && request.method === "POST") {
-      const body = await readJsonBody(request);
-      const scope = normalizeRestoreScope(body);
-      const localConfig = await loadRestoreConfig(agentConfigPath);
-      requireWriteTarget(scope.targetId, localConfig.restoreTargets);
-      await assertRecentRestorePreview(db, scope);
-      const expected = confirmationPhrase(scope);
-      if (body.confirmation !== expected) throw statusError(400, `Confirmation must exactly match: ${expected}`);
-      const grant = auth.issueRestoreGrant(session, scope);
-      sendJson(response, 201, { authorizationToken: grant.token, expiresAt: grant.expiresAt, scope });
-      return;
-    }
-
-    const restoreMatch = path.match(/^\/v1\/local\/repositories\/([^/]+)\/snapshots\/([^/]+)\/restore$/);
-    if (request.method === "POST" && restoreMatch) {
-      const body = await readJsonBody(request);
-      const scope = normalizeRestoreScope({
-        repositoryId: decodePathPart(restoreMatch[1]),
-        snapshotId: decodePathPart(restoreMatch[2]),
-        targetId: body.targetId,
-        path: body.path,
-      });
-      const restoreAuthorization = singleHeader(request.headers["x-nexus-restore-authorization"]);
-      auth.consumeRestoreGrant(session, restoreAuthorization, scope);
-      const localConfig = await loadRestoreConfig(agentConfigPath);
-      requireWriteTarget(scope.targetId, localConfig.restoreTargets);
-      sendJson(response, 202, await queueRestoreExecution(db, {
-        ...scope,
-        repositories: localConfig.repositories,
-        restoreTargets: localConfig.restoreTargets,
-        enqueueJob,
-      }));
-      return;
     }
 
     if ((path === "/" || path === "/index.html") && request.method === "GET") {
@@ -407,29 +475,35 @@ async function enqueueJob(input) {
   return data.job ?? data;
 }
 
-async function loadRestoreConfig(path) {
-  let parsed;
-  try { parsed = JSON.parse(await readFile(path, "utf8")); }
-  catch { throw statusError(409, "Agent config is unavailable"); }
-  const repositories = Array.isArray(parsed?.resticRepositories)
-    ? parsed.resticRepositories.filter(isRecord).map((item) => ({ id: stringId(item.id) })).filter((item) => item.id)
-    : [];
-  const restoreTargets = Array.isArray(parsed?.restoreTargets)
-    ? parsed.restoreTargets.filter(isRecord).map((item) => ({
-        id: stringId(item.id),
-        label: typeof item.label === "string" && item.label.trim() ? item.label.trim() : stringId(item.id),
-        overwrite: typeof item.overwrite === "string" && item.overwrite.trim() ? item.overwrite.trim() : "never",
-        writeEnabled: item.allowWrite === true,
-      })).filter((item) => item.id)
-    : [];
-  return { repositories, restoreTargets };
-}
-function requireWriteTarget(id, targets) {
-  const target = targets.find((candidate) => candidate.id === id);
-  if (!target) throw statusError(404, `Restore target not found: ${id}`);
-  if (target.overwrite !== "never") throw statusError(409, `Restore target ${id} is unsafe: overwrite must be never for staging-only restores`);
-  if (!target.writeEnabled) throw statusError(403, `Restore target is preview-only: ${id}`);
-  return target;
+async function proxyReceiverWebDav(request, response, path, search) {
+  const internalPort = process.env.NEXUS_BACKUP_WEBDAV_INTERNAL_PORT || "8383";
+  const visiblePath = path === "/dav" ? "" : path.slice(5);
+  const pathParts = visiblePath.split("/").filter(Boolean);
+  const displayUsername = decodePathPart(pathParts.shift() || "");
+  const authorization = singleHeader(request.headers.authorization);
+  const basic = typeof authorization === "string" ? authorization.match(/^Basic\s+(.+)$/i) : null;
+  if (displayUsername && basic) {
+    const credentials = Buffer.from(basic[1], "base64").toString("utf8");
+    const authenticatedUsername = credentials.slice(0, credentials.indexOf(":"));
+    if (authenticatedUsername !== displayUsername) throw statusError(403, "WebDAV receiver namespace mismatch");
+  }
+  // The public URL includes the receiver username for a stable client-facing
+  // address. SFTPGo authenticates the Basic credentials and assigns the home
+  // directory, so remove that display-only segment before proxying.
+  const backendPath = pathParts.length ? `/${pathParts.join("/")}` : "/";
+  const target = new URL(`${backendPath}${search}`, `http://127.0.0.1:${internalPort}`);
+  const headers = { ...request.headers, host: target.host, "x-forwarded-prefix": "/dav" };
+  delete headers.connection;
+  const upstream = await fetch(target, {
+    method: request.method,
+    headers,
+    body: ["GET", "HEAD"].includes(request.method) ? undefined : request,
+    duplex: "half",
+  });
+  response.statusCode = upstream.status;
+  for (const [name, value] of upstream.headers) if (!["connection", "transfer-encoding", "content-length"].includes(name.toLowerCase())) response.setHeader(name, value);
+  if (!upstream.body) { response.end(); return; }
+  await pipeline(upstream.body, response);
 }
 
 async function servePublic(path, response) {

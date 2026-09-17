@@ -22,18 +22,11 @@ var (
 const defaultConfigName = "workstation.json"
 
 type config struct {
-	ServerURL          string `json:"serverUrl"`
-	DeviceToken        string `json:"deviceToken"`
-	Repository         string `json:"repository"`
-	PasswordFile       string `json:"passwordFile"`
-	ResticPath         string `json:"resticPath"`
-	RestUsername       string `json:"restUsername,omitempty"`
-	RestPassword       string `json:"restPassword,omitempty"`
-	CACertPath         string `json:"caCertPath,omitempty"`
-	PollSeconds        int    `json:"pollSeconds"`
-	ReportSeconds      int    `json:"reportSeconds"`
-	AutoInit           bool   `json:"autoInit"`
-	InsecureNoPassword bool   `json:"insecureNoPassword,omitempty"`
+	ServerURL     string `json:"serverUrl"`
+	DeviceToken   string `json:"deviceToken"`
+	RepositoryID  string `json:"repositoryId,omitempty"`
+	PollSeconds   int    `json:"pollSeconds"`
+	ReportSeconds int    `json:"reportSeconds"`
 }
 
 type localState struct {
@@ -125,7 +118,7 @@ func (a *agent) run() error {
 
 func (a *agent) report() error {
 	hostname, _ := os.Hostname()
-	capabilities := []string{"workstation.backup.v1", "workstation.recovery.v1", "workstation.restore-staging.v1", "workstation.integrity.v1", "restic.v1", "windows-vss.v1"}
+	capabilities := []string{"workstation.backup.v1", "workstation.flat-file.v1", "windows-vss.v1"}
 	if runtime.GOOS == "windows" {
 		capabilities = append(capabilities, "workstation.source-scan.v1")
 	}
@@ -168,7 +161,7 @@ func (a *agent) reportStatus() error {
 	a.mu.Unlock()
 	status := workstationStatus{
 		RepositoryConfigured: a.repositoryReady(),
-		RepositoryKind:       repositoryKind(a.cfg.Repository),
+		RepositoryKind:       repositoryKindForConfig(a.cfg),
 		AgentState:           "idle",
 		LocalDrives:          availableDriveRoots(),
 		CurrentRunID:         runningID,
@@ -178,7 +171,7 @@ func (a *agent) reportStatus() error {
 		LastError:            state.LastError,
 	}
 	if !status.RepositoryConfigured {
-		status.AgentState = "needs-storage"
+		status.AgentState = "needs-repository"
 	} else if runningID != "" {
 		status.AgentState = "running"
 	}
@@ -229,7 +222,7 @@ func (a *agent) executeBackup(run workstationRun) {
 			return
 		}
 		if isStaleLease(err) {
-			log.Printf("run %s lease rejected as stale; cancelling local restic process", run.ID)
+			log.Printf("run %s lease rejected as stale; cancelling local backup", run.ID)
 			cancel()
 		}
 	}
@@ -254,7 +247,7 @@ func (a *agent) executeBackup(run workstationRun) {
 		}
 	}()
 
-	result := executeResticBackup(ctx, a.cfg, run, func(progress backupProgress) {
+	result := executeFlatFileBackup(ctx, a.cfg, run, func(progress backupProgress) {
 		err := a.client.reportProgress(run.ID, run.LeaseToken, progress)
 		if err != nil {
 			log.Printf("run %s progress report failed: %v", run.ID, err)
@@ -313,7 +306,7 @@ func (a *agent) executeBackup(run workstationRun) {
 }
 
 func (a *agent) repositoryReady() bool {
-	return validateRepositoryConfig(a.cfg) == nil
+	return strings.TrimSpace(a.cfg.RepositoryID) != "" && strings.TrimSpace(a.cfg.ServerURL) != "" && strings.TrimSpace(a.cfg.DeviceToken) != ""
 }
 
 func configPathFromArgs(args []string) string {
@@ -343,26 +336,12 @@ func loadConfig(path string) (config, error) {
 	}
 	cfg.ServerURL = strings.TrimRight(strings.TrimSpace(cfg.ServerURL), "/")
 	cfg.DeviceToken = strings.TrimSpace(cfg.DeviceToken)
-	cfg.Repository = strings.TrimSpace(cfg.Repository)
-	cfg.PasswordFile = strings.TrimSpace(cfg.PasswordFile)
-	cfg.ResticPath = strings.TrimSpace(cfg.ResticPath)
-	cfg.RestUsername = strings.TrimSpace(cfg.RestUsername)
-	cfg.RestPassword = strings.TrimSpace(cfg.RestPassword)
-	cfg.CACertPath = strings.TrimSpace(cfg.CACertPath)
+	cfg.RepositoryID = strings.TrimSpace(cfg.RepositoryID)
 	if cfg.ServerURL == "" || (!strings.HasPrefix(cfg.ServerURL, "http://") && !strings.HasPrefix(cfg.ServerURL, "https://")) {
 		return config{}, errors.New("serverUrl must be http(s)")
 	}
 	if len(cfg.DeviceToken) < 24 {
 		return config{}, errors.New("deviceToken is missing or invalid")
-	}
-	if (cfg.RestUsername == "") != (cfg.RestPassword == "") {
-		return config{}, errors.New("REST transport username and password must be configured together")
-	}
-	if cfg.CACertPath != "" && !filepath.IsAbs(cfg.CACertPath) {
-		return config{}, errors.New("caCertPath must be an absolute local path")
-	}
-	if cfg.ResticPath == "" {
-		cfg.ResticPath = "restic.exe"
 	}
 	if cfg.PollSeconds < 5 {
 		cfg.PollSeconds = 15
@@ -426,6 +405,13 @@ func repositoryKind(repository string) string {
 		}
 	}
 	return "remote"
+}
+
+func repositoryKindForConfig(cfg config) string {
+	if strings.TrimSpace(cfg.RepositoryID) != "" {
+		return "flat-file"
+	}
+	return ""
 }
 
 func agentVersion() string {

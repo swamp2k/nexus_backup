@@ -7,7 +7,7 @@ const OBJECT_STATES = ["discovered", "ignored", "queued", "retry_wait", "done", 
 const MAX_DISCOVERY_OBJECTS = 5000;
 const MAX_DISCOVERY_JSON = 700_000;
 
-export function createTransferRuleService({ db, enqueueJob, loadAgentConfig, now = () => new Date(), id = () => randomUUID() }) {
+export function createTransferRuleService({ db, enqueueJob, loadAgentConfig, repositories = null, executeRepositoryTransfer = null, executeRepositoryDiscovery = null, now = () => new Date(), id = () => randomUUID() }) {
   if (!db) throw new TypeError("db is required");
   if (typeof enqueueJob !== "function") throw new TypeError("enqueueJob is required");
 
@@ -56,18 +56,18 @@ export function createTransferRuleService({ db, enqueueJob, loadAgentConfig, now
 
   async function create(input) {
     const at = nowDate(now);
-    const value = await normalizeRuleInput(input, { loadAgentConfig });
+    const value = await normalizeRuleInput(input, { loadAgentConfig, repositories });
     const ruleId = typeof input?.id === "string" && input.id.trim() ? requireId(input.id, "id") : id();
     await db.prepare(`
       INSERT INTO transfer_rules (
-        id,name,enabled,source_endpoint_id,source_path,destination_endpoint_id,destination_path,
+        id,name,enabled,source_endpoint_id,source_path,destination_endpoint_id,destination_path,destination_repository_id,
         mode,initial_behavior,stability_seconds,scan_interval_seconds,cleanup_days,verification,
         multi_thread_streams,multi_thread_cutoff,retry_count,retry_wait_seconds,rclone_args_json,
         includes_json,excludes_json,rtorrent_gate_id,next_scan_at,created_at,updated_at
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     `).bind(
       ruleId, value.name, value.enabled ? 1 : 0,
-      value.sourceEndpointId, value.sourcePath, value.destinationEndpointId, value.destinationPath,
+      value.sourceEndpointId, value.sourcePath, value.destinationEndpointId, value.destinationPath, value.destinationRepositoryId,
       value.mode, value.initialBehavior, value.stabilitySeconds, value.scanIntervalSeconds,
       value.cleanupDays, value.verification, value.multiThreadStreams, value.multiThreadCutoff,
       value.retryCount, value.retryWaitSeconds, JSON.stringify(value.rcloneArgs),
@@ -81,11 +81,12 @@ export function createTransferRuleService({ db, enqueueJob, loadAgentConfig, now
     const existing = await get(ruleId);
     if (!existing) throw notFound(ruleId);
     const at = nowDate(now);
-    const value = await normalizeRuleInput(input, { loadAgentConfig });
+    const value = await normalizeRuleInput(input, { loadAgentConfig, repositories });
     const structuralChange = value.sourceEndpointId !== existing.sourceEndpointId
       || value.sourcePath !== existing.sourcePath
       || value.destinationEndpointId !== existing.destinationEndpointId
       || value.destinationPath !== existing.destinationPath
+      || value.destinationRepositoryId !== existing.destinationRepositoryId
       || value.mode !== existing.mode
       || value.initialBehavior !== existing.initialBehavior
       || value.rtorrentGateId !== existing.rtorrentGateId
@@ -100,7 +101,7 @@ export function createTransferRuleService({ db, enqueueJob, loadAgentConfig, now
     await db.batch([
       db.prepare(`
         UPDATE transfer_rules SET
-          name=?,enabled=?,source_endpoint_id=?,source_path=?,destination_endpoint_id=?,destination_path=?,
+          name=?,enabled=?,source_endpoint_id=?,source_path=?,destination_endpoint_id=?,destination_path=?,destination_repository_id=?,
           mode=?,initial_behavior=?,stability_seconds=?,scan_interval_seconds=?,cleanup_days=?,verification=?,
           multi_thread_streams=?,multi_thread_cutoff=?,retry_count=?,retry_wait_seconds=?,rclone_args_json=?,
           includes_json=?,excludes_json=?,rtorrent_gate_id=?,next_scan_at=?,updated_at=?,revision=revision+1,
@@ -108,7 +109,7 @@ export function createTransferRuleService({ db, enqueueJob, loadAgentConfig, now
         WHERE id=?
       `).bind(
         value.name, value.enabled ? 1 : 0,
-        value.sourceEndpointId, value.sourcePath, value.destinationEndpointId, value.destinationPath,
+        value.sourceEndpointId, value.sourcePath, value.destinationEndpointId, value.destinationPath, value.destinationRepositoryId,
         value.mode, value.initialBehavior, value.stabilitySeconds, value.scanIntervalSeconds,
         value.cleanupDays, value.verification, value.multiThreadStreams, value.multiThreadCutoff,
         value.retryCount, value.retryWaitSeconds, JSON.stringify(value.rcloneArgs),
@@ -150,6 +151,20 @@ export function createTransferRuleService({ db, enqueueJob, loadAgentConfig, now
 
   async function queueDiscovery(rule, at, manual) {
     const scheduled = rule.nextScanAt ?? at.toISOString();
+    if (typeof executeRepositoryDiscovery === "function") {
+      const result = await executeRepositoryDiscovery({
+        ruleId: rule.id,
+        sourceEndpointId: rule.sourceEndpointId,
+        sourcePath: rule.sourcePath,
+        includes: rule.includes,
+        excludes: rule.excludes,
+        ...(rule.rtorrentGateId ? { rtorrentGateId: rule.rtorrentGateId } : {}),
+      });
+      const nextScanAt = new Date(at.getTime() + rule.scanIntervalSeconds * 1000).toISOString();
+      await db.prepare(`UPDATE transfer_rules SET last_scan_started_at=?,last_scan_job_id=?,next_scan_at=?,last_error=NULL,updated_at=? WHERE id=?`)
+        .bind(at.toISOString(), result.job.id, nextScanAt, at.toISOString(), rule.id).run();
+      return result.job;
+    }
     const job = await enqueueJob({
       operationKey: manual ? `transfer-scan:${rule.id}:manual:${at.toISOString()}:${id()}` : `transfer-scan:${rule.id}:${scheduled}`,
       type: "rclone-discovery",
@@ -189,7 +204,7 @@ export function createTransferRuleService({ db, enqueueJob, loadAgentConfig, now
 
   async function queueReadyTransfers(at, limit, failures) {
     const rows = (await db.prepare(`
-      SELECT o.*,r.source_endpoint_id,r.source_path,r.destination_endpoint_id,r.destination_path,r.mode,
+      SELECT o.*,r.source_endpoint_id,r.source_path,r.destination_endpoint_id,r.destination_path,r.destination_repository_id,r.mode,
              r.verification,r.multi_thread_streams,r.multi_thread_cutoff,r.rclone_args_json,
              r.retry_count,r.retry_wait_seconds,r.cleanup_days,r.stability_seconds,r.last_scan_started_at
       FROM transfer_objects AS o
@@ -208,19 +223,24 @@ export function createTransferRuleService({ db, enqueueJob, loadAgentConfig, now
       const ruleId = String(row.rule_id), objectKey = String(row.object_key);
       try {
         const attempt = Number(row.attempt_count) + 1;
-        const job = await enqueueJob({
+        const payload = {
+          ruleId,
+          sourceEndpointId: String(row.source_endpoint_id), sourcePath: String(row.source_path),
+          destinationEndpointId: String(row.destination_endpoint_id), destinationPath: String(row.destination_path),
+          ...(row.destination_repository_id ? { destinationRepositoryId: String(row.destination_repository_id) } : {}),
+          mode: String(row.mode), verification: String(row.verification), transferAttempt: attempt,
+          multiThreadStreams: Number(row.multi_thread_streams), multiThreadCutoff: String(row.multi_thread_cutoff),
+          rcloneArgs: parseJsonArray(row.rclone_args_json),
+          items: [{ relPath: String(row.rel_path), size: Number(row.size), modTime: String(row.mod_time), objectKey }],
+        };
+        const jobResult = row.destination_repository_id && typeof executeRepositoryTransfer === "function"
+          ? await executeRepositoryTransfer(payload)
+          : { job: await enqueueJob({
           operationKey: `transfer:${ruleId}:${objectKey}:attempt:${attempt}`,
           type: "managed-transfer",
-          payload: {
-            ruleId,
-            sourceEndpointId: String(row.source_endpoint_id), sourcePath: String(row.source_path),
-            destinationEndpointId: String(row.destination_endpoint_id), destinationPath: String(row.destination_path),
-            mode: String(row.mode), verification: String(row.verification), transferAttempt: attempt,
-            multiThreadStreams: Number(row.multi_thread_streams), multiThreadCutoff: String(row.multi_thread_cutoff),
-            rcloneArgs: parseJsonArray(row.rclone_args_json),
-            items: [{ relPath: String(row.rel_path), size: Number(row.size), modTime: String(row.mod_time), objectKey }],
-          },
-        });
+          payload,
+        }) };
+        const job = jobResult.job;
         const changed = await db.prepare(`
           UPDATE transfer_objects SET state='queued',last_job_id=?,attempt_count=?,next_retry_at=NULL,last_error=NULL
           WHERE rule_id=? AND object_key=? AND state IN ('discovered','retry_wait')
@@ -331,13 +351,14 @@ export function normalizeTransferDiscoveryEvent(value, { expectedRuleId, now = n
   return { type: "transfer-discovery", tool: "rclone", ruleId, at: normalizeAt(value.at, now), entries };
 }
 
-export async function normalizeRuleInput(value, { loadAgentConfig } = {}) {
+export async function normalizeRuleInput(value, { loadAgentConfig, repositories } = {}) {
   if (!isRecord(value)) throw new RangeError("transfer rule must be an object");
   const result = {
     name: requireString(value.name, "name", 1, 120),
     enabled: value.enabled === undefined ? true : requireBoolean(value.enabled, "enabled"),
     sourceEndpointId: requireId(value.sourceEndpointId, "sourceEndpointId"), sourcePath: normalizeRelativeBase(value.sourcePath ?? ""),
-    destinationEndpointId: requireId(value.destinationEndpointId, "destinationEndpointId"), destinationPath: normalizeRelativeBase(value.destinationPath ?? ""),
+    destinationRepositoryId: value.destinationRepositoryId === undefined || value.destinationRepositoryId === null || value.destinationRepositoryId === "" ? null : requireId(value.destinationRepositoryId, "destinationRepositoryId"),
+    destinationEndpointId: value.destinationRepositoryId ? requireId(value.destinationEndpointId ?? "repository", "destinationEndpointId") : requireId(value.destinationEndpointId, "destinationEndpointId"), destinationPath: normalizeRelativeBase(value.destinationPath ?? ""),
     mode: value.mode === undefined ? "copy" : requireEnum(value.mode, new Set(["copy", "move"]), "mode"),
     initialBehavior: value.initialBehavior === undefined ? "ignore_existing" : requireEnum(value.initialBehavior, new Set(["ignore_existing", "process_existing"]), "initialBehavior"),
     stabilitySeconds: integerRange(value.stabilitySeconds ?? 600, "stabilitySeconds", 0, 604800),
@@ -350,15 +371,20 @@ export async function normalizeRuleInput(value, { loadAgentConfig } = {}) {
     rcloneArgs: normalizeArgs(value.rcloneArgs), includes: normalizePatterns(value.includes), excludes: normalizePatterns(value.excludes),
     rtorrentGateId: value.rtorrentGateId === undefined || value.rtorrentGateId === null || value.rtorrentGateId === "" ? null : requireId(value.rtorrentGateId, "rtorrentGateId"),
   };
+  if (result.destinationRepositoryId && !result.destinationPath) result.destinationPath = normalizeRelativeBase(result.name);
+  if (repositories && result.destinationRepositoryId) {
+    if (!await repositories.get(result.destinationRepositoryId)) throw new RangeError(`unknown destinationRepositoryId: ${result.destinationRepositoryId}`);
+    result.destinationEndpointId = "repository";
+  }
   if (result.sourceEndpointId === result.destinationEndpointId && result.sourcePath === result.destinationPath) throw new RangeError("transfer source and destination must be different");
   if (typeof loadAgentConfig === "function") {
     const config = await loadAgentConfig();
     if (!config?.available) throw new RangeError("agent config is unavailable");
     const endpoints = new Map((config.endpoints ?? []).map((item) => [item.id, item]));
     const gates = new Set((config.rtorrentGates ?? []).map((item) => item.id));
-    const source = endpoints.get(result.sourceEndpointId), destination = endpoints.get(result.destinationEndpointId);
+    const source = endpoints.get(result.sourceEndpointId), destination = result.destinationRepositoryId ? null : endpoints.get(result.destinationEndpointId);
     if (!source) throw new RangeError(`unknown sourceEndpointId: ${result.sourceEndpointId}`);
-    if (!destination) throw new RangeError(`unknown destinationEndpointId: ${result.destinationEndpointId}`);
+    if (!result.destinationRepositoryId && !destination) throw new RangeError(`unknown destinationEndpointId: ${result.destinationEndpointId}`);
     if (result.mode === "move" && source.allowMove !== true) throw new RangeError(`source endpoint does not allow move: ${result.sourceEndpointId}`);
     if (result.rtorrentGateId && !gates.has(result.rtorrentGateId)) throw new RangeError(`unknown rtorrentGateId: ${result.rtorrentGateId}`);
   }
@@ -368,7 +394,7 @@ export async function normalizeRuleInput(value, { loadAgentConfig } = {}) {
 function normalizeDiscoveryEntry(value) { if (!isRecord(value)) throw new RangeError("transfer discovery entry must be an object"); return { relPath: normalizeObjectPath(value.relPath), size: integerRange(value.size, "entry.size", 0, Number.MAX_SAFE_INTEGER), modTime: requireDate(value.modTime, "entry.modTime") }; }
 function objectKey(relPath, size, modTime) { return createHash("sha256").update(`${relPath}\0${size}\0${modTime}`).digest("hex"); }
 function objectRow(row) { return { objectKey:String(row.object_key),path:String(row.rel_path),size:Number(row.size),modTime:String(row.mod_time),state:String(row.state),firstSeenAt:String(row.first_seen_at),lastSeenAt:String(row.last_seen_at),stableSince:String(row.stable_since),attemptCount:Number(row.attempt_count),nextRetryAt:nullableString(row.next_retry_at),committedAt:nullableString(row.committed_at),cleanupAfter:nullableString(row.cleanup_after),error:nullableString(row.last_error),job:row.last_job_id==null?null:{id:String(row.last_job_id),state:nullableString(row.job_state),updatedAt:nullableString(row.job_updated_at),error:nullableString(row.job_error),progress:row.runtime_bytes_done==null?null:{bytesDone:Number(row.runtime_bytes_done),bytesTotal:row.runtime_bytes_total==null?null:Number(row.runtime_bytes_total),speedBytesPerSecond:row.runtime_speed==null?null:Number(row.runtime_speed),etaSeconds:row.runtime_eta==null?null:Number(row.runtime_eta)}}}; }
-function rowToRule(row, counts) { const scanJobId=nullableString(row.last_scan_job_id),scanState=nullableString(row.scan_job_state),normalizedCounts={};for(const state of OBJECT_STATES)normalizedCounts[state]=counts[state]??{count:0,bytes:0};return{id:String(row.id),name:String(row.name),enabled:Number(row.enabled)===1,sourceEndpointId:String(row.source_endpoint_id),sourcePath:String(row.source_path),destinationEndpointId:String(row.destination_endpoint_id),destinationPath:String(row.destination_path),mode:String(row.mode),initialBehavior:String(row.initial_behavior),stabilitySeconds:Number(row.stability_seconds),scanIntervalSeconds:Number(row.scan_interval_seconds),cleanupDays:Number(row.cleanup_days),verification:String(row.verification),multiThreadStreams:Number(row.multi_thread_streams),multiThreadCutoff:String(row.multi_thread_cutoff),retryCount:Number(row.retry_count),retryWaitSeconds:Number(row.retry_wait_seconds),rcloneArgs:parseJsonArray(row.rclone_args_json),includes:parseJsonArray(row.includes_json),excludes:parseJsonArray(row.excludes_json),rtorrentGateId:nullableString(row.rtorrent_gate_id),initializedAt:nullableString(row.initialized_at),nextScanAt:nullableString(row.next_scan_at),lastScanStartedAt:nullableString(row.last_scan_started_at),lastScanCompletedAt:nullableString(row.last_scan_completed_at),lastError:nullableString(row.last_error),revision:Number(row.revision),counts:normalizedCounts,lastScanJob:scanJobId?{id:scanJobId,state:scanState,terminal:scanState?TERMINAL_STATES.has(scanState):false,updatedAt:nullableString(row.scan_job_updated_at),finishedAt:nullableString(row.scan_job_finished_at),error:nullableString(row.scan_job_error)}:null,createdAt:String(row.created_at),updatedAt:String(row.updated_at)}; }
+function rowToRule(row, counts) { const scanJobId=nullableString(row.last_scan_job_id),scanState=nullableString(row.scan_job_state),normalizedCounts={};for(const state of OBJECT_STATES)normalizedCounts[state]=counts[state]??{count:0,bytes:0};return{id:String(row.id),name:String(row.name),enabled:Number(row.enabled)===1,sourceEndpointId:String(row.source_endpoint_id),sourcePath:String(row.source_path),destinationEndpointId:String(row.destination_endpoint_id),destinationPath:String(row.destination_path),destinationRepositoryId:nullableString(row.destination_repository_id),mode:String(row.mode),initialBehavior:String(row.initial_behavior),stabilitySeconds:Number(row.stability_seconds),scanIntervalSeconds:Number(row.scan_interval_seconds),cleanupDays:Number(row.cleanup_days),verification:String(row.verification),multiThreadStreams:Number(row.multi_thread_streams),multiThreadCutoff:String(row.multi_thread_cutoff),retryCount:Number(row.retry_count),retryWaitSeconds:Number(row.retry_wait_seconds),rcloneArgs:parseJsonArray(row.rclone_args_json),includes:parseJsonArray(row.includes_json),excludes:parseJsonArray(row.excludes_json),rtorrentGateId:nullableString(row.rtorrent_gate_id),initializedAt:nullableString(row.initialized_at),nextScanAt:nullableString(row.next_scan_at),lastScanStartedAt:nullableString(row.last_scan_started_at),lastScanCompletedAt:nullableString(row.last_scan_completed_at),lastError:nullableString(row.last_error),revision:Number(row.revision),counts:normalizedCounts,lastScanJob:scanJobId?{id:scanJobId,state:scanState,terminal:scanState?TERMINAL_STATES.has(scanState):false,updatedAt:nullableString(row.scan_job_updated_at),finishedAt:nullableString(row.scan_job_finished_at),error:nullableString(row.scan_job_error)}:null,createdAt:String(row.created_at),updatedAt:String(row.updated_at)}; }
 async function activeManagedJobs(db,ruleId){const rows=(await db.prepare(`SELECT id,state,payload_json FROM backup_jobs WHERE type='managed-transfer' AND state IN ('queued','leased','preparing','running','finalizing') ORDER BY created_at`).all()).results??[];return rows.flatMap(row=>{try{return JSON.parse(String(row.payload_json))?.ruleId===ruleId?[{id:String(row.id),state:String(row.state)}]:[]}catch{return[]}})}
 function normalizeObjectPath(value){const path=requireString(value,"entry.relPath",1,4096,false).replaceAll("\\","/").replace(/^\/+/,"").replace(/\/+$/,"");if(!path||path.split("/").some(part=>!part||part==="."||part===".."))throw new RangeError("entry.relPath must be a safe relative path");return path}
 function normalizeRelativeBase(value){if(typeof value!=="string")throw new RangeError("path must be a string");const n=value.trim().replaceAll("\\","/").replace(/^\/+|\/+$/g,"");if(!n)return"";if(n.split("/").some(part=>!part||part==="."||part===".."))throw new RangeError("path may not contain dot segments");if(n.length>2048)throw new RangeError("path is too long");return n}

@@ -1,5 +1,6 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import { nextScheduleAt } from "./backup-plans.mjs";
+import { nextScheduleAt } from "./schedules.mjs";
+import { safeName } from "./backup-paths.mjs";
 
 const ACTIVE_STATES = new Set(["queued", "leased", "running"]);
 const FINAL_STATES = new Set(["completed", "partial", "failed", "cancelled"]);
@@ -11,6 +12,8 @@ const SNAPSHOT_ID_RE = /^[0-9a-f]{8,64}$/i;
 export function createWorkstationService({
   db,
   deviceService,
+  repositories = null,
+  receiverUsers = null,
   now = () => new Date(),
   id = () => `wsrun-${randomUUID()}`,
   leaseToken = () => `nxbws_${randomBytes(24).toString("base64url")}`,
@@ -24,16 +27,18 @@ export function createWorkstationService({
       SELECT
         d.id,d.name,d.kind,d.enabled,d.version,d.hostname,d.platform,d.capabilities_json,d.first_seen_at,d.last_seen_at,
         p.enabled AS policy_enabled,p.source_paths_json,p.exclude_patterns_json,p.schedule_json,p.timezone,p.retention_json,
+        p.repository_id,p.destination_folder,repo.name AS repository_name,repo.relative_path AS repository_path,
         p.next_run_at,p.last_scheduled_at,p.last_run_id,
         s.repository_configured,s.repository_kind,s.agent_state,s.current_run_id,s.last_backup_at,s.last_success_at,
         s.last_snapshot_id,s.last_error AS status_error,s.local_drives_json,s.updated_at AS status_updated_at,
-        r.state AS last_run_state,r.queued_at AS last_run_queued_at,r.started_at AS last_run_started_at,
-        r.finished_at AS last_run_finished_at,r.progress_json AS last_run_progress_json,
-        r.result_json AS last_run_result_json,r.error_message AS last_run_error
+        wr.state AS last_run_state,wr.queued_at AS last_run_queued_at,wr.started_at AS last_run_started_at,
+        wr.finished_at AS last_run_finished_at,wr.progress_json AS last_run_progress_json,
+        wr.result_json AS last_run_result_json,wr.error_message AS last_run_error
       FROM managed_devices d
       LEFT JOIN workstation_policies p ON p.device_id=d.id
+      LEFT JOIN repositories repo ON repo.id=p.repository_id
       LEFT JOIN workstation_status s ON s.device_id=d.id
-      LEFT JOIN workstation_runs r ON r.id=p.last_run_id
+      LEFT JOIN workstation_runs wr ON wr.id=p.last_run_id
       WHERE d.kind='workstation'
       ORDER BY d.name COLLATE NOCASE ASC,d.id ASC
     `).all()).results ?? [];
@@ -49,6 +54,12 @@ export function createWorkstationService({
   async function putPolicy(deviceId, input) {
     const device = await requireWorkstation(deviceId);
     const policy = normalizePolicy(input);
+    if (repositories && !policy.repositoryId) throw statusError(400, "repositoryId is required for workstation backups");
+    if (repositories && policy.repositoryId) {
+      const repository = await repositories.get(policy.repositoryId);
+      if (!repository) throw statusError(404, "Repository not found");
+      await repositories.resolve(repository.id, policy.destinationFolder || device.name);
+    }
     const at = nowDate(now);
     const nextRunAt = policy.enabled && policy.sourcePaths.length
       ? nextScheduleAt(policy.schedule, policy.timezone, at).toISOString()
@@ -57,7 +68,7 @@ export function createWorkstationService({
     if (existing) {
       await db.prepare(`
         UPDATE workstation_policies SET enabled=?,source_paths_json=?,exclude_patterns_json=?,schedule_json=?,timezone=?,
-          retention_json=?,next_run_at=?,updated_at=? WHERE device_id=?
+          retention_json=?,repository_id=?,destination_folder=?,next_run_at=?,updated_at=? WHERE device_id=?
       `).bind(
         policy.enabled ? 1 : 0,
         JSON.stringify(policy.sourcePaths),
@@ -65,6 +76,8 @@ export function createWorkstationService({
         JSON.stringify(policy.schedule),
         policy.timezone,
         JSON.stringify(policy.retention),
+        policy.repositoryId,
+        policy.destinationFolder,
         nextRunAt,
         at.toISOString(),
         device.id,
@@ -72,8 +85,8 @@ export function createWorkstationService({
     } else {
       await db.prepare(`
         INSERT INTO workstation_policies(device_id,enabled,source_paths_json,exclude_patterns_json,schedule_json,timezone,
-          retention_json,next_run_at,created_at,updated_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?)
+          retention_json,repository_id,destination_folder,next_run_at,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
       `).bind(
         device.id,
         policy.enabled ? 1 : 0,
@@ -82,10 +95,15 @@ export function createWorkstationService({
         JSON.stringify(policy.schedule),
         policy.timezone,
         JSON.stringify(policy.retention),
+        policy.repositoryId,
+        policy.destinationFolder,
         nextRunAt,
         at.toISOString(),
         at.toISOString(),
       ).run();
+    }
+    if (receiverUsers && policy.repositoryId) {
+      await receiverUsers.updateWorkstationRoot(device.id, policy.repositoryId, policy.destinationFolder || device.name);
     }
     return await getPolicy(device.id);
   }
@@ -544,7 +562,11 @@ function normalizePolicy(value) {
     keepWeekly: retentionInteger(retentionValue.keepWeekly, 4, "retention.keepWeekly"),
     keepMonthly: retentionInteger(retentionValue.keepMonthly, 12, "retention.keepMonthly"),
   };
-  return { enabled, sourcePaths, excludePatterns, schedule, timezone, retention };
+  const repositoryId = value.repositoryId === undefined || value.repositoryId === null || value.repositoryId === ""
+    ? null : requireId(value.repositoryId, "repositoryId");
+  const destinationFolder = value.destinationFolder === undefined || value.destinationFolder === null || value.destinationFolder === ""
+    ? null : safeName(value.destinationFolder, "destinationFolder");
+  return { enabled, sourcePaths, excludePatterns, schedule, timezone, retention, repositoryId, destinationFolder };
 }
 
 function normalizeSchedule(value) {
@@ -755,6 +777,9 @@ function presentWorkstation(row) {
     schedule: parseJson(row.schedule_json, { kind: "daily", time: "02:00" }), timezone: String(row.timezone),
     retention: parseJson(row.retention_json, { keepDaily: 7, keepWeekly: 4, keepMonthly: 12 }),
     nextRunAt: nullableString(row.next_run_at), lastScheduledAt: nullableString(row.last_scheduled_at),
+    repositoryId: nullableString(row.repository_id), repositoryName: nullableString(row.repository_name),
+    destinationFolder: nullableString(row.destination_folder), destinationPath: row.repository_path && row.destination_folder
+      ? `/backup/${row.repository_path}/${row.destination_folder}` : null,
   };
   const lastRun = row.last_run_id ? {
     id: String(row.last_run_id), state: nullableString(row.last_run_state), queuedAt: nullableString(row.last_run_queued_at),

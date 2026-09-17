@@ -4,7 +4,7 @@ const JOB_STATES = new Set([
   "queued", "leased", "preparing", "running", "finalizing",
   "completed", "partial", "failed", "cancelled", "interrupted",
 ]);
-const KNOWN_STORAGE_KINDS = new Set(["local", "sftp", "rest", "s3", "azure", "gs", "rclone", "swift", "b2", "opendal"]);
+const KNOWN_STORAGE_KINDS = new Set(["local", "sftp", "s3", "azure", "gs", "rclone", "swift", "b2", "opendal"]);
 
 export async function listJobs(db, { limit = 100, state } = {}) {
   const normalizedLimit = clampInteger(limit, 1, 500, 100);
@@ -39,29 +39,13 @@ export async function listJobs(db, { limit = 100, state } = {}) {
   return (result.results ?? []).map(rowToJob);
 }
 
-export async function listAgents(db) {
-  const result = await db.prepare(`
-    SELECT id, name, enabled, created_at, last_seen_at, version
-    FROM backup_agents
-    ORDER BY id ASC
-  `).all();
-  return (result.results ?? []).map((row) => ({
-    id: String(row.id),
-    name: row.name === null ? null : String(row.name),
-    enabled: Number(row.enabled) === 1,
-    createdAt: String(row.created_at),
-    lastSeenAt: row.last_seen_at === null ? null : String(row.last_seen_at),
-    version: row.version === null ? null : String(row.version),
-  }));
-}
-
-export async function loadSanitizedAgentConfig(path) {
+export async function loadSanitizedIntegrationConfig(path) {
   let raw;
   try {
     raw = await readFile(path, "utf8");
   } catch (error) {
     if (error?.code === "ENOENT") {
-      return { available: false, sources: [], repositories: [], restoreTargets: [], endpoints: [], rtorrentGates: [] };
+      return { available: false, sources: [], endpoints: [], rtorrentGates: [] };
     }
     throw error;
   }
@@ -74,8 +58,6 @@ export async function loadSanitizedAgentConfig(path) {
       available: false,
       invalid: true,
       sources: [],
-      repositories: [],
-      restoreTargets: [],
       endpoints: [],
       rtorrentGates: [],
     };
@@ -86,8 +68,6 @@ export async function loadSanitizedAgentConfig(path) {
       available: false,
       invalid: true,
       sources: [],
-      repositories: [],
-      restoreTargets: [],
       endpoints: [],
       rtorrentGates: [],
     };
@@ -96,8 +76,6 @@ export async function loadSanitizedAgentConfig(path) {
   return {
     available: true,
     sources: sanitizeSources(value.sources),
-    repositories: sanitizeRepositories(value.resticRepositories),
-    restoreTargets: sanitizeRestoreTargets(value.restoreTargets),
     endpoints: sanitizeEndpoints(value.rcloneEndpoints),
     rtorrentGates: sanitizeRtorrentGates(value.rtorrentGates),
   };
@@ -114,36 +92,6 @@ function sanitizeSources(value) {
         : [],
     }))
     .filter((source) => source.id);
-}
-
-function sanitizeRepositories(value) {
-  if (!Array.isArray(value)) return [];
-  return value
-    .filter(isRecord)
-    .map((repository) => ({
-      id: stringOrEmpty(repository.id),
-      kind: storageKind(repository.repository),
-      passwordProtected: typeof repository.passwordFile === "string" && repository.passwordFile.trim().length > 0,
-      cacheConfigured: isRecord(repository.environment)
-        && typeof repository.environment.RESTIC_CACHE_DIR === "string"
-        && repository.environment.RESTIC_CACHE_DIR.trim().length > 0,
-    }))
-    .filter((repository) => repository.id);
-}
-
-function sanitizeRestoreTargets(value) {
-  if (!Array.isArray(value)) return [];
-  return value
-    .filter(isRecord)
-    .map((target) => {
-      const id = stringOrEmpty(target.id);
-      const label = stringOrEmpty(target.label) || id;
-      const overwrite = ["always", "if-changed", "if-newer", "never"].includes(target.overwrite)
-        ? target.overwrite
-        : "never";
-      return { id, label, overwrite, writeEnabled: target.allowWrite === true };
-    })
-    .filter((target) => target.id);
 }
 
 function sanitizeEndpoints(value) {

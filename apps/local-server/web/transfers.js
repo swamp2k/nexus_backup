@@ -8,6 +8,8 @@ const toastStack=document.querySelector("#toast-stack");
 const ACTIVE=new Set(["queued","leased","preparing","running","finalizing"]);
 let rules=[];
 let endpoints=[];
+let repositories=[];
+let rtorrentGates=[];
 let available=false;
 let loading=false;
 let editing=null;
@@ -39,7 +41,6 @@ function activate(){
     return;
   }
   document.querySelectorAll("[data-view]").forEach(item=>item.classList.remove("active"));
-  document.querySelector("#plans-nav")?.classList.remove("active");
   nav?.classList.add("active");
   if(title)title.textContent="Transfers";
   if(eyebrow)eyebrow.textContent="Copyarr engine";
@@ -52,8 +53,8 @@ async function refresh(quiet=false){
   if(loading)return;loading=true;
   if(!quiet&&isActive())refreshButton.textContent="Refreshing…";
   try{
-    const result=await api("/v1/local/transfers");
-    rules=result.rules??[];endpoints=result.endpoints??[];available=Boolean(result.available);
+    const [result,repositoryResult,configResult]=await Promise.all([api("/v1/local/transfers"),api("/v1/local/repositories"),api("/v1/local/config")]);
+    rules=result.rules??[];endpoints=result.endpoints??[];repositories=repositoryResult.repositories??[];rtorrentGates=configResult.rtorrentGates??[];available=Boolean(result.available);
     render();
     for(const id of expanded)void loadObjects(id,true);
   }catch(error){if(!quiet)toast("Transfers refresh failed",error.message,true)}
@@ -63,7 +64,6 @@ async function refresh(quiet=false){
 function render(){
   if(!isActive())return;
   document.querySelectorAll("[data-view]").forEach(item=>item.classList.remove("active"));
-  document.querySelector("#plans-nav")?.classList.remove("active");
   nav?.classList.add("active");
   if(title)title.textContent="Transfers";
   if(eyebrow)eyebrow.textContent="Copyarr engine";
@@ -76,7 +76,7 @@ function render(){
     <div class="transfer-hero"><div><p class="eyebrow">Persistent transfer automation</p><h2>Transfer rules</h2><p>Discover new objects, wait until they are stable, stage and verify them, then commit to the destination. State survives restarts.</p></div><span class="badge success">Copyarr recipe</span></div>
     <div class="grid metrics">${metric("Enabled",enabled,`${rules.length} rules`)}${metric("Waiting",waiting,"Stable/discovery queue",waiting?"warn":"")}${metric("Active",active,"Queued or transferring",active?"blue":"")}${metric("Failed",failed,failed?"Needs attention":"No failed objects",failed?"danger":"")}</div>
     <div class="transfer-stack section-gap">${rules.map(ruleCard).join("")||empty()}</div>
-    <div class="transfer-note"><strong>Current M5 safety boundary:</strong> staging + exact-size verification + commit is active. Move deletes only the exact source files after final verification. Cleanup-days are stored as policy but destination cleanup is not executed yet; rTorrent-complete gating is the next slice.</div>
+    <div class="transfer-note"><strong>Transfer safety boundary:</strong> staging + exact-size verification + commit is active. Move deletes only the exact source files after final verification. Cleanup-days are stored as policy; optional rTorrent readiness gates can hold incomplete torrent files until completion.</div>
   </div>`;
   bindActions();
 }
@@ -85,7 +85,7 @@ function ruleCard(rule){
   const open=expanded.has(rule.id);
   const scanActive=rule.lastScanJob&&ACTIVE.has(rule.lastScanJob.state);
   const source=`${rule.sourceEndpointId}${rule.sourcePath?`/${rule.sourcePath}`:""}`;
-  const destination=`${rule.destinationEndpointId}${rule.destinationPath?`/${rule.destinationPath}`:""}`;
+  const destination=rule.destinationRepositoryId?`${repositories.find(repo=>repo.id===rule.destinationRepositoryId)?.name||rule.destinationRepositoryId}${rule.destinationPath?`/${rule.destinationPath}`:""}`:`${rule.destinationEndpointId}${rule.destinationPath?`/${rule.destinationPath}`:""}`;
   const total=count(rule,"done")+count(rule,"discovered")+count(rule,"ignored")+count(rule,"queued")+count(rule,"retry_wait")+count(rule,"failed")+count(rule,"cancelled")+count(rule,"superseded");
   return `<section class="card transfer-card" data-rule="${attr(rule.id)}">
     <div class="transfer-head"><div class="transfer-title"><span class="transfer-state${rule.enabled?"":" paused"}"></span><div><h2>${esc(rule.name)}</h2><span>${esc(rule.mode.toUpperCase())} · ${rule.enabled?"Enabled":"Paused"}</span></div></div><div class="transfer-actions"><span class="badge ${scanActive?"blue":rule.lastError?"danger":rule.initializedAt?"success":"warn"}">${scanActive?"Scanning":rule.lastError?"Scan failed":rule.initializedAt?"Watching":"Not initialized"}</span><button class="button ghost compact" data-action="scan" data-id="${attr(rule.id)}" ${scanActive||!rule.enabled?"disabled":""}>${scanActive?"Scanning…":"Scan now"}</button><button class="button ghost compact" data-action="edit" data-id="${attr(rule.id)}">Edit</button><button class="button ghost compact" data-action="toggle" data-id="${attr(rule.id)}">${rule.enabled?"Pause":"Enable"}</button></div></div>
@@ -145,14 +145,15 @@ async function loadObjects(ruleId,quiet=true){
 }
 
 function openEditor(rule=null){
-  if(!available){toast("Agent config unavailable","Wait for the local agent configuration before creating a transfer rule.",true);return;}
-  ensureModal();editing=rule;modal.classList.remove("hidden");
+  if(!available){toast("Local configuration unavailable","Wait for the local configuration before creating a transfer rule.",true);return;}
+  ensureModal();ensureDestinationRepositoryField();editing=rule;modal.classList.remove("hidden");
   modal.querySelector("#transfer-modal-title").textContent=rule?"Edit transfer rule":"New transfer rule";
   field("name").value=rule?.name||"";
   field("sourceEndpointId").value=rule?.sourceEndpointId||endpoints[0]?.id||"";
   field("sourcePath").value=rule?.sourcePath||"";
-  field("destinationEndpointId").value=rule?.destinationEndpointId||endpoints[1]?.id||endpoints[0]?.id||"";
+  field("destinationEndpointId").value=rule?.destinationRepositoryId?endpoints[0]?.id||"":rule?.destinationEndpointId||endpoints[1]?.id||endpoints[0]?.id||"";
   field("destinationPath").value=rule?.destinationPath||"";
+  field("destinationRepositoryId").value=rule?.destinationRepositoryId||"";
   field("mode").value=rule?.mode||"copy";
   field("initialBehavior").value=rule?.initialBehavior||"ignore_existing";
   field("stabilitySeconds").value=rule?.stabilitySeconds??600;
@@ -165,15 +166,25 @@ function openEditor(rule=null){
   field("rcloneArgs").value=(rule?.rcloneArgs??[]).join("\n");
   field("includes").value=(rule?.includes??[]).join("\n");
   field("excludes").value=(rule?.excludes??[]).join("\n");
+  field("rtorrentGateId").innerHTML=`<option value="">Stability window only</option>${rtorrentGates.map(gate=>`<option value="${attr(gate.id)}">${esc(gate.id)} · ${gate.required?"required":"fallback allowed"}</option>`).join("")}`;
+  field("rtorrentGateId").value=rule?.rtorrentGateId||"";
   field("enabled").checked=rule?.enabled??true;
   updateMoveHint();
 }
 function closeEditor(){modal?.classList.add("hidden");editing=null;}
 
+function ensureDestinationRepositoryField(){
+  if(form.elements.namedItem("destinationRepositoryId"))return;
+  const endpoint=field("destinationEndpointId");
+  const label=document.createElement("label");
+  label.innerHTML=`<span>Destination repository <small>optional</small></span><select name="destinationRepositoryId"><option value="">Use endpoint</option>${repositories.map(repo=>`<option value="${attr(repo.id)}">${esc(repo.name)}</option>`).join("")}</select>`;
+  endpoint.closest("label")?.after(label);
+}
+
 function ensureModal(){
   if(modal)return;
   const shell=document.createElement("div");
-  shell.innerHTML=`<div class="modal-backdrop hidden" id="transfer-modal"><section class="modal transfer-modal" role="dialog" aria-modal="true" aria-labelledby="transfer-modal-title"><div class="modal-header"><div><p class="eyebrow">Copyarr engine</p><h2 id="transfer-modal-title">New transfer rule</h2></div><button class="icon-button" type="button" data-close>×</button></div><form id="transfer-form"><p class="transfer-modal-copy">Rules reference configured rclone endpoints by ID. Existing files can be ignored on bootstrap so only new generations are automated.</p><div class="transfer-form-grid"><label class="full"><span>Name</span><input name="name" maxlength="120" required placeholder="Seedbox → downloads"></label><label><span>Source endpoint</span><select name="sourceEndpointId" required>${endpointOptions()}</select></label><label><span>Source subpath</span><input name="sourcePath" placeholder="rtorrent/complete"></label><label><span>Destination endpoint</span><select name="destinationEndpointId" required>${endpointOptions()}</select></label><label><span>Destination subpath</span><input name="destinationPath" placeholder="downloads"></label><label><span>Mode</span><select name="mode"><option value="copy">Copy</option><option value="move">Move after verified commit</option></select><small id="move-hint"></small></label><label><span>First scan</span><select name="initialBehavior"><option value="ignore_existing">Ignore existing</option><option value="process_existing">Process existing</option></select></label><label><span>Scan every (seconds)</span><input name="scanIntervalSeconds" type="number" min="15" max="86400" required></label><label><span>Stable for (seconds)</span><input name="stabilitySeconds" type="number" min="0" max="604800" required></label><label><span>Retry count</span><input name="retryCount" type="number" min="0" max="20" required></label><label><span>Retry wait (seconds)</span><input name="retryWaitSeconds" type="number" min="0" max="86400" required></label><label><span>Multi-thread streams</span><input name="multiThreadStreams" type="number" min="1" max="32" required></label><label><span>Multi-thread cutoff</span><input name="multiThreadCutoff" maxlength="32" required placeholder="256M"></label><label><span>Cleanup days <small>policy only</small></span><input name="cleanupDays" type="number" min="0" max="3650" required></label><label class="full"><span>Extra rclone args <small>one argument per line; safety-critical flags are blocked</small></span><textarea name="rcloneArgs" rows="3" placeholder="--bwlimit\n50M"></textarea></label><label class="full"><span>Include patterns <small>one per line or comma; includes win</small></span><textarea name="includes" rows="3" placeholder="*.mkv\nshows/**"></textarea></label><label class="full"><span>Exclude patterns</span><textarea name="excludes" rows="3" placeholder="*.part\n**/sample/**"></textarea></label><label class="enabled-row full"><input type="checkbox" name="enabled"><span>Enabled</span></label></div><div class="modal-actions"><button type="button" class="button ghost" data-close>Cancel</button><button type="submit" class="button primary">Save rule</button></div></form></section></div>`;
+  shell.innerHTML=`<div class="modal-backdrop hidden" id="transfer-modal"><section class="modal transfer-modal" role="dialog" aria-modal="true" aria-labelledby="transfer-modal-title"><div class="modal-header"><div><p class="eyebrow">Copyarr engine</p><h2 id="transfer-modal-title">New transfer rule</h2></div><button class="icon-button" type="button" data-close>×</button></div><form id="transfer-form"><p class="transfer-modal-copy">Rules reference configured rclone endpoints by ID. Existing files can be ignored on bootstrap so only new generations are automated.</p><div class="transfer-form-grid"><label class="full"><span>Name</span><input name="name" maxlength="120" required placeholder="Seedbox → downloads"></label><label><span>Source endpoint</span><select name="sourceEndpointId" required>${endpointOptions()}</select></label><label><span>Source subpath</span><input name="sourcePath" placeholder="rtorrent/complete"></label><label><span>Destination endpoint</span><select name="destinationEndpointId" required>${endpointOptions()}</select></label><label><span>Destination subpath</span><input name="destinationPath" placeholder="downloads"></label><label><span>Mode</span><select name="mode"><option value="copy">Copy</option><option value="move">Move after verified commit</option></select><small id="move-hint"></small></label><label><span>First scan</span><select name="initialBehavior"><option value="ignore_existing">Ignore existing</option><option value="process_existing">Process existing</option></select></label><label><span>Scan every (seconds)</span><input name="scanIntervalSeconds" type="number" min="15" max="86400" required></label><label><span>Stable for (seconds)</span><input name="stabilitySeconds" type="number" min="0" max="604800" required></label><label><span>Retry count</span><input name="retryCount" type="number" min="0" max="20" required></label><label><span>Retry wait (seconds)</span><input name="retryWaitSeconds" type="number" min="0" max="86400" required></label><label><span>Multi-thread streams</span><input name="multiThreadStreams" type="number" min="1" max="32" required></label><label><span>Multi-thread cutoff</span><input name="multiThreadCutoff" maxlength="32" required placeholder="256M"></label><label><span>Cleanup days <small>policy only</small></span><input name="cleanupDays" type="number" min="0" max="3650" required></label><label class="full"><span>Extra rclone args <small>one argument per line; safety-critical flags are blocked</small></span><textarea name="rcloneArgs" rows="3" placeholder="--bwlimit\n50M"></textarea></label><label class="full"><span>Include patterns <small>one per line or comma; includes win</small></span><textarea name="includes" rows="3" placeholder="*.mkv\nshows/**"></textarea></label><label class="full"><span>Exclude patterns</span><textarea name="excludes" rows="3" placeholder="*.part\n**/sample/**"></textarea></label><label class="full"><span>rTorrent readiness <small>optional</small></span><select name="rtorrentGateId"></select><small>Only the gate ID is stored. RPC addresses and credentials remain local to the appliance.</small></label><label class="enabled-row full"><input type="checkbox" name="enabled"><span>Enabled</span></label></div><div class="modal-actions"><button type="button" class="button ghost" data-close>Cancel</button><button type="submit" class="button primary">Save rule</button></div></form></section></div>`;
   modal=shell.firstElementChild;document.body.append(modal);form=modal.querySelector("#transfer-form");
   modal.querySelectorAll("[data-close]").forEach(button=>button.addEventListener("click",closeEditor));
   modal.addEventListener("click",event=>{if(event.target===modal)closeEditor()});
@@ -194,7 +205,10 @@ async function save(event){
       multiThreadStreams:Number(data.get("multiThreadStreams")),multiThreadCutoff:String(data.get("multiThreadCutoff")||"256M"),
       retryCount:Number(data.get("retryCount")),retryWaitSeconds:Number(data.get("retryWaitSeconds")),
       rcloneArgs:lines(data.get("rcloneArgs")),includes:patterns(data.get("includes")),excludes:patterns(data.get("excludes")),
+      rtorrentGateId:String(data.get("rtorrentGateId")||"")||null,
     };
+    payload.destinationRepositoryId=String(data.get("destinationRepositoryId")||"")||null;
+    if(payload.destinationRepositoryId)payload.destinationEndpointId="repository";
     if(editing)await api(`/v1/local/transfers/${encodeURIComponent(editing.id)}`,{method:"PUT",body:payload});else await api("/v1/local/transfers",{method:"POST",body:payload});
     toast(editing?"Transfer rule updated":"Transfer rule created",payload.name);closeEditor();await refresh(true);
   }catch(error){toast("Could not save transfer rule",error.message,true)}finally{button.disabled=false;button.textContent="Save rule";}
