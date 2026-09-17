@@ -485,10 +485,19 @@ async function enqueueJob(input) {
 async function proxyReceiverWebDav(request, response, path, search) {
   const internalPort = process.env.NEXUS_BACKUP_WEBDAV_INTERNAL_PORT || "8383";
   const visiblePath = path === "/dav" ? "" : path.slice(5);
+  const pathParts = visiblePath.split("/").filter(Boolean);
+  const displayUsername = decodePathPart(pathParts.shift() || "");
+  const authorization = singleHeader(request.headers.authorization);
+  const basic = typeof authorization === "string" ? authorization.match(/^Basic\s+(.+)$/i) : null;
+  if (displayUsername && basic) {
+    const credentials = Buffer.from(basic[1], "base64").toString("utf8");
+    const authenticatedUsername = credentials.slice(0, credentials.indexOf(":"));
+    if (authenticatedUsername !== displayUsername) throw statusError(403, "WebDAV receiver namespace mismatch");
+  }
   // The public URL includes the receiver username for a stable client-facing
   // address. SFTPGo authenticates the Basic credentials and assigns the home
   // directory, so remove that display-only segment before proxying.
-  const backendPath = visiblePath.includes("/") ? `/${visiblePath.slice(visiblePath.indexOf("/") + 1)}` : "/";
+  const backendPath = pathParts.length ? `/${pathParts.join("/")}` : "/";
   const target = new URL(`${backendPath}${search}`, `http://127.0.0.1:${internalPort}`);
   const headers = { ...request.headers, host: target.host, "x-forwarded-prefix": "/dav" };
   delete headers.connection;
