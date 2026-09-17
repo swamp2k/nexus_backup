@@ -158,6 +158,7 @@ function installWorkstationDashboard() {
           const row = document.createElement("div"); row.className = "ws-source-row";
           const hasChildren = (children.get(node.path) || []).length > 0;
           row.innerHTML = `<button type="button" class="icon-button compact" data-expand ${hasChildren ? "" : "disabled"}>${hasChildren ? "▸" : "·"}</button><label><input type="checkbox" data-path value="${attr(node.path)}" ${selected.has(node.path) ? "checked" : ""}> <strong>${esc(node.name)}</strong></label><span>${bytes(node.bytes)} · ${node.files} files${node.inaccessible ? " · inaccessible" : ""}</span>`;
+          row.querySelector("[data-path]").addEventListener("change", (event) => { if (event.currentTarget.checked) selected.add(node.path); else selected.delete(node.path); });
           host.append(row);
           if (hasChildren) {
             const child = document.createElement("div"); child.className = "ws-source-children"; child.hidden = true; host.append(child);
@@ -183,7 +184,7 @@ function installWorkstationDashboard() {
       finally { event.currentTarget.disabled = false; }
     });
     modal.querySelector("[data-save]")?.addEventListener("click", async (event) => {
-      const paths = compactSourcePaths([...modal.querySelectorAll("[data-path]:checked")].map((item) => item.value));
+      const paths = compactSourcePaths([...selected]);
       if (!paths.length) { toast("No backup folders selected", "Choose at least one folder from the saved scan.", true); return; }
       const policy = ws.policy || {};
       event.currentTarget.disabled = true;

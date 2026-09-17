@@ -13,7 +13,7 @@ function Download-VerifiedAsset([string]$Url, [string]$ChecksumUrl, [string]$Des
   } finally { Remove-Item $checksumPath -Force -ErrorAction SilentlyContinue }
 }
 function Get-OptionalProperty($Object, [string]$Name) { if ($null -eq $Object) { return $null }; $property = $Object.PSObject.Properties[$Name]; if ($null -eq $property) { return $null }; return $property.Value }
-function Write-Config([string]$Path, [System.Collections.IDictionary]$Config) { $Config | ConvertTo-Json -Depth 6 | Set-Content -Path $Path -Encoding utf8 }
+function Write-Config([string]$Path, [System.Collections.IDictionary]$Config) { $json = $Config | ConvertTo-Json -Depth 6; [IO.File]::WriteAllText($Path, $json, (New-Object Text.UTF8Encoding($false))) }
 
 $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { Fail 'Administrator/System rights are required.' }
