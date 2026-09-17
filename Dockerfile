@@ -23,7 +23,7 @@ COPY apps ./apps
 RUN npm ci --ignore-scripts
 RUN npm run build
 
-FROM node:22-alpine AS runtime
+FROM node:22-bookworm-slim AS runtime
 ARG NEXUS_BACKUP_VERSION=dev
 ARG NEXUS_BACKUP_REVISION=unknown
 LABEL org.opencontainers.image.title="Nexus Backup" \
@@ -31,13 +31,14 @@ LABEL org.opencontainers.image.title="Nexus Backup" \
       org.opencontainers.image.source="https://github.com/swamp2k/nexus_backup" \
       org.opencontainers.image.version="$NEXUS_BACKUP_VERSION" \
       org.opencontainers.image.revision="$NEXUS_BACKUP_REVISION"
-RUN apk add --no-cache \
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
       ca-certificates \
       curl \
       fuse3 \
-      gcompat \
       rclone \
       tini \
+    && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /usr/local/lib/nexus-receivers /etc/sftpgo /var/lib/sftpgo /srv/sftpgo/data /srv/sftpgo/backups
 
 WORKDIR /app
@@ -93,4 +94,4 @@ ENV NEXUS_BACKUP_VERSION=$NEXUS_BACKUP_VERSION \
     SFTPGO_DATA_PROVIDER__USERS_BASE_DIR=/backup
 
 EXPOSE 8787 2222 2121 50000-50010
-ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/nexus-backup-entrypoint"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/nexus-backup-entrypoint"]
