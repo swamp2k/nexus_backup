@@ -104,8 +104,9 @@ jobs:
         run: |
           set -euo pipefail
           docker run --rm --entrypoint sh nexus-backup:ci -ec '
-            test -s /app/apps/local-server/web/workstation/nexus-backup-workstation-windows-amd64.exe
-            sha256sum -c /app/apps/local-server/web/workstation/nexus-backup-workstation-windows-amd64.exe.sha256
+            cd /app/apps/local-server/web/workstation
+            test -s nexus-backup-workstation-windows-amd64.exe
+            sha256sum -c nexus-backup-workstation-windows-amd64.exe.sha256
             test -s /usr/local/bin/sftpgo
             test -s /app/apps/local-server/bin/gateway.mjs
             ! find /app /usr/local/bin -maxdepth 4 -type f \( -iname "*restic*" -o -iname "*rest-server*" \) | grep .
