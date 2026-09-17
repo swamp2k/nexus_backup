@@ -17,9 +17,6 @@ const activeStates = new Set(["leased", "preparing", "running", "finalizing"]);
 const content = document.querySelector("#content");
 const pageTitle = document.querySelector("#page-title");
 const connectionPill = document.querySelector("#connection-pill");
-const jobModal = document.querySelector("#job-modal");
-const jobFields = document.querySelector("#job-fields");
-const jobForm = document.querySelector("#job-form");
 const drawer = document.querySelector("#job-drawer");
 const drawerTitle = document.querySelector("#drawer-title");
 const drawerContent = document.querySelector("#drawer-content");
@@ -34,13 +31,10 @@ setInterval(() => void refreshAll({ quiet: true }), 5000);
 function bindStaticEvents() {
   document.querySelectorAll("[data-view]").forEach((button) => button.addEventListener("click", () => navigate(button.dataset.view)));
   document.querySelector("#refresh-button").addEventListener("click", () => void refreshAll());
-  document.querySelector("#new-job-button").addEventListener("click", openJobModal);
   document.querySelector("#theme-button").addEventListener("click", toggleTheme);
   document.querySelector("#menu-button").addEventListener("click", () => document.body.classList.toggle("menu-open"));
   document.querySelector("#scrim").addEventListener("click", () => document.body.classList.remove("menu-open"));
-  document.querySelectorAll("[data-close-modal]").forEach((button) => button.addEventListener("click", closeJobModal));
   document.querySelector("#drawer-close").addEventListener("click", closeDrawer);
-  jobForm.addEventListener("submit", submitJob);
   window.addEventListener("hashchange", () => {
     const view = location.hash.replace(/^#/, "") || "overview";
     if (pageTitles[view] || sidecarViews.has(view)) {
@@ -49,7 +43,7 @@ function bindStaticEvents() {
     }
   });
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") { closeJobModal(); closeDrawer(); }
+    if (event.key === "Escape") closeDrawer();
   });
 }
 
@@ -92,7 +86,7 @@ function render() {
   if (sidecarViews.has(state.view)) return;
   pageTitle.textContent = pageTitles[state.view] ?? "Overview";
   document.querySelectorAll("[data-view]").forEach((button) => button.classList.toggle("active", button.dataset.view === state.view));
-  document.querySelector("#new-job-button").hidden = !["overview", "jobs"].includes(state.view);
+  document.querySelector("#new-job-button").hidden = true;
   if (state.view === "overview") renderOverview();
   else if (state.view === "jobs") renderJobs();
   else if (state.view === "sources") renderSources();
@@ -139,7 +133,7 @@ function renderSettings() {
 }
 
 function jobsTable(jobs) {
-  if (!jobs.length) return emptyBlock("No jobs yet", "Queue a transfer to see it here.");
+  if (!jobs.length) return emptyBlock("No jobs yet", "Historical job activity appears here.");
   return `<div class="table-wrap"><table><thead><tr><th>Status</th><th>Job</th><th>Type</th><th>Attempt</th><th>Updated</th></tr></thead><tbody>${jobs.map((job) => `<tr data-job-id="${escapeAttr(job.id)}"><td>${statusBadge(job.state)}</td><td><span class="cell-primary">${escapeHtml(shortJobName(job))}</span><span class="cell-sub mono">${escapeHtml(job.id)}</span></td><td>${escapeHtml(jobTypeLabel(job.type))}</td><td>#${Number(job.attempt || 0)}</td><td>${relativeTime(job.updatedAt)}</td></tr>`).join("")}</tbody></table></div>`;
 }
 
@@ -147,12 +141,6 @@ function bindJobRows() { content.querySelectorAll("[data-job-id]").forEach((row)
 async function openJob(id) { drawer.classList.add("open"); drawer.setAttribute("aria-hidden", "false"); drawerTitle.textContent = "Loading…"; drawerContent.innerHTML = '<div class="loading-card">Loading job detail…</div>'; try { const [detail, history] = await Promise.all([api(`/v1/local/jobs/${encodeURIComponent(id)}`), api(`/v1/local/jobs/${encodeURIComponent(id)}/events`)]); state.selectedJob = detail.job; state.selectedEvents = history.events ?? []; drawerTitle.textContent = shortJobName(detail.job); renderDrawer(); } catch (error) { drawerTitle.textContent = "Job"; drawerContent.innerHTML = `<div class="empty"><strong>Could not load job</strong>${escapeHtml(error.message)}</div>`; } }
 function renderDrawer() { const job = state.selectedJob; if (!job) return; drawerContent.innerHTML = `<div class="flex items-center justify-between gap-8">${statusBadge(job.state)}<span class="muted-2 small">${relativeTime(job.updatedAt)}</span></div><div class="detail-grid mt-16">${detailItem("Type", jobTypeLabel(job.type))}${detailItem("Attempt", `#${job.attempt}`)}${detailItem("Created", formatDate(job.createdAt))}${detailItem("Started", job.startedAt ? formatDate(job.startedAt) : "—")}${detailItem("Finished", job.finishedAt ? formatDate(job.finishedAt) : "—")}${detailItem("Execution", "Local Nexus")}</div>${job.lastError ? `<div class="status-row mt-16"><div><strong>Last error</strong><span>${escapeHtml(job.lastError)}</span></div><span class="status-indicator off"></span></div>` : ""}<p class="eyebrow mt-16">Payload</p><pre class="payload">${escapeHtml(JSON.stringify(job.payload, null, 2))}</pre><p class="eyebrow mt-16">Lifecycle</p><div class="timeline">${state.selectedEvents.map((event) => `<div class="timeline-item"><div class="timeline-dot"></div><div><strong>${escapeHtml(eventLabel(event.type))}</strong><span>${formatDate(event.at)}</span></div></div>`).join("") || '<div class="muted small">No lifecycle events recorded.</div>'}</div>`; }
 function closeDrawer() { drawer.classList.remove("open"); drawer.setAttribute("aria-hidden", "true"); }
-function openJobModal() { if (!state.config.available) { toast("Configuration unavailable", "Wait for the local configuration to initialize.", true); return; } renderJobFields(); jobModal.classList.remove("hidden"); }
-function closeJobModal() { jobModal.classList.add("hidden"); }
-function renderJobFields() { const endpoints = options(state.config.endpoints ?? [], "Select endpoint"); jobFields.innerHTML = `<label><span>Source endpoint</span><select name="sourceEndpointId" required>${endpoints}</select></label><label><span>Destination endpoint</span><select name="destinationEndpointId" required>${endpoints}</select></label><label><span>Mode</span><select name="mode" disabled><option value="copy">Copy</option></select></label>`; }
-async function submitJob(event) { event.preventDefault(); const form = new FormData(jobForm); const payload = { sourceEndpointId: requiredForm(form, "sourceEndpointId"), destinationEndpointId: requiredForm(form, "destinationEndpointId"), mode: "copy" }; if (payload.sourceEndpointId === payload.destinationEndpointId) { toast("Invalid transfer", "Source and destination must be different.", true); return; } const submit = jobForm.querySelector('button[type="submit"]'); submit.disabled = true; submit.textContent = "Queueing…"; try { const result = await api("/v1/local/jobs", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ operationKey: `ui:rclone-transfer:${Date.now()}:${crypto.randomUUID().slice(0, 8)}`, type: "rclone-transfer", payload }) }); closeJobModal(); jobForm.reset(); toast("Job queued", shortJobName(result.job)); await refreshAll({ quiet: true }); if (state.view !== "jobs") navigate("jobs"); } catch (error) { toast("Could not queue job", error.message, true); } finally { submit.disabled = false; submit.textContent = "Queue transfer"; } }
-function requiredForm(form, name) { const value = String(form.get(name) || "").trim(); if (!value) throw new Error(`${name} is required`); return value; }
-function options(items, placeholder) { return `<option value="">${escapeHtml(placeholder)}</option>${items.map((item) => `<option value="${escapeAttr(item.id)}">${escapeHtml(item.id)}</option>`).join("")}`; }
 function metricCard(label, value, foot, accent = "") { return `<article class="card metric"><div class="metric-head"><span>${escapeHtml(label)}</span><span class="metric-accent ${accent}"></span></div><div class="metric-value">${escapeHtml(String(value))}</div><div class="metric-foot">${escapeHtml(foot)}</div></article>`; }
 function summaryEntityCard(title, count, foot, icon, view) { return `<article class="card card-pad" data-summary-view="${view}" style="cursor:pointer"><div class="flex items-center justify-between gap-8"><div><p class="eyebrow">${escapeHtml(title)}</p><div class="metric-value">${escapeHtml(String(count))}</div></div><div class="entity-icon">${icon}</div></div><p class="muted small">${escapeHtml(foot)}</p></article>`; }
 function statusRow(label, value, online) { return `<div class="status-row"><div><strong>${escapeHtml(label)}</strong><span>${escapeHtml(value)}</span></div><span class="status-indicator ${online ? "" : "off"}"></span></div>`; }

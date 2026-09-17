@@ -30,7 +30,6 @@
     </main>
   </div>
   <div class="scrim" id="scrim"></div>
-  <div class="modal-backdrop hidden" id="job-modal"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="job-modal-title"><div class="modal-header"><div><p class="eyebrow">Queue work</p><h2 id="job-modal-title">New transfer</h2></div><button class="icon-button" data-close-modal aria-label="Close">×</button></div><form id="job-form"><div id="job-fields"></div><div class="modal-actions"><button type="button" class="button ghost" data-close-modal>Cancel</button><button type="submit" class="button primary">Queue transfer</button></div></form></section></div>
   <aside class="drawer" id="job-drawer" aria-hidden="true"><div class="drawer-header"><div><p class="eyebrow">Job detail</p><h2 id="drawer-title">Job</h2></div><button class="icon-button" id="drawer-close" aria-label="Close job details">×</button></div><div id="drawer-content" class="drawer-content"></div></aside>
   <div class="toast-stack" id="toast-stack" aria-live="polite"></div>
   <script type="module" src="/session.js"></script>
@@ -39,56 +38,5 @@
   <script type="module" src="/transfers.js"></script>
   <script type="module" src="/repositories.js"></script>
   <script type="module" src="/maintenance.js"></script>
-  <script type="module">
-    const content = document.querySelector("#content");
-    const nativeFetch = window.fetch.bind(window);
-    let gates = [];
-    let rules = [];
-    let editingId = null;
-    async function refreshRtorrentConfig() {
-      try {
-        const [configResponse, rulesResponse] = await Promise.all([nativeFetch("/v1/local/config"), nativeFetch("/v1/local/transfers")]);
-        if (configResponse.ok) gates = (await configResponse.json()).rtorrentGates ?? [];
-        if (rulesResponse.ok) rules = (await rulesResponse.json()).rules ?? [];
-      } catch {}
-      enhance();
-    }
-    function enhance() {
-      const form = document.querySelector("#transfer-form");
-      if (form && !form.querySelector('[name="rtorrentGateId"]')) {
-        const label = document.createElement("label");
-        label.className = "full";
-        label.innerHTML = `<span>rTorrent readiness <small>optional</small></span><select name="rtorrentGateId"><option value="">Stability window only</option>${gates.map((gate) => `<option value="${escapeHtml(gate.id)}">${escapeHtml(gate.id)} · ${gate.required ? "required" : "fallback allowed"}</option>`).join("")}</select><small>Only the gate ID is stored. RPC addresses and credentials remain local to the appliance.</small>`;
-        form.querySelector(".enabled-row")?.before(label);
-      }
-      const select = form?.querySelector('[name="rtorrentGateId"]');
-      if (select) select.value = rules.find((rule) => rule.id === editingId)?.rtorrentGateId || "";
-      const note = document.querySelector("#transfers-view .transfer-note");
-      if (note && note.innerHTML !== "<strong>Copyarr safety:</strong> staged transfer, exact-size verification, source protection and optional rTorrent readiness gating are active.") note.innerHTML = "<strong>Copyarr safety:</strong> staged transfer, exact-size verification, source protection and optional rTorrent readiness gating are active.";
-    }
-    const originalFetch = window.fetch.bind(window);
-    window.fetch = async (input, init = {}) => {
-      const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url, location.href);
-      const method = String(init.method || (input instanceof Request ? input.method : "GET") || "GET").toUpperCase();
-      if (url.pathname === "/v1/local/transfers" && method === "POST" && typeof init.body === "string") {
-        try {
-          const payload = JSON.parse(init.body);
-          const select = document.querySelector('#transfer-form [name="rtorrentGateId"]');
-          if (select) init = { ...init, body: JSON.stringify({ ...payload, rtorrentGateId: select.value || null }) };
-        } catch {}
-      }
-      return originalFetch(input, init);
-    };
-    document.addEventListener("click", (event) => {
-      const edit = event.target.closest?.('[data-action="edit"][data-id]');
-      if (edit) { editingId = edit.dataset.id; queueMicrotask(enhance); }
-      if (event.target.closest?.("#new-job-button")) { editingId = null; queueMicrotask(enhance); }
-    }, true);
-    new MutationObserver(enhance).observe(content, { childList: true, subtree: true });
-    window.addEventListener("hashchange", () => { if (location.hash === "#transfers") void refreshRtorrentConfig(); });
-    setInterval(() => { if (location.hash === "#transfers") void refreshRtorrentConfig(); }, 5000);
-    if (location.hash === "#transfers") void refreshRtorrentConfig();
-    function escapeHtml(value) { return String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" }[char])); }
-  </script>
 </body>
 </html>
