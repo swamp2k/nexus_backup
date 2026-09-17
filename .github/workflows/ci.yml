@@ -43,7 +43,11 @@ jobs:
           grep -F '$serverUrl/workstation/nexus-backup-workstation-windows-amd64.exe' "$installer"
           grep -F '$serverUrl/workstation/nexus-backup-workstation-windows-amd64.exe.sha256' "$installer"
           grep -F '/v1/device/workstation/repository-profile' "$installer"
-          grep -F 'receiverPassword' "$installer"
+          grep -F 'repositoryId=' "$installer"
+          if grep -Eiq 'receiverProtocol|receiverHost|receiverPort|receiverUsername|receiverPassword' "$installer"; then
+            echo 'workstation installer contains unused receiver transport configuration' >&2
+            exit 1
+          fi
           grep -F '["/workstation/nexus-backup-workstation-windows-amd64.exe"' "$gateway"
           grep -F '["/workstation/nexus-backup-workstation-windows-amd64.exe.sha256"' "$gateway"
           grep -F 'path === "/v1/device/workstation/repository-profile"' "$gateway"
