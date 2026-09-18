@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 import { createServer } from "node:http";
-import { createWriteStream } from "node:fs";
+import { createReadStream, createWriteStream } from "node:fs";
 import { mkdir, open, readFile, rename, rm, stat, utimes } from "node:fs/promises";
 import { pipeline } from "node:stream/promises";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
+import { collectZipEntries, createStoreZipStream } from "../lib/zip-writer.mjs";
 import { fileURLToPath } from "node:url";
 import { loadSanitizedIntegrationConfig } from "../lib/dashboard-data.mjs";
 import { createLocalAuth } from "../lib/local-auth.mjs";
@@ -291,6 +292,15 @@ const gateway = createServer(async (request, response) => {
       sendJson(response, 201, await repositoryService.createFolder(body.path ?? "", body));
       return;
     }
+    if (path === "/v1/local/repositories/download" && request.method === "GET") {
+      await sendRepositoryDownload(response, url.searchParams.get("path") ?? "");
+      return;
+    }
+    if (path === "/v1/local/repositories/download-zip" && request.method === "POST") {
+      const body = await readJsonBody(request);
+      await sendRepositoryZipDownload(response, Array.isArray(body?.paths) ? body.paths : []);
+      return;
+    }
     if (path === "/v1/local/receiver-users" && request.method === "GET") {
       sendJson(response, 200, { users: await receiverUserService.list() });
       return;
@@ -381,6 +391,15 @@ const gateway = createServer(async (request, response) => {
     const workstationRunMatch = path.match(/^\/v1\/local\/workstations\/([^/]+)\/run$/);
     if (workstationRunMatch && request.method === "POST") {
       sendJson(response, 202, { run: await workstationService.runNow(decodePathPart(workstationRunMatch[1])) });
+      return;
+    }
+    const workstationRunsMatch = path.match(/^\/v1\/local\/workstations\/([^/]+)\/runs$/);
+    if (workstationRunsMatch && request.method === "GET") {
+      const runs = await workstationService.listRuns(decodePathPart(workstationRunsMatch[1]), {
+        limit: url.searchParams.get("limit") ?? 20,
+        operation: url.searchParams.get("operation") ?? null,
+      });
+      sendJson(response, 200, { runs });
       return;
     }
     if (path === "/v1/local/transfers" && request.method === "GET") {
@@ -520,6 +539,42 @@ async function servePublic(path, response) {
   response.setHeader("x-content-type-options", "nosniff");
   response.setHeader("content-security-policy", "default-src 'self'; img-src 'self'; style-src 'self'; script-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'");
   response.end(content);
+}
+
+async function sendRepositoryDownload(response, relativePath) {
+  if (Array.isArray(relativePath) || !relativePath) throw statusError(400, "A file path is required");
+  const target = await repositoryService.paths.resolveRelative(relativePath, { allowMissing: false });
+  const info = await stat(target.absolute);
+  if (!info.isFile()) throw statusError(400, "Only files can be downloaded directly; select a zip download for folders");
+  response.statusCode = 200;
+  response.setHeader("content-type", "application/octet-stream");
+  response.setHeader("content-length", String(info.size));
+  response.setHeader("content-disposition", contentDisposition(basename(target.relative)));
+  response.setHeader("x-content-type-options", "nosniff");
+  response.setHeader("cache-control", "no-store");
+  await pipeline(createReadStream(target.absolute), response);
+}
+
+async function sendRepositoryZipDownload(response, relativePaths) {
+  if (!relativePaths.length || relativePaths.length > 500) throw statusError(400, "Select between 1 and 500 items to download");
+  const targets = [];
+  for (const relativePath of relativePaths) {
+    const target = await repositoryService.paths.resolveRelative(relativePath, { allowMissing: false });
+    targets.push({ absolute: target.absolute, arcname: target.relative || basename(target.absolute) });
+  }
+  const entries = await collectZipEntries(targets);
+  const zipName = relativePaths.length === 1 ? `${basename(targets[0].arcname)}.zip` : "nexus-backup-selection.zip";
+  response.statusCode = 200;
+  response.setHeader("content-type", "application/zip");
+  response.setHeader("content-disposition", contentDisposition(zipName));
+  response.setHeader("x-content-type-options", "nosniff");
+  response.setHeader("cache-control", "no-store");
+  await pipeline(createStoreZipStream(entries), response);
+}
+
+function contentDisposition(filename) {
+  const ascii = filename.replace(/[^\x20-\x7e]/g, "_").replace(/"/g, "'");
+  return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(filename)}`;
 }
 
 async function proxy(request, response, url) {

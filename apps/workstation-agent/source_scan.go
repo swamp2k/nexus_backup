@@ -10,8 +10,11 @@ import (
 	"time"
 )
 
+// maxSourceScanNodes is a var, not a const, so tests can lower it to exercise
+// truncation without creating tens of thousands of real directories.
+var maxSourceScanNodes = 75000
+
 const (
-	maxSourceScanNodes       = 75000
 	maxSourceScanApproxBytes = 10 * 1024 * 1024
 	sourceScanProgressEvery  = 500 * time.Millisecond
 )
@@ -116,6 +119,15 @@ func (w *sourceScanWalker) scanDirectory(ctx context.Context, path, parent strin
 		w.result.approxBytes += estimated
 		return node, nil
 	}
+
+	// Reserve this node's slot before descending so a truncation partway
+	// through its children can never drop it: without an entry here, a
+	// deep cutoff would also erase every ancestor back to the drive root,
+	// leaving the browser with no top of the tree to render at all.
+	index := len(w.result.Nodes)
+	w.result.Nodes = append(w.result.Nodes, node)
+	w.result.approxBytes += estimated
+
 	for _, entry := range entries {
 		if err := ctx.Err(); err != nil {
 			return node, err
@@ -156,12 +168,7 @@ func (w *sourceScanWalker) scanDirectory(ctx context.Context, path, parent strin
 			return node, err
 		}
 	}
-	if w.result.approxBytes+estimated <= maxSourceScanApproxBytes && len(w.result.Nodes) < maxSourceScanNodes {
-		w.result.Nodes = append(w.result.Nodes, node)
-		w.result.approxBytes += estimated
-	} else {
-		w.result.Truncated = true
-	}
+	w.result.Nodes[index] = node
 	return node, nil
 }
 

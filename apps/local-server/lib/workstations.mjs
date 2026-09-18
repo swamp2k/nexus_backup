@@ -261,6 +261,19 @@ export function createWorkstationService({
     return presentRun(await db.prepare("SELECT * FROM workstation_runs WHERE id=?").bind(normalizedRunId).first());
   }
 
+  async function listRuns(deviceId, { limit = 20, operation = null } = {}) {
+    const device = await requireWorkstation(deviceId);
+    const boundedLimit = clampInteger(limit, 1, 100, 20);
+    const rows = operation
+      ? (await db.prepare(`
+          SELECT * FROM workstation_runs WHERE device_id=? AND operation=? ORDER BY queued_at DESC,id DESC LIMIT ?
+        `).bind(device.id, normalizeStoredOperation(operation), boundedLimit).all()).results ?? []
+      : (await db.prepare(`
+          SELECT * FROM workstation_runs WHERE device_id=? ORDER BY queued_at DESC,id DESC LIMIT ?
+        `).bind(device.id, boundedLimit).all()).results ?? [];
+    return rows.map((row) => presentRun(row));
+  }
+
   async function getLatestCheck(deviceId) {
     const device = await requireWorkstation(deviceId);
     return presentRun(await db.prepare(`
@@ -548,7 +561,7 @@ export function createWorkstationService({
   }
 
   return {
-    list, getPolicy, putPolicy, runNow, runDue, queueSourceScan, getSourceScan, queueRecovery, getRecoveryInventory, getRecoveryBrowse, getRun, getLatestCheck,
+    list, getPolicy, putPolicy, runNow, runDue, queueSourceScan, getSourceScan, queueRecovery, getRecoveryInventory, getRecoveryBrowse, getRun, listRuns, getLatestCheck,
     poll, progress, finish, reportStatus, recoverExpired, remove,
   };
 }
