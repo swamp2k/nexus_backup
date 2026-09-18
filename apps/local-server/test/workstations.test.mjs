@@ -5,12 +5,13 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { createManagedDeviceService } from "../lib/managed-devices.mjs";
+import { createRepositoryService } from "../lib/repositories.mjs";
 import { createWorkstationService, workstationInstallCommand } from "../lib/workstations.mjs";
 import { openSqliteD1 } from "../lib/sqlite-d1.mjs";
 
 const migrationsDir=fileURLToPath(new URL("../../../migrations/",import.meta.url));
 
-async function fixture({receiverUsers=null}={}){
+async function fixture({receiverUsers=null,withRepositories=false}={}){
   const dir=await mkdtemp(join(tmpdir(),"nexus-workstations-"));
   const db=await openSqliteD1({filename:join(dir,"backup.sqlite"),migrationsDir});
   let now=new Date("2026-09-12T19:00:00.000Z");
@@ -22,9 +23,11 @@ async function fixture({receiverUsers=null}={}){
     id:()=>"device-workstation-1",
     token:()=>`nxbdev_${String(++tokenNumber).padStart(48,"x")}`,
   });
+  const repositories=withRepositories?createRepositoryService({db,backupRoot:join(dir,"backup"),now:()=>new Date(now),id:()=>"repo-1"}):null;
   const service=createWorkstationService({
     db,
     deviceService:devices,
+    repositories,
     now:()=>new Date(now),
     id:()=>`wsrun-${++runNumber}`,
     leaseToken:()=>"nxbws_abcdefghijklmnopqrstuvwxyz012345",
@@ -33,7 +36,7 @@ async function fixture({receiverUsers=null}={}){
   });
   const created=await devices.create({name:"Balder PC",kind:"workstation"});
   const bootstrap=await devices.report(created.token,{version:"installer",hostname:"balder-pc",platform:"windows/amd64",capabilities:["workstation.bootstrap.v1","workstation.source-scan.v1"]});
-  return{dir,db,devices,service,token:bootstrap.deviceToken,device:bootstrap.device,setNow:value=>{now=new Date(value)},async close(){db.close();await rm(dir,{recursive:true,force:true});}};
+  return{dir,db,devices,repositories,service,token:bootstrap.deviceToken,device:bootstrap.device,setNow:value=>{now=new Date(value)},async close(){db.close();await rm(dir,{recursive:true,force:true});}};
 }
 
 const policy={
@@ -135,13 +138,10 @@ test("explicit needs-storage status leaves ordinary backup queued while source s
 });
 
 test("assigned flat-file repository is authoritative even when client reports needs-storage",async()=>{
-  const f=await fixture();
+  const f=await fixture({withRepositories:true});
   try{
-    await f.db.prepare("INSERT INTO repositories(id,name,relative_path,created_at,updated_at) VALUES(?,?,?,?,?)")
-      .bind("repo-1","Workstations","workstations","2026-09-12T19:00:00.000Z","2026-09-12T19:00:00.000Z").run();
-    await f.service.putPolicy(f.device.id,policy);
-    await f.db.prepare("UPDATE workstation_policies SET repository_id=?,destination_folder=? WHERE device_id=?")
-      .bind("repo-1","Balder PC",f.device.id).run();
+    await f.repositories.create({name:"Workstations",relativePath:"workstations"});
+    await f.service.putPolicy(f.device.id,{...policy,repositoryId:"repo-1",destinationFolder:"Balder PC"});
     await f.service.reportStatus(f.token,{repositoryConfigured:false,agentState:"needs-storage",localDrives:["C:\\"]});
     const queued=await f.service.runNow(f.device.id);
     const polled=await f.service.poll(f.token);
