@@ -34,17 +34,32 @@ New-Item -ItemType Directory -Path $installDir,$dataDir -Force | Out-Null
 $deviceToken=''
 $old=$null
 if(Test-Path $configPath){try{$old=Get-Content -Raw $configPath|ConvertFrom-Json;$oldDeviceToken = Get-OptionalProperty $old 'deviceToken';if($oldDeviceToken -and ([string]$oldDeviceToken).StartsWith('nxbdev_')){$deviceToken=[string]$oldDeviceToken}}catch{Write-Warning 'Existing workstation config was invalid; replacing it.'}}
+function Bootstrap-DeviceToken([string]$Token) {
+  $body=@{version='installer';hostname=[Environment]::MachineName;platform='windows/amd64';capabilities=@('workstation.bootstrap.v1','workstation.source-scan.v1','workstation.flat-file.v1')}|ConvertTo-Json
+  $bootstrap=Invoke-RestMethod -UseBasicParsing -Method Post -Uri "$serverUrl/v1/device/report" -Headers @{Authorization="Bearer $Token"} -ContentType 'application/json' -Body $body
+  $result=[string]$bootstrap.deviceToken
+  if([string]::IsNullOrWhiteSpace($result)){Fail 'Nexus did not return a workstation device token.'}
+  return $result
+}
+function Get-RepositoryProfile([string]$Token) { return Invoke-RestMethod -UseBasicParsing -Method Get -Uri "$serverUrl/v1/device/workstation/repository-profile" -Headers @{Authorization="Bearer $Token"} }
+
 $tmp=Join-Path $env:TEMP ("nexus-backup-workstation-{0}.exe" -f [guid]::NewGuid().ToString('N'))
 try {
   Download-VerifiedAsset "$serverUrl/workstation/nexus-backup-workstation-windows-amd64.exe" "$serverUrl/workstation/nexus-backup-workstation-windows-amd64.exe.sha256" $tmp
+  $hasBootstrapToken = -not [string]::IsNullOrWhiteSpace($bootstrapToken) -and $bootstrapToken.StartsWith('nxbdev_')
   if([string]::IsNullOrWhiteSpace($deviceToken)){
-    if([string]::IsNullOrWhiteSpace($bootstrapToken) -or -not $bootstrapToken.StartsWith('nxbdev_')){Fail 'A fresh NEXUS_BACKUP_TOKEN enrollment credential is required.'}
-    $body=@{version='installer';hostname=[Environment]::MachineName;platform='windows/amd64';capabilities=@('workstation.bootstrap.v1','workstation.source-scan.v1','workstation.flat-file.v1')}|ConvertTo-Json
-    $bootstrap=Invoke-RestMethod -UseBasicParsing -Method Post -Uri "$serverUrl/v1/device/report" -Headers @{Authorization="Bearer $bootstrapToken"} -ContentType 'application/json' -Body $body
-    $deviceToken=[string]$bootstrap.deviceToken
-    if([string]::IsNullOrWhiteSpace($deviceToken)){Fail 'Nexus did not return a workstation device token.'}
+    if(-not $hasBootstrapToken){Fail 'A fresh NEXUS_BACKUP_TOKEN enrollment credential is required.'}
+    $deviceToken=Bootstrap-DeviceToken $bootstrapToken
+    $profile=Get-RepositoryProfile $deviceToken
+  } else {
+    try {
+      $profile=Get-RepositoryProfile $deviceToken
+    } catch {
+      if(-not $hasBootstrapToken){Fail 'Saved workstation identity is no longer valid on this Nexus server. Re-enroll from Add workstation with a fresh NEXUS_BACKUP_TOKEN instead of Update/repair.'}
+      $deviceToken=Bootstrap-DeviceToken $bootstrapToken
+      $profile=Get-RepositoryProfile $deviceToken
+    }
   }
-  $profile=Invoke-RestMethod -UseBasicParsing -Method Get -Uri "$serverUrl/v1/device/workstation/repository-profile" -Headers @{Authorization="Bearer $deviceToken"}
   # Workstation backups use the device-token file endpoint. Receiver accounts
   # remain available for external/manual clients, but their transport details
   # are not part of the workstation agent configuration.
