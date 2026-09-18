@@ -273,8 +273,8 @@ export function createWorkstationService({
   async function poll(rawToken) {
     const device = await requireAuthenticatedWorkstation(rawToken);
     await recoverExpired(device.id);
-    const status = await db.prepare("SELECT repository_configured FROM workstation_status WHERE device_id=?").bind(device.id).first();
-    const repositoryKnownMissing = status !== null && status !== undefined && Number(status.repository_configured) !== 1;
+    const policy = await getPolicy(device.id);
+    const repositoryKnownMissing = repositories ? !policy?.repositoryId : (await db.prepare("SELECT repository_configured FROM workstation_status WHERE device_id=?").bind(device.id).first())?.repository_configured === 0;
     const row = repositoryKnownMissing
       ? await db.prepare(`SELECT * FROM workstation_runs WHERE device_id=? AND state='queued' AND operation='source-scan' ORDER BY queued_at ASC,id ASC LIMIT 1`).bind(device.id).first()
       : await db.prepare(`SELECT * FROM workstation_runs WHERE device_id=? AND state='queued' ORDER BY queued_at ASC,id ASC LIMIT 1`).bind(device.id).first();
@@ -490,6 +490,18 @@ export function createWorkstationService({
     return row ? { id: String(row.id), operation: normalizeStoredOperation(row.operation), state: String(row.state) } : null;
   }
 
+  async function remove(deviceId) {
+    const device = await requireWorkstation(deviceId);
+    if (receiverUsers) {
+      const receivers = await receiverUsers.list();
+      const receiver = receivers.find((item) => item.workstationId === device.id);
+      if (receiver) await receiverUsers.remove(receiver.id);
+    }
+    const result = await db.prepare("DELETE FROM managed_devices WHERE id=? AND kind='workstation'").bind(device.id).run();
+    if (Number(result.meta?.changes ?? 0) !== 1) throw statusError(409, "Workstation could not be deleted");
+    return { deleted: true, id: device.id, backupDataPreserved: true };
+  }
+
   async function requireWorkstation(deviceId) {
     const normalizedId = requireId(deviceId, "device id");
     const row = await db.prepare("SELECT id,name,kind,enabled,capabilities_json,last_seen_at FROM managed_devices WHERE id=?").bind(normalizedId).first();
@@ -537,7 +549,7 @@ export function createWorkstationService({
 
   return {
     list, getPolicy, putPolicy, runNow, runDue, queueSourceScan, getSourceScan, queueRecovery, getRecoveryInventory, getRecoveryBrowse, getRun, getLatestCheck,
-    poll, progress, finish, reportStatus, recoverExpired,
+    poll, progress, finish, reportStatus, recoverExpired, remove,
   };
 }
 
@@ -764,6 +776,7 @@ function policyFromRow(row) {
     sourcePaths: parseArray(row.source_paths_json), excludePatterns: parseArray(row.exclude_patterns_json),
     schedule: parseJson(row.schedule_json, { kind: "daily", time: "02:00" }), timezone: String(row.timezone),
     retention: parseJson(row.retention_json, { keepDaily: 7, keepWeekly: 4, keepMonthly: 12 }),
+    repositoryId: nullableString(row.repository_id), destinationFolder: nullableString(row.destination_folder),
     nextRunAt: nullableString(row.next_run_at), lastScheduledAt: nullableString(row.last_scheduled_at), lastRunId: nullableString(row.last_run_id),
   };
 }
@@ -791,7 +804,7 @@ function presentWorkstation(row) {
     hostname: nullableString(row.hostname), platform: nullableString(row.platform), capabilities: parseArray(row.capabilities_json),
     firstSeenAt: nullableString(row.first_seen_at), lastSeenAt, online, policy,
     status: {
-      repositoryConfigured: Number(row.repository_configured ?? 0) === 1, repositoryKind: nullableString(row.repository_kind),
+      repositoryConfigured: Boolean(policy?.repositoryId) || Number(row.repository_configured ?? 0) === 1, repositoryKind: policy?.repositoryId ? "flat-file" : nullableString(row.repository_kind),
       agentState: nullableString(row.agent_state), currentRunId: nullableString(row.current_run_id), lastBackupAt: nullableString(row.last_backup_at),
       lastSuccessAt: nullableString(row.last_success_at), lastSnapshotId: nullableString(row.last_snapshot_id),
       lastError: nullableString(row.status_error), localDrives: parseArray(row.local_drives_json), updatedAt: nullableString(row.status_updated_at),

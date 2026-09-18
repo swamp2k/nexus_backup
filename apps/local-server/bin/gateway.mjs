@@ -359,6 +359,11 @@ const gateway = createServer(async (request, response) => {
       sendJson(response, 201, { ...created, receiver: { username: receiver.user.username }, repository, installCommand: workstationInstallCommand(origin, created.token) });
       return;
     }
+    const workstationMatch = path.match(/^\/v1\/local\/workstations\/([^/]+)$/);
+    if (workstationMatch && request.method === "DELETE") {
+      sendJson(response, 200, await workstationService.remove(decodePathPart(workstationMatch[1])));
+      return;
+    }
     const workstationSourceScanMatch = path.match(/^\/v1\/local\/workstations\/([^/]+)\/source-scan$/);
     if (workstationSourceScanMatch && request.method === "GET") {
       sendJson(response, 200, await workstationService.getSourceScan(decodePathPart(workstationSourceScanMatch[1])));
