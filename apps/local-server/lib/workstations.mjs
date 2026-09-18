@@ -274,7 +274,7 @@ export function createWorkstationService({
     const device = await requireAuthenticatedWorkstation(rawToken);
     await recoverExpired(device.id);
     const policy = await getPolicy(device.id);
-    const repositoryKnownMissing = !policy?.repositoryId;
+    const repositoryKnownMissing = repositories ? !policy?.repositoryId : (await db.prepare("SELECT repository_configured FROM workstation_status WHERE device_id=?").bind(device.id).first())?.repository_configured === 0;
     const row = repositoryKnownMissing
       ? await db.prepare(`SELECT * FROM workstation_runs WHERE device_id=? AND state='queued' AND operation='source-scan' ORDER BY queued_at ASC,id ASC LIMIT 1`).bind(device.id).first()
       : await db.prepare(`SELECT * FROM workstation_runs WHERE device_id=? AND state='queued' ORDER BY queued_at ASC,id ASC LIMIT 1`).bind(device.id).first();
