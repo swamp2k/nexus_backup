@@ -776,6 +776,7 @@ function policyFromRow(row) {
     sourcePaths: parseArray(row.source_paths_json), excludePatterns: parseArray(row.exclude_patterns_json),
     schedule: parseJson(row.schedule_json, { kind: "daily", time: "02:00" }), timezone: String(row.timezone),
     retention: parseJson(row.retention_json, { keepDaily: 7, keepWeekly: 4, keepMonthly: 12 }),
+    repositoryId: nullableString(row.repository_id), destinationFolder: nullableString(row.destination_folder),
     nextRunAt: nullableString(row.next_run_at), lastScheduledAt: nullableString(row.last_scheduled_at), lastRunId: nullableString(row.last_run_id),
   };
 }
@@ -803,7 +804,7 @@ function presentWorkstation(row) {
     hostname: nullableString(row.hostname), platform: nullableString(row.platform), capabilities: parseArray(row.capabilities_json),
     firstSeenAt: nullableString(row.first_seen_at), lastSeenAt, online, policy,
     status: {
-      repositoryConfigured: Boolean(policy?.repositoryId), repositoryKind: policy?.repositoryId ? "flat-file" : nullableString(row.repository_kind),
+      repositoryConfigured: Boolean(policy?.repositoryId) || Number(row.repository_configured ?? 0) === 1, repositoryKind: policy?.repositoryId ? "flat-file" : nullableString(row.repository_kind),
       agentState: nullableString(row.agent_state), currentRunId: nullableString(row.current_run_id), lastBackupAt: nullableString(row.last_backup_at),
       lastSuccessAt: nullableString(row.last_success_at), lastSnapshotId: nullableString(row.last_snapshot_id),
       lastError: nullableString(row.status_error), localDrives: parseArray(row.local_drives_json), updatedAt: nullableString(row.status_updated_at),
