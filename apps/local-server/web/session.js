@@ -92,24 +92,38 @@ function installWorkstationDashboard() {
   function render() {
     if (!active()) return;
     const online = workstations.filter((item) => item.online).length;
-    const protectedCount = workstations.filter((item) => item.status?.repositoryConfigured && item.status?.lastSuccessAt).length;
+    const protectedCount = workstations.filter((item) => item.policy?.repositoryId && item.status?.lastSuccessAt).length;
     const running = workstations.filter((item) => ["running", "leased"].includes(item.lastRun?.state)).length;
-    const attention = workstations.filter((item) => !item.status?.repositoryConfigured || ["failed", "partial"].includes(item.lastRun?.state)).length;
+    const attention = workstations.filter((item) => !item.policy?.repositoryId || ["failed", "partial"].includes(item.lastRun?.state)).length;
     content.innerHTML = `<div id="workstations-view"><div class="transfer-hero"><div><p class="eyebrow">Endpoint backup</p><h2>Workstations</h2><p>Windows PCs copy selected folders into their assigned Repository as ordinary browsable files.</p></div><span class="badge success">Flat files</span></div><div class="grid metrics">${metric("Online", online, `${workstations.length} enrolled`, online ? "blue" : "")}${metric("Protected", protectedCount, "Has successful backup", protectedCount ? "success" : "")}${metric("Running", running, "Active workstation jobs", running ? "blue" : "")}${metric("Attention", attention, attention ? "Needs setup or review" : "All clear", attention ? "warn" : "")}</div><div class="workstation-grid section-gap">${workstations.map(card).join("") || '<div class="empty"><strong>No workstations yet</strong><span>Add a workstation to generate the one-line installer command.</span></div>'}</div><div class="transfer-note"><strong>Data path:</strong> workstation → selected Repository → workstation folder. Missing source files are never deleted from the backup.</div></div>`;
     content.querySelectorAll("[data-ws-action]").forEach((button) => button.addEventListener("click", () => {
       const workstation = workstations.find((item) => item.id === button.dataset.id); if (!workstation) return;
       if (button.dataset.wsAction === "sources") void openSources(workstation);
       else if (button.dataset.wsAction === "policy") void openPolicy(workstation);
       else if (button.dataset.wsAction === "run") void runNow(workstation, button);
+      else if (button.dataset.wsAction === "delete") void deleteWorkstation(workstation, button);
     }));
   }
   function card(ws) {
     const status = ws.status ?? {}, run = ws.lastRun, state = !ws.enabled ? "Disabled" : ws.online ? "Online" : "Offline";
     const tone = !ws.enabled ? "warn" : ws.online ? "success" : "danger";
-    const storage = status.repositoryConfigured ? (status.repositoryKind || "flat-file") : "Repository not configured";
-    return `<section class="card workstation-card" data-ws="${attr(ws.id)}"><div class="transfer-head"><div class="transfer-title"><span class="transfer-state${ws.online ? "" : " paused"}"></span><div><h2>${esc(ws.name)}</h2><span>${esc(ws.hostname || ws.id)} · ${esc(ws.version || "not installed yet")}</span></div></div><div class="transfer-actions"><span class="badge ${tone}">${state}</span><button class="button ghost compact" data-ws-action="sources" data-id="${attr(ws.id)}">Sources</button><button class="button ghost compact" data-ws-action="policy" data-id="${attr(ws.id)}">Policy</button><button class="button primary compact" data-ws-action="run" data-id="${attr(ws.id)}" ${!ws.online || !status.repositoryConfigured || !ws.policy ? "disabled" : ""}>Run now</button></div></div><div class="transfer-facts">${fact("Storage", storage, status.repositoryConfigured ? "Ordinary files under /backup" : "Select a repository in policy", status.repositoryConfigured ? "" : "warn")}${fact("Last success", status.lastSuccessAt ? relative(status.lastSuccessAt) : "Never", "Flat-file copy")}${fact("Next run", ws.policy?.nextRunAt ? relative(ws.policy.nextRunAt) : "Not scheduled", ws.policy?.enabled ? scheduleLabel(ws.policy.schedule) : "Policy disabled")}${fact("Last run", run?.state || "never", run?.error || status.lastError || "No error", ["failed", "partial"].includes(run?.state) ? "danger" : "")}</div><div class="transfer-meta filters"><span>Sources: ${ws.policy?.sourcePaths?.length ? esc(ws.policy.sourcePaths.join(", ")) : "not configured"}</span><span>Excludes: ${ws.policy?.excludePatterns?.length ? esc(ws.policy.excludePatterns.join(", ")) : "none"}</span><span>Last seen: ${ws.lastSeenAt ? relative(ws.lastSeenAt) : "never"}</span></div></section>`;
+    const repositoryAssigned = Boolean(ws.policy?.repositoryId);
+    const storage = repositoryAssigned ? (ws.policy?.repositoryName || "Repository assigned") : "Repository not configured";
+    return `<section class="card workstation-card" data-ws="${attr(ws.id)}"><div class="transfer-head"><div class="transfer-title"><span class="transfer-state${ws.online ? "" : " paused"}"></span><div><h2>${esc(ws.name)}</h2><span>${esc(ws.hostname || ws.id)} · ${esc(ws.version || "not installed yet")}</span></div></div><div class="transfer-actions"><span class="badge ${tone}">${state}</span><button class="button ghost compact" data-ws-action="sources" data-id="${attr(ws.id)}">Sources</button><button class="button ghost compact" data-ws-action="policy" data-id="${attr(ws.id)}">Policy</button><button class="button primary compact" data-ws-action="run" data-id="${attr(ws.id)}" ${!ws.online || !repositoryAssigned || !ws.policy ? "disabled" : ""}>Run now</button><button class="button ghost compact ws-delete" data-ws-action="delete" data-id="${attr(ws.id)}">Delete</button></div></div><div class="transfer-facts">${fact("Storage", storage, repositoryAssigned ? (ws.policy?.destinationPath || "Ordinary files under /backup") : "Select a repository in policy", repositoryAssigned ? "" : "warn")}${fact("Last success", status.lastSuccessAt ? relative(status.lastSuccessAt) : "Never", "Flat-file copy")}${fact("Next run", ws.policy?.nextRunAt ? relative(ws.policy.nextRunAt) : "Not scheduled", ws.policy?.enabled ? scheduleLabel(ws.policy.schedule) : "Policy disabled")}${fact("Last run", run?.state || "never", run?.error || status.lastError || "No error", ["failed", "partial"].includes(run?.state) ? "danger" : "")}</div><div class="transfer-meta filters"><span>Sources: ${ws.policy?.sourcePaths?.length ? esc(ws.policy.sourcePaths.join(", ")) : "not configured"}</span><span>Excludes: ${ws.policy?.excludePatterns?.length ? esc(ws.policy.excludePatterns.join(", ")) : "none"}</span><span>Last seen: ${ws.lastSeenAt ? relative(ws.lastSeenAt) : "never"}</span></div></section>`;
   }
   async function runNow(ws, button) { button.disabled = true; try { await request(`/v1/local/workstations/${encodeURIComponent(ws.id)}/run`, { method: "POST", body: {} }); toast("Workstation backup queued", ws.name); await refresh(true); } catch (error) { toast("Could not queue backup", error.message, true); } finally { button.disabled = false; } }
+  async function deleteWorkstation(ws, button) {
+    if (!confirm(`Delete workstation ${ws.name}? Nexus will remove its enrollment, policy, run history and receiver identity. Existing backup files will be left untouched.`)) return;
+    button.disabled = true;
+    try {
+      await request(`/v1/local/workstations/${encodeURIComponent(ws.id)}`, { method: "DELETE", body: {} });
+      toast("Workstation deleted", `${ws.name} removed. Backup files were preserved.`);
+      await refresh(true);
+    } catch (error) {
+      toast("Could not delete workstation", error.message, true);
+      button.disabled = false;
+    }
+  }
   async function openEnroll() {
     closeModal(); let repositories;
     try { repositories = (await request("/v1/local/repositories")).repositories ?? []; } catch (error) { toast("Could not load repositories", error.message, true); return; }
