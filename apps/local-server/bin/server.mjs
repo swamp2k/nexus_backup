@@ -75,6 +75,7 @@ const STATIC_FILES = new Map([
   ["/remote-connection.js", ["remote-connection.js", "text/javascript; charset=utf-8"]],
   ["/transfers.js", ["transfers.js", "text/javascript; charset=utf-8"]],
   ["/repositories.js", ["repositories.js", "text/javascript; charset=utf-8"]],
+  ["/sources-destinations.js", ["sources-destinations.js", "text/javascript; charset=utf-8"]],
   ["/maintenance.js", ["maintenance.js", "text/javascript; charset=utf-8"]],
   ["/styles.css", ["styles.css", "text/css; charset=utf-8"]],
   ["/transfers.css", ["transfers.css", "text/css; charset=utf-8"]],

@@ -10,8 +10,8 @@ const state = {
   selectedEvents: [],
   refreshing: false,
 };
-const pageTitles = { overview: "Overview", jobs: "Jobs", sources: "Sources", destinations: "Destinations", settings: "Settings" };
-const sidecarViews = new Set(["transfers", "workstations", "repositories"]);
+const pageTitles = { overview: "Overview", jobs: "Jobs", settings: "Settings" };
+const sidecarViews = new Set(["transfers", "workstations", "repositories", "sources", "destinations"]);
 const terminalStates = new Set(["completed", "partial", "failed", "cancelled"]);
 const activeStates = new Set(["leased", "preparing", "running", "finalizing"]);
 const content = document.querySelector("#content");
@@ -75,7 +75,7 @@ async function refreshAll({ quiet = false } = {}) {
 }
 
 function navigate(view) {
-  if (!pageTitles[view]) return;
+  if (!pageTitles[view] && !sidecarViews.has(view)) return;
   state.view = view;
   location.hash = view;
   document.body.classList.remove("menu-open");
@@ -89,8 +89,6 @@ function render() {
   document.querySelector("#new-job-button").hidden = true;
   if (state.view === "overview") renderOverview();
   else if (state.view === "jobs") renderJobs();
-  else if (state.view === "sources") renderSources();
-  else if (state.view === "destinations") renderDestinations();
   else renderSettings();
 }
 
@@ -116,16 +114,6 @@ function renderJobs() {
   document.querySelector("#job-filter")?.addEventListener("input", (event) => { state.filter = event.target.value; renderJobs(); });
   document.querySelector("#status-filter")?.addEventListener("change", (event) => { state.statusFilter = event.target.value; renderJobs(); });
   bindJobRows();
-}
-
-function renderSources() {
-  const sources = state.config.sources ?? [];
-  content.innerHTML = `<section class="card card-pad"><div class="flex items-center justify-between gap-8"><div><p class="eyebrow">Local configuration</p><h2>Sources</h2><p class="muted small">Only permitted local paths are exposed to the dashboard.</p></div>${badge(`${sources.length} configured`, sources.length ? "success" : "warn")}</div><div class="entity-grid mt-16">${sources.map((source) => `<article class="entity-card"><div class="entity-meta"><strong>${escapeHtml(source.id)}</strong><p>${source.paths.length} path${source.paths.length === 1 ? "" : "s"}</p>${source.paths.map((path) => `<code>${escapeHtml(path)}</code>`).join("")}</div><div class="entity-icon">⇤</div></article>`).join("") || emptyBlock("No sources configured", "Add a source to the local configuration.")}</div></section>`;
-}
-
-function renderDestinations() {
-  const endpoints = state.config.endpoints ?? [];
-  content.innerHTML = `<section class="card card-pad"><div class="flex items-center justify-between gap-8"><div><p class="eyebrow">Local configuration</p><h2>Source integrations</h2><p class="muted small">Credentials stay inside the appliance. The UI only sees sanitized endpoint metadata.</p></div>${badge(`${endpoints.length} configured`, endpoints.length ? "success" : "warn")}</div><div class="entity-grid mt-16">${endpoints.map((endpoint) => `<article class="entity-card"><div class="entity-meta"><strong>${escapeHtml(endpoint.id)}</strong><p>${endpoint.mount?.enabled ? `Mount · VFS ${escapeHtml(endpoint.mount.vfsCacheMode || "off")}` : "Transfer endpoint"}</p><p>${endpoint.allowMove ? "Move allowed by local policy" : "Copy-only local policy"}</p></div><div class="entity-icon">⇥</div></article>`).join("") || emptyBlock("No integrations configured", "Add a source integration to the local configuration.")}</div></section>`;
 }
 
 function renderSettings() {
