@@ -11,7 +11,7 @@ import { openSqliteD1 } from "../lib/sqlite-d1.mjs";
 
 const migrationsDir=fileURLToPath(new URL("../../../migrations/",import.meta.url));
 
-async function fixture({receiverUsers=null,withRepositories=false}={}){
+async function fixture({receiverUsers=null,withRepositories=false,sourceScanStore=null}={}){
   const dir=await mkdtemp(join(tmpdir(),"nexus-workstations-"));
   const db=await openSqliteD1({filename:join(dir,"backup.sqlite"),migrationsDir});
   let now=new Date("2026-09-12T19:00:00.000Z");
@@ -33,6 +33,7 @@ async function fixture({receiverUsers=null,withRepositories=false}={}){
     leaseToken:()=>"nxbws_abcdefghijklmnopqrstuvwxyz012345",
     leaseMs:60_000,
     receiverUsers,
+    sourceScanStore,
   });
   const created=await devices.create({name:"Balder PC",kind:"workstation"});
   const bootstrap=await devices.report(created.token,{version:"installer",hostname:"balder-pc",platform:"windows/amd64",capabilities:["workstation.bootstrap.v1","workstation.source-scan.v1"]});
@@ -186,6 +187,47 @@ test("source scan runs without repository setup and persists the latest tree",as
     assert.equal(cached.scan.nodes[1].path,"C:\\Users");
     const listed=(await f.service.list())[0];
     assert.deepEqual(listed.status.localDrives,["C:\\","D:\\"]);
+  }finally{await f.close();}
+});
+
+test("source scan artifact manifest persists metadata without storing the directory tree in SQLite",async()=>{
+  const sourceScanStore={
+    async exists(){return true;},
+    keyForRun(deviceId,runId){return `${deviceId}/${runId}.ndjson.gz`;},
+    async removeKey(){},
+    async removeDevice(){},
+    async openArtifact(){throw new Error("not used");},
+  };
+  const f=await fixture({sourceScanStore});
+  try{
+    await f.service.reportStatus(f.token,{repositoryConfigured:false,agentState:"needs-storage",localDrives:["C:\\"]});
+    const queued=await f.service.queueSourceScan(f.device.id,{drives:["C:\\"]});
+    const leased=await f.service.poll(f.token);
+    await f.service.finish(f.token,queued.id,{
+      leaseToken:leased.run.leaseToken,
+      status:"success",
+      result:{
+        operation:"source-scan",
+        drives:["C:\\"],
+        artifactFormat:"gzip-ndjson-v1",
+        schemaVersion:1,
+        directoryCount:29377,
+        fileCount:325643,
+        totalBytes:446676598784,
+        errorCount:3,
+        truncated:false,
+      },
+    });
+    const row=await f.db.prepare("SELECT * FROM workstation_source_scans WHERE device_id=?").bind(f.device.id).first();
+    assert.equal(row.tree_json,"[]");
+    assert.equal(row.artifact_key,`${f.device.id}/${queued.id}.ndjson.gz`);
+    assert.equal(row.artifact_format,"gzip-ndjson-v1");
+    assert.equal(row.directory_count,29377);
+    const cached=await f.service.getSourceScan(f.device.id);
+    assert.equal(cached.scan.artifactAvailable,true);
+    assert.equal(cached.scan.nodes.length,0);
+    assert.equal(cached.scan.directoryCount,29377);
+    assert.equal(cached.scan.truncated,false);
   }finally{await f.close();}
 });
 
