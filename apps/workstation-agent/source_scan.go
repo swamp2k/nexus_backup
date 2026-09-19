@@ -12,10 +12,10 @@ import (
 
 // maxSourceScanNodes is a var, not a const, so tests can lower it to exercise
 // truncation without creating tens of thousands of real directories.
-var maxSourceScanNodes = 75000
+var maxSourceScanNodes = 250000
 
 const (
-	maxSourceScanApproxBytes = 10 * 1024 * 1024
+	maxSourceScanApproxBytes = 64 * 1024 * 1024
 	sourceScanProgressEvery  = 500 * time.Millisecond
 )
 
