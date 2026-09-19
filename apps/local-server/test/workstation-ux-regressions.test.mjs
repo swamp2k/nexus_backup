@@ -16,9 +16,9 @@ test("workstation UI uses policy repository assignment and exposes deletion",asy
 
 test("workstation cards have compact scoped layout",async()=>{
   const styles=await readFile(new URL("../web/styles.css",import.meta.url),"utf8");
-  assert.match(styles,/\.workstation-grid\{display:grid;gap:10px\}/);
-  assert.match(styles,/\.workstation-card \.transfer-fact\{padding:7px 14px\}/);
-  assert.match(styles,/\.workstation-card \.button\.compact\{min-height:31px/);
+  assert.match(styles,/\.workstation-grid\{display:grid;gap:8px\}/);
+  assert.match(styles,/\.workstation-card \.transfer-fact\{padding:6px 11px\}/);
+  assert.match(styles,/\.workstation-card \.button\.compact\{min-height:24px/);
 });
 
 test("gateway exposes workstation-specific delete endpoint",async()=>{

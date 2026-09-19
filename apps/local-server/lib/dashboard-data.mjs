@@ -36,7 +36,78 @@ export async function listJobs(db, { limit = 100, state } = {}) {
         LIMIT ?
       `).bind(normalizedLimit);
   const result = await statement.all();
-  return (result.results ?? []).map(rowToJob);
+  const rcloneJobs = (result.results ?? []).map(rowToJob);
+  const workstationJobs = await listWorkstationRunJobs(db, { limit: normalizedLimit });
+  return [...rcloneJobs, ...workstationJobs]
+    .filter((job) => !normalizedState || job.state === normalizedState)
+    .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
+    .slice(0, normalizedLimit);
+}
+
+// Workstation backups run through workstation_runs (see workstations.mjs), a
+// separate lifecycle from the rclone backup_jobs table. They share enough of
+// the same state vocabulary (queued/leased/running/completed/partial/failed/
+// cancelled) to present as ordinary rows in the same Jobs list.
+export async function listWorkstationRunJobs(db, { limit = 100 } = {}) {
+  const normalizedLimit = clampInteger(limit, 1, 500, 100);
+  const rows = (await db.prepare(`
+    SELECT r.*, d.name AS device_name
+    FROM workstation_runs AS r
+    LEFT JOIN managed_devices AS d ON d.id = r.device_id
+    WHERE r.operation = 'backup'
+    ORDER BY r.queued_at DESC, r.id DESC
+    LIMIT ?
+  `).bind(normalizedLimit).all()).results ?? [];
+  return rows.map(workstationRunRowToJob);
+}
+
+export async function getWorkstationRunRow(db, runId) {
+  return db.prepare(`
+    SELECT r.*, d.name AS device_name
+    FROM workstation_runs AS r
+    LEFT JOIN managed_devices AS d ON d.id = r.device_id
+    WHERE r.id = ?
+  `).bind(runId).first();
+}
+
+export async function getWorkstationRunJob(db, runId) {
+  const row = await getWorkstationRunRow(db, runId);
+  return row ? workstationRunRowToJob(row) : null;
+}
+
+export function workstationRunEvents(row) {
+  const events = [{ type: "job.created", at: String(row.queued_at) }];
+  if (row.leased_at) events.push({ type: "job.leased", at: String(row.leased_at) });
+  if (row.started_at) events.push({ type: "job.transitioned", at: String(row.started_at) });
+  if (row.finished_at) events.push({ type: "job.transitioned", at: String(row.finished_at) });
+  return events;
+}
+
+function workstationRunRowToJob(row) {
+  let request = {};
+  try { request = JSON.parse(String(row.request_json ?? "{}")); } catch {}
+  if (row.operation === "backup" || !row.operation) {
+    try { request = { ...request, sourcePaths: JSON.parse(String(row.source_paths_json ?? "[]")) }; } catch {}
+    try { request = { ...request, excludePatterns: JSON.parse(String(row.exclude_patterns_json ?? "[]")) }; } catch {}
+  }
+  let result = null;
+  try { result = row.result_json ? JSON.parse(String(row.result_json)) : null; } catch {}
+  return {
+    id: String(row.id),
+    operationKey: String(row.operation_key),
+    type: `workstation-${row.operation ? String(row.operation) : "backup"}`,
+    state: String(row.state),
+    attempt: 1,
+    revision: 0,
+    payload: { device: row.device_name ? String(row.device_name) : String(row.device_id), ...request, ...(result ? { result } : {}) },
+    lease: null,
+    runtime: null,
+    createdAt: String(row.created_at ?? row.queued_at),
+    updatedAt: String(row.updated_at ?? row.finished_at ?? row.started_at ?? row.queued_at),
+    startedAt: row.started_at ? String(row.started_at) : null,
+    finishedAt: row.finished_at ? String(row.finished_at) : null,
+    lastError: row.error_message ? String(row.error_message) : null,
+  };
 }
 
 export async function loadSanitizedIntegrationConfig(path) {

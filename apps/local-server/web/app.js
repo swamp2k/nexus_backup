@@ -10,8 +10,8 @@ const state = {
   selectedEvents: [],
   refreshing: false,
 };
-const pageTitles = { overview: "Overview", jobs: "Jobs", sources: "Sources", destinations: "Destinations", settings: "Settings" };
-const sidecarViews = new Set(["transfers", "workstations", "repositories"]);
+const pageTitles = { overview: "Overview", jobs: "Jobs", settings: "Settings" };
+const sidecarViews = new Set(["transfers", "workstations", "repositories", "sources", "destinations"]);
 const terminalStates = new Set(["completed", "partial", "failed", "cancelled"]);
 const activeStates = new Set(["leased", "preparing", "running", "finalizing"]);
 const content = document.querySelector("#content");
@@ -75,7 +75,7 @@ async function refreshAll({ quiet = false } = {}) {
 }
 
 function navigate(view) {
-  if (!pageTitles[view]) return;
+  if (!pageTitles[view] && !sidecarViews.has(view)) return;
   state.view = view;
   location.hash = view;
   document.body.classList.remove("menu-open");
@@ -89,8 +89,6 @@ function render() {
   document.querySelector("#new-job-button").hidden = true;
   if (state.view === "overview") renderOverview();
   else if (state.view === "jobs") renderJobs();
-  else if (state.view === "sources") renderSources();
-  else if (state.view === "destinations") renderDestinations();
   else renderSettings();
 }
 
@@ -118,16 +116,6 @@ function renderJobs() {
   bindJobRows();
 }
 
-function renderSources() {
-  const sources = state.config.sources ?? [];
-  content.innerHTML = `<section class="card card-pad"><div class="flex items-center justify-between gap-8"><div><p class="eyebrow">Local configuration</p><h2>Sources</h2><p class="muted small">Only permitted local paths are exposed to the dashboard.</p></div>${badge(`${sources.length} configured`, sources.length ? "success" : "warn")}</div><div class="entity-grid mt-16">${sources.map((source) => `<article class="entity-card"><div class="entity-meta"><strong>${escapeHtml(source.id)}</strong><p>${source.paths.length} path${source.paths.length === 1 ? "" : "s"}</p>${source.paths.map((path) => `<code>${escapeHtml(path)}</code>`).join("")}</div><div class="entity-icon">⇤</div></article>`).join("") || emptyBlock("No sources configured", "Add a source to the local configuration.")}</div></section>`;
-}
-
-function renderDestinations() {
-  const endpoints = state.config.endpoints ?? [];
-  content.innerHTML = `<section class="card card-pad"><div class="flex items-center justify-between gap-8"><div><p class="eyebrow">Local configuration</p><h2>Source integrations</h2><p class="muted small">Credentials stay inside the appliance. The UI only sees sanitized endpoint metadata.</p></div>${badge(`${endpoints.length} configured`, endpoints.length ? "success" : "warn")}</div><div class="entity-grid mt-16">${endpoints.map((endpoint) => `<article class="entity-card"><div class="entity-meta"><strong>${escapeHtml(endpoint.id)}</strong><p>${endpoint.mount?.enabled ? `Mount · VFS ${escapeHtml(endpoint.mount.vfsCacheMode || "off")}` : "Transfer endpoint"}</p><p>${endpoint.allowMove ? "Move allowed by local policy" : "Copy-only local policy"}</p></div><div class="entity-icon">⇥</div></article>`).join("") || emptyBlock("No integrations configured", "Add a source integration to the local configuration.")}</div></section>`;
-}
-
 function renderSettings() {
   content.innerHTML = `<div class="grid two-col"><section class="card card-pad"><p class="eyebrow">Deployment</p><h2>Local-first</h2><div class="stack mt-16">${settingsRow("Primary mode", "Self-contained Docker")}${settingsRow("Database", "Local SQLite")}${settingsRow("Backup data path", "Direct local execution")}${settingsRow("Cloudflare", "Optional remote control only")}${settingsRow("Dashboard refresh", "5 seconds")}</div></section><section class="card card-pad"><p class="eyebrow">Safety boundary</p><h2>Secrets stay local</h2><p class="muted">Control tokens, workstation credentials, rclone credentials and repository environment secrets stay inside Nexus. Manual receiver credentials are shown only during explicit enrollment or reset.</p></section></div>`;
 }
@@ -149,8 +137,8 @@ function detailItem(label, value) { return `<div class="detail-item"><span>${esc
 function emptyBlock(title, body) { return `<div class="empty"><strong>${escapeHtml(title)}</strong>${escapeHtml(body)}</div>`; }
 function badge(text, tone = "") { return `<span class="badge ${tone}">${escapeHtml(text)}</span>`; }
 function statusBadge(stateValue) { const tone = stateValue === "completed" ? "success" : stateValue === "partial" || stateValue === "queued" ? "warn" : stateValue === "failed" || stateValue === "cancelled" ? "danger" : activeStates.has(stateValue) ? "info" : ""; return badge(stateValue, tone); }
-function shortJobName(job) { const payload = job.payload ?? {}; if (job.type === "rclone-transfer") return `${payload.sourceEndpointId ?? "source"} → ${payload.destinationEndpointId ?? "destination"}`; return job.operationKey || job.id; }
-function jobTypeLabel(type) { return { "rclone-transfer": "Rclone copy" }[type] || type; }
+function shortJobName(job) { const payload = job.payload ?? {}; if (job.type === "rclone-transfer") return `${payload.sourceEndpointId ?? "source"} → ${payload.destinationEndpointId ?? "destination"}`; if (job.type?.startsWith("workstation-") && payload.device) return payload.device; return job.operationKey || job.id; }
+function jobTypeLabel(type) { return { "rclone-transfer": "Rclone copy", "workstation-backup": "Workstation backup" }[type] || type; }
 function eventLabel(type) { return { "job.created": "Job created", "job.leased": "Lease acquired", "job.lease_renewed": "Lease renewed", "job.transitioned": "State changed", "job.recovered": "Recovered after stale lease", "job.note": "Job note" }[type] || type; }
 function relativeTime(value) { if (!value) return "—"; const date = new Date(value); const seconds = Math.round((date.getTime() - Date.now()) / 1000); if (!Number.isFinite(seconds)) return "—"; const absolute = Math.abs(seconds); const formatter = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" }); if (absolute < 60) return formatter.format(seconds, "second"); const minutes = Math.round(seconds / 60); if (Math.abs(minutes) < 60) return formatter.format(minutes, "minute"); const hours = Math.round(minutes / 60); if (Math.abs(hours) < 24) return formatter.format(hours, "hour"); return formatter.format(Math.round(hours / 24), "day"); }
 function formatDate(value) { if (!value) return "—"; const date = new Date(value); return Number.isNaN(date.getTime()) ? "—" : date.toLocaleString(); }

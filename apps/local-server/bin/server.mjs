@@ -5,7 +5,13 @@ import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createApi, D1JobRepository } from "../../control-plane/dist/index.js";
-import { listJobs, loadSanitizedIntegrationConfig } from "../lib/dashboard-data.mjs";
+import {
+  getWorkstationRunJob,
+  getWorkstationRunRow,
+  listJobs,
+  loadSanitizedIntegrationConfig,
+  workstationRunEvents,
+} from "../lib/dashboard-data.mjs";
 import { getRuntimeTelemetry } from "../lib/runtime-telemetry.mjs";
 import { openSqliteD1 } from "../lib/sqlite-d1.mjs";
 
@@ -69,6 +75,7 @@ const STATIC_FILES = new Map([
   ["/remote-connection.js", ["remote-connection.js", "text/javascript; charset=utf-8"]],
   ["/transfers.js", ["transfers.js", "text/javascript; charset=utf-8"]],
   ["/repositories.js", ["repositories.js", "text/javascript; charset=utf-8"]],
+  ["/sources-destinations.js", ["sources-destinations.js", "text/javascript; charset=utf-8"]],
   ["/maintenance.js", ["maintenance.js", "text/javascript; charset=utf-8"]],
   ["/styles.css", ["styles.css", "text/css; charset=utf-8"]],
   ["/transfers.css", ["transfers.css", "text/css; charset=utf-8"]],
@@ -141,6 +148,15 @@ const server = createServer(async (request, response) => {
     const eventsMatch = path.match(/^\/v1\/local\/jobs\/([^/]+)\/events$/);
     if (request.method === "GET" && eventsMatch) {
       const jobId = decodePathPart(eventsMatch[1]);
+      if (jobId.startsWith("wsrun-")) {
+        const row = await getWorkstationRunRow(db, jobId);
+        if (!row) {
+          sendJson(response, 404, { code: "job_not_found", message: `Job not found: ${jobId}` });
+          return;
+        }
+        sendJson(response, 200, { events: workstationRunEvents(row) });
+        return;
+      }
       const repository = new D1JobRepository(db);
       const job = await repository.get(jobId);
       if (!job) {
@@ -154,6 +170,15 @@ const server = createServer(async (request, response) => {
     const jobMatch = path.match(/^\/v1\/local\/jobs\/([^/]+)$/);
     if (request.method === "GET" && jobMatch) {
       const jobId = decodePathPart(jobMatch[1]);
+      if (jobId.startsWith("wsrun-")) {
+        const job = await getWorkstationRunJob(db, jobId);
+        if (!job) {
+          sendJson(response, 404, { code: "job_not_found", message: `Job not found: ${jobId}` });
+          return;
+        }
+        sendJson(response, 200, { job });
+        return;
+      }
       const job = await new D1JobRepository(db).get(jobId);
       if (!job) {
         sendJson(response, 404, { code: "job_not_found", message: `Job not found: ${jobId}` });

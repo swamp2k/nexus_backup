@@ -7,6 +7,8 @@ import { basename, dirname, join } from "node:path";
 import { collectZipEntries, createStoreZipStream } from "../lib/zip-writer.mjs";
 import { fileURLToPath } from "node:url";
 import { loadSanitizedIntegrationConfig } from "../lib/dashboard-data.mjs";
+import { createIntegrationConfigService } from "../lib/integration-config.mjs";
+import { getRcloneProviders } from "../lib/rclone-providers.mjs";
 import { createLocalAuth } from "../lib/local-auth.mjs";
 import { createManagedDeviceService } from "../lib/managed-devices.mjs";
 import { createRepositoryService } from "../lib/repositories.mjs";
@@ -47,6 +49,7 @@ const deviceService = createManagedDeviceService({ db });
 const repositoryService = createRepositoryService({ db, backupRoot });
 const receiverUserService = createReceiverUserService({ db, repositories: repositoryService });
 const remoteConnectionService = createRemoteConnectionService({ db });
+const integrationConfigService = createIntegrationConfigService({ path: integrationConfigPath });
 const workstationService = createWorkstationService({ db, deviceService, repositories: repositoryService, receiverUsers: receiverUserService });
 const localRepositoryTransferExecutor = createLocalRepositoryTransferExecutor({
   db,
@@ -299,6 +302,53 @@ const gateway = createServer(async (request, response) => {
     if (path === "/v1/local/repositories/download-zip" && request.method === "POST") {
       const body = await readJsonBody(request);
       await sendRepositoryZipDownload(response, Array.isArray(body?.paths) ? body.paths : []);
+      return;
+    }
+    if (path === "/v1/local/repositories/files" && request.method === "DELETE") {
+      const body = await readJsonBody(request);
+      sendJson(response, 200, await deleteRepositoryPaths(Array.isArray(body?.paths) ? body.paths : []));
+      return;
+    }
+    if (path === "/v1/local/config/rclone-providers" && request.method === "GET") {
+      sendJson(response, 200, { providers: await getRcloneProviders() });
+      return;
+    }
+    if (path === "/v1/local/config/sources" && request.method === "GET") {
+      sendJson(response, 200, { sources: await integrationConfigService.listSources() });
+      return;
+    }
+    if (path === "/v1/local/config/sources" && request.method === "POST") {
+      sendJson(response, 201, { source: await integrationConfigService.createSource(await readJsonBody(request)) });
+      return;
+    }
+    const sourceMatch = path.match(/^\/v1\/local\/config\/sources\/([^/]+)$/);
+    if (sourceMatch && request.method === "PUT") {
+      sendJson(response, 200, { source: await integrationConfigService.updateSource(decodePathPart(sourceMatch[1]), await readJsonBody(request)) });
+      return;
+    }
+    if (sourceMatch && request.method === "DELETE") {
+      sendJson(response, 200, await integrationConfigService.deleteSource(decodePathPart(sourceMatch[1])));
+      return;
+    }
+    if (path === "/v1/local/config/destinations" && request.method === "GET") {
+      sendJson(response, 200, { destinations: await integrationConfigService.listDestinations() });
+      return;
+    }
+    if (path === "/v1/local/config/destinations" && request.method === "POST") {
+      sendJson(response, 201, { destination: await integrationConfigService.createDestination(await readJsonBody(request)) });
+      return;
+    }
+    if (path === "/v1/local/config/destinations/test" && request.method === "POST") {
+      sendJson(response, 200, await integrationConfigService.testDestinationParams(await readJsonBody(request)));
+      return;
+    }
+    const destinationMatch = path.match(/^\/v1\/local\/config\/destinations\/([^/]+)$/);
+    if (destinationMatch && request.method === "PUT") {
+      sendJson(response, 200, { destination: await integrationConfigService.updateDestination(decodePathPart(destinationMatch[1]), await readJsonBody(request)) });
+      return;
+    }
+    if (destinationMatch && request.method === "DELETE") {
+      sendJson(response, 200, await integrationConfigService.deleteDestination(decodePathPart(destinationMatch[1])));
       return;
     }
     if (path === "/v1/local/receiver-users" && request.method === "GET") {
@@ -570,6 +620,18 @@ async function sendRepositoryZipDownload(response, relativePaths) {
   response.setHeader("x-content-type-options", "nosniff");
   response.setHeader("cache-control", "no-store");
   await pipeline(createStoreZipStream(entries), response);
+}
+
+async function deleteRepositoryPaths(relativePaths) {
+  if (!relativePaths.length || relativePaths.length > 500) throw statusError(400, "Select between 1 and 500 items to delete");
+  const deleted = [];
+  for (const relativePath of relativePaths) {
+    const target = await repositoryService.paths.resolveRelative(relativePath, { allowMissing: false });
+    if (!target.relative) throw statusError(400, "Cannot delete the backup root");
+    await rm(target.absolute, { recursive: true });
+    deleted.push(target.relative);
+  }
+  return { deleted };
 }
 
 function contentDisposition(filename) {
