@@ -6,8 +6,8 @@ const styles = await readFile(new URL("../web/styles.css", import.meta.url), "ut
 const repositories = await readFile(new URL("../web/repositories.js", import.meta.url), "utf8");
 
 test("settings checkbox keeps compact native-sized layout", () => {
-  assert.match(styles, /\.enabled-row\{display:flex;align-items:center;gap:10px/);
-  assert.match(styles, /\.enabled-row input\[type="checkbox"\]\{width:18px;height:18px;min-height:0/);
+  assert.match(styles, /\.enabled-row\{display:flex;align-items:center;gap:8px/);
+  assert.match(styles, /\.enabled-row input\[type="checkbox"\]\{width:14px;height:14px;min-height:0/);
 });
 
 test("status rows stack label and value instead of concatenating them", () => {
