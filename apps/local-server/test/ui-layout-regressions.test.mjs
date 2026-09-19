@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 
 const styles = await readFile(new URL("../web/styles.css", import.meta.url), "utf8");
 const repositories = await readFile(new URL("../web/repositories.js", import.meta.url), "utf8");
+const app = await readFile(new URL("../web/app.js", import.meta.url), "utf8");
 
 test("settings checkbox keeps compact native-sized layout", () => {
   assert.match(styles, /\.enabled-row\{display:flex;align-items:center;gap:8px/);
@@ -34,4 +35,15 @@ test("workstation drive selector keeps compact checkbox layout", () => {
 
 test("workstation source tree keeps a dedicated vertical scrollbar", () => {
   assert.match(styles, /\.ws-source-tree-table-wrap\{height:min\(420px,50vh\);min-height:180px;overflow-x:auto;overflow-y:scroll;scrollbar-gutter:stable\}/);
+});
+
+
+test("overview gives recent jobs the full content width and keeps appliance status in settings", () => {
+  const overview = app.split("function renderOverview()")[1].split("function renderJobs()")[0];
+  const settings = app.split("function renderSettings()")[1].split("function jobsTable(")[0];
+  assert.match(overview, /<section class="card section-gap"><div class="card-header">/);
+  assert.doesNotMatch(overview, /<h2>Local appliance<\/h2>/);
+  assert.match(settings, /<h2>Local appliance<\/h2>/);
+  assert.match(settings, /Control plane/);
+  assert.match(settings, /Local execution/);
 });
