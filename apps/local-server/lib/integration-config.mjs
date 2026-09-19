@@ -1,7 +1,7 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { randomUUID } from "node:crypto";
-import { buildRcloneConnectionString, obscureRcloneValue, testRcloneFs } from "./rclone-providers.mjs";
+import { buildRcloneConnectionString, getRcloneProviders, obscureRcloneValue, testRcloneFs } from "./rclone-providers.mjs";
 
 // A function, not a shared object: every caller needs its own fresh arrays.
 // A plain module-level object here would have its sources/rcloneEndpoints
@@ -134,7 +134,7 @@ export function createIntegrationConfigService({ path, now = () => new Date(), i
   }
 
   async function testDestinationParams(input) {
-    const { fs } = await buildFs(input, { forTest: true, binary: rcloneBinary });
+    const { fs } = await buildFs(input, { binary: rcloneBinary });
     return testRcloneFs(fs, { binary: rcloneBinary });
   }
 
@@ -144,15 +144,17 @@ export function createIntegrationConfigService({ path, now = () => new Date(), i
   };
 }
 
-async function buildFs(input, { forTest = false, binary = "rclone" } = {}) {
+async function buildFs(input, { binary = "rclone" } = {}) {
   const type = requireNonEmpty(input?.type, "type");
   const rawParams = isRecord(input?.params) ? input.params : {};
-  const providerOptions = Array.isArray(input?.providerOptions) ? input.providerOptions : [];
-  const passwordFields = new Set(providerOptions.filter((option) => option?.IsPassword).map((option) => option.Name));
+  const providers = await getRcloneProviders({ binary });
+  const provider = providers.find((item) => item?.Name === type);
+  if (!provider) throw statusError(400, `Unknown rclone destination type: ${type}`);
+  const passwordFields = new Set((provider.Options ?? []).filter((option) => option?.IsPassword).map((option) => option.Name));
   const params = {};
   for (const [key, value] of Object.entries(rawParams)) {
     if (value === undefined || value === null || value === "") continue;
-    params[key] = passwordFields.has(key) && !forTest ? await obscureRcloneValue(value, { binary }) : String(value);
+    params[key] = passwordFields.has(key) ? await obscureRcloneValue(value, { binary }) : String(value);
   }
   const fs = buildRcloneConnectionString(type, params);
   const summary = summarize(type, rawParams);
