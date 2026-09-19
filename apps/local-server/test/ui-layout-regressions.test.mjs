@@ -30,3 +30,8 @@ test("workstation drive selector keeps compact checkbox layout", () => {
   assert.match(styles, /\.ws-source-scan-controls \[data-drives\]\{display:flex;flex-wrap:wrap;gap:7px 14px/);
   assert.match(styles, /\.ws-source-scan-controls \[data-drives\] input\[type="checkbox"\]\{width:14px;height:14px;min-height:0/);
 });
+
+
+test("workstation source tree keeps a dedicated vertical scrollbar", () => {
+  assert.match(styles, /\.ws-source-tree-table-wrap\{height:min\(420px,50vh\);min-height:180px;overflow-x:auto;overflow-y:scroll;scrollbar-gutter:stable\}/);
+});
