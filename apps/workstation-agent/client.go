@@ -161,6 +161,29 @@ func (c *apiClient) finishRun(runID, leaseToken, status string, result map[strin
 	return c.doJSON(http.MethodPost, "/v1/device/workstation/runs/"+runID+"/result", payload, nil)
 }
 
+func (c *apiClient) uploadSourceScanArtifact(ctx context.Context, runID, leaseToken string, src io.Reader) error {
+	path := "/v1/device/workstation/runs/" + runID + "/source-scan-artifact"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.baseURL+path, io.NopCloser(src))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.currentToken())
+	req.Header.Set("X-Nexus-Lease-Token", leaseToken)
+	req.Header.Set("Content-Type", "application/gzip")
+	req.Header.Set("Accept", "application/json")
+	resp, err := c.uploadHTTP.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+		return &apiError{Method: http.MethodPut, Path: path, StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(data))}
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return nil
+}
+
 func (c *apiClient) uploadFile(ctx context.Context, relativePath string, file *os.File, size int64) error {
 	return c.uploadFileWithMtime(ctx, relativePath, file, size, time.Time{})
 }
