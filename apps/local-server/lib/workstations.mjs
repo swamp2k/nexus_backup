@@ -155,7 +155,7 @@ export function createWorkstationService({
   async function queueSourceScan(deviceId, input = {}) {
     const device = await requireWorkstation(deviceId);
     if (!device.enabled) throw statusError(409, "Workstation is disabled");
-    if (!device.capabilities.includes("workstation.source-scan.v1")) throw statusError(409, "Workstation agent does not support source scans; update it first");
+    if (!device.capabilities.includes("workstation.source-scan.v2")) throw statusError(409, "Workstation agent must be updated for complete TreeSize scans");
     if (!isOnline(device.lastSeenAt, nowDate(now))) throw statusError(409, "Workstation must be online to scan backup sources");
     const drives = normalizeSourceDrives(input?.drives);
     const active = await activeRun(device.id);
