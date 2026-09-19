@@ -36,7 +36,7 @@ async function fixture({receiverUsers=null,withRepositories=false,sourceScanStor
     sourceScanStore,
   });
   const created=await devices.create({name:"Balder PC",kind:"workstation"});
-  const bootstrap=await devices.report(created.token,{version:"installer",hostname:"balder-pc",platform:"windows/amd64",capabilities:["workstation.bootstrap.v1","workstation.source-scan.v1"]});
+  const bootstrap=await devices.report(created.token,{version:"installer",hostname:"balder-pc",platform:"windows/amd64",capabilities:["workstation.bootstrap.v1","workstation.source-scan.v1","workstation.source-scan.v2"]});
   return{dir,db,devices,repositories,service,token:bootstrap.deviceToken,device:bootstrap.device,setNow:value=>{now=new Date(value)},async close(){db.close();await rm(dir,{recursive:true,force:true});}};
 }
 
