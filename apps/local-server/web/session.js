@@ -137,7 +137,7 @@ function installWorkstationDashboard() {
   function showInstaller(data) { modal = document.createElement("div"); modal.className = "modal-backdrop"; modal.innerHTML = `<section class="modal ws-installer-modal"><div class="modal-header"><div><p class="eyebrow">One-line install</p><h2>${esc(data.device?.name || "Workstation")}</h2></div><button class="icon-button" data-close>×</button></div><div class="ws-installer"><p>Run this in an elevated PowerShell, or send the exact same command through PCWatch:</p><pre><code>${esc(data.installCommand || "")}</code></pre><button class="button primary" data-copy>Copy command</button><p class="muted-2">This installer contains the one-time device bootstrap needed by the workstation client.</p></div></section>`; document.body.append(modal); modal.querySelector("[data-close]").addEventListener("click", closeModal); modal.querySelector("[data-copy]").addEventListener("click", async (event) => { await navigator.clipboard?.writeText(data.installCommand || ""); event.currentTarget.textContent = "Copied"; }); }
   async function openSources(ws) {
     closeModal();
-    const supported = ws.capabilities?.includes("workstation.source-scan.v1");
+    const supported = ws.capabilities?.includes("workstation.source-scan.v2");
     const drives = ws.status?.localDrives ?? [];
     const selected = new Set(ws.policy?.sourcePaths ?? []);
     modal = document.createElement("div"); modal.className = "modal-backdrop";
