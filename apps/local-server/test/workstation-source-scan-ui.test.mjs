@@ -25,4 +25,9 @@ test("workstation source-scan UI restores drive selection, polling, live progres
   assert.match(source, /renderChildren/, "expected hierarchical tree rendering from the cached scan");
   assert.match(source, /data-path/, "expected per-folder selection checkboxes reading the saved scan");
   assert.match(source, /compactSourcePaths/, "expected nested folder selections to be compacted before saving");
+  assert.match(source, /ws-source-tree-table/, "expected PCWatch-style table tree markup");
+  assert.match(source, /depth \* 16/, "expected stable per-level indentation");
+  assert.match(source, /expanded\.has\(node\.path\)/, "expected expansion state to be path based");
+  assert.match(source, /renderChildren\(node\.path, depth \+ 1\)/, "expected recursive row rendering like PCWatch TreeSize");
+  assert.doesNotMatch(source, /ws-source-children/, "legacy nested div tree should be removed");
 });
