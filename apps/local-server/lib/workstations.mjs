@@ -14,6 +14,7 @@ export function createWorkstationService({
   deviceService,
   repositories = null,
   receiverUsers = null,
+  sourceScanStore = null,
   now = () => new Date(),
   id = () => `wsrun-${randomUUID()}`,
   leaseToken = () => `nxbws_${randomBytes(24).toString("base64url")}`,
@@ -176,13 +177,45 @@ export function createWorkstationService({
     const latestRun = await db.prepare(`
       SELECT * FROM workstation_runs WHERE device_id=? AND operation='source-scan' ORDER BY queued_at DESC,id DESC LIMIT 1
     `).bind(device.id).first();
-    return {
-      scan: row ? {
-        deviceId: device.id, sourceRunId: nullableString(row.source_run_id), scannedAt: String(row.scanned_at),
-        drives: parseArray(row.drives_json), nodes: parseJson(row.tree_json, []), truncated: Number(row.truncated) === 1,
-      } : null,
-      run: presentRun(latestRun),
-    };
+    const scan = row ? {
+      deviceId: device.id,
+      sourceRunId: nullableString(row.source_run_id),
+      scannedAt: String(row.scanned_at),
+      drives: parseArray(row.drives_json),
+      nodes: row.artifact_key ? [] : parseJson(row.tree_json, []),
+      truncated: Number(row.truncated) === 1,
+      artifactAvailable: Boolean(row.artifact_key),
+      artifactFormat: nullableString(row.artifact_format),
+      schemaVersion: Number(row.schema_version ?? 0) || null,
+      directoryCount: Number(row.directory_count ?? 0),
+      fileCount: Number(row.file_count ?? 0),
+      totalBytes: Number(row.total_bytes ?? 0),
+      errorCount: Number(row.error_count ?? 0),
+    } : null;
+    return { scan, run: presentRun(latestRun) };
+  }
+
+  async function getSourceScanArtifact(deviceId) {
+    const device = await requireWorkstation(deviceId);
+    if (!sourceScanStore) throw statusError(404, "Source scan artifact storage is unavailable");
+    const row = await db.prepare("SELECT artifact_key FROM workstation_source_scans WHERE device_id=?").bind(device.id).first();
+    if (!row?.artifact_key) throw statusError(404, "No source scan artifact is available");
+    return sourceScanStore.openArtifact(String(row.artifact_key));
+  }
+
+  async function authorizeSourceScanUpload(rawToken, runId, leaseTokenValue) {
+    const device = await requireAuthenticatedWorkstation(rawToken);
+    const normalizedRunId = requireId(runId, "run id");
+    const token = requireLeaseToken(leaseTokenValue);
+    const at = nowDate(now);
+    const expiresAt = new Date(at.getTime() + leaseMs).toISOString();
+    const result = await db.prepare(`
+      UPDATE workstation_runs
+      SET state='running',started_at=COALESCE(started_at,?),lease_expires_at=?,updated_at=?
+      WHERE id=? AND device_id=? AND operation='source-scan' AND lease_token=? AND state IN ('leased','running')
+    `).bind(at.toISOString(), expiresAt, at.toISOString(), normalizedRunId, device.id, token).run();
+    if (Number(result.meta?.changes ?? 0) !== 1) throw statusError(409, "Workstation run lease is stale or invalid");
+    return { deviceId: device.id, runId: normalizedRunId };
   }
 
   async function queueRecovery(deviceId, operation, input = {}) {
@@ -338,6 +371,10 @@ export function createWorkstationService({
     const resultValue = normalizeResult(input?.result, operation, request, normalizedRunId, state);
     const errorMessage = state === "failed" || state === "partial" ? optionalString(input?.error, "error", 4000) : null;
     const at = nowDate(now);
+    if (operation === "source-scan" && state === "completed" && resultValue?.artifactFormat) {
+      if (!sourceScanStore) throw statusError(500, "Source scan artifact storage is unavailable");
+      if (!await sourceScanStore.exists(device.id, normalizedRunId)) throw statusError(409, "Source scan artifact upload is missing");
+    }
     const result = await db.prepare(`
       UPDATE workstation_runs SET state=?,finished_at=?,result_json=?,error_message=?,lease_token=NULL,lease_expires_at=NULL,updated_at=?
       WHERE id=? AND device_id=? AND lease_token=? AND state IN ('leased','running')
@@ -425,11 +462,27 @@ export function createWorkstationService({
   }
 
   async function persistSourceScan(deviceId, runId, value, scannedAt) {
+    const previous = await db.prepare("SELECT artifact_key FROM workstation_source_scans WHERE device_id=?").bind(deviceId).first();
+    const artifactKey = value.artifactFormat ? sourceScanStore.keyForRun(deviceId, runId) : null;
+    const treeJson = artifactKey ? "[]" : JSON.stringify(value.nodes ?? []);
     await db.prepare(`
-      INSERT INTO workstation_source_scans(device_id,source_run_id,scanned_at,drives_json,tree_json,truncated) VALUES(?,?,?,?,?,?)
-      ON CONFLICT(device_id) DO UPDATE SET source_run_id=excluded.source_run_id,scanned_at=excluded.scanned_at,
-        drives_json=excluded.drives_json,tree_json=excluded.tree_json,truncated=excluded.truncated
-    `).bind(deviceId, runId, scannedAt, JSON.stringify(value.drives), JSON.stringify(value.nodes), value.truncated ? 1 : 0).run();
+      INSERT INTO workstation_source_scans(
+        device_id,source_run_id,scanned_at,drives_json,tree_json,truncated,
+        artifact_key,artifact_format,schema_version,directory_count,file_count,total_bytes,error_count
+      ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(device_id) DO UPDATE SET
+        source_run_id=excluded.source_run_id,scanned_at=excluded.scanned_at,drives_json=excluded.drives_json,
+        tree_json=excluded.tree_json,truncated=excluded.truncated,artifact_key=excluded.artifact_key,
+        artifact_format=excluded.artifact_format,schema_version=excluded.schema_version,
+        directory_count=excluded.directory_count,file_count=excluded.file_count,total_bytes=excluded.total_bytes,error_count=excluded.error_count
+    `).bind(
+      deviceId, runId, scannedAt, JSON.stringify(value.drives), treeJson, value.truncated ? 1 : 0,
+      artifactKey, value.artifactFormat ?? null, value.schemaVersion ?? null,
+      value.directoryCount ?? (value.nodes?.length ?? 0), value.fileCount ?? 0, value.totalBytes ?? 0, value.errorCount ?? 0,
+    ).run();
+    if (sourceScanStore && previous?.artifact_key && previous.artifact_key !== artifactKey) {
+      await sourceScanStore.removeKey(String(previous.artifact_key)).catch(() => {});
+    }
   }
 
   async function persistRecoveryResult(deviceId, runId, operation, request, value, scannedAt) {
@@ -512,6 +565,7 @@ export function createWorkstationService({
     }
     const result = await db.prepare("DELETE FROM managed_devices WHERE id=? AND kind='workstation'").bind(device.id).run();
     if (Number(result.meta?.changes ?? 0) !== 1) throw statusError(409, "Workstation could not be deleted");
+    if (sourceScanStore) await sourceScanStore.removeDevice(device.id).catch(() => {});
     return { deleted: true, id: device.id, backupDataPreserved: true };
   }
 
@@ -561,7 +615,8 @@ export function createWorkstationService({
   }
 
   return {
-    list, getPolicy, putPolicy, runNow, runDue, queueSourceScan, getSourceScan, queueRecovery, getRecoveryInventory, getRecoveryBrowse, getRun, listRuns, getLatestCheck,
+    list, getPolicy, putPolicy, runNow, runDue, queueSourceScan, getSourceScan, getSourceScanArtifact, authorizeSourceScanUpload,
+    queueRecovery, getRecoveryInventory, getRecoveryBrowse, getRun, listRuns, getLatestCheck,
     poll, progress, finish, reportStatus, recoverExpired, remove,
   };
 }
@@ -682,8 +737,22 @@ function normalizeResult(value, operation, request, runId, state) {
   if (operation === "source-scan") {
     const drives = normalizeSourceDrives(value.drives);
     if (JSON.stringify(drives) !== JSON.stringify(normalizeSourceDrives(request.drives))) throw new RangeError("source scan result does not match requested drives");
-    if (!Array.isArray(value.nodes) || value.nodes.length > 75000) throw new RangeError("source scan result has too many directories");
-    return { operation, drives, nodes: value.nodes.map(normalizeSourceScanNode), truncated: value.truncated === true };
+    if (Array.isArray(value.nodes)) {
+      if (value.nodes.length > 75000) throw new RangeError("legacy source scan result has too many directories");
+      return { operation, drives, nodes: value.nodes.map(normalizeSourceScanNode), truncated: value.truncated === true };
+    }
+    if (value.artifactFormat !== "gzip-ndjson-v1" || value.schemaVersion !== 1) throw new RangeError("source scan artifact manifest is invalid");
+    return {
+      operation,
+      drives,
+      artifactFormat: "gzip-ndjson-v1",
+      schemaVersion: 1,
+      directoryCount: optionalNonNegativeInteger(value.directoryCount, "source directory count") ?? 0,
+      fileCount: optionalNonNegativeInteger(value.fileCount, "source file count") ?? 0,
+      totalBytes: optionalNonNegativeInteger(value.totalBytes, "source total bytes") ?? 0,
+      errorCount: optionalNonNegativeInteger(value.errorCount, "source error count") ?? 0,
+      truncated: value.truncated === true,
+    };
   }
   if (operation === "check") {
     if (value.integrity !== "ok") throw new RangeError("integrity check result must report ok");
