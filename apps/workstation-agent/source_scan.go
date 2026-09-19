@@ -10,14 +10,11 @@ import (
 	"time"
 )
 
-// maxSourceScanNodes is a var, not a const, so tests can lower it to exercise
-// truncation without creating tens of thousands of real directories.
-var maxSourceScanNodes = 250000
+// Production source scans retain every directory, matching PCWatch TreeSize.
+// Tests may set this to a positive value to exercise truncation behavior.
+var maxSourceScanNodes = 0
 
-const (
-	maxSourceScanApproxBytes = 64 * 1024 * 1024
-	sourceScanProgressEvery  = 500 * time.Millisecond
-)
+const sourceScanProgressEvery = 500 * time.Millisecond
 
 type sourceScanNode struct {
 	Path         string `json:"path"`
@@ -26,20 +23,25 @@ type sourceScanNode struct {
 	Bytes        int64  `json:"bytes"`
 	Files        int64  `json:"files"`
 	Directories  int64  `json:"directories"`
+	ErrorCount   int64  `json:"error_count,omitempty"`
 	Inaccessible bool   `json:"inaccessible,omitempty"`
 }
 
 type sourceScanResult struct {
-	Drives      []string         `json:"drives"`
-	Nodes       []sourceScanNode `json:"nodes"`
-	Truncated   bool             `json:"truncated"`
-	approxBytes int
+	Drives         []string         `json:"drives"`
+	Nodes          []sourceScanNode `json:"nodes"`
+	Truncated      bool             `json:"truncated"`
+	TotalBytes     int64            `json:"totalBytes"`
+	FileCount      int64            `json:"fileCount"`
+	DirectoryCount int64            `json:"directoryCount"`
+	ErrorCount     int64            `json:"errorCount"`
 }
 
 type sourceScanProgress struct {
 	Files       int64  `json:"files"`
 	Directories int64  `json:"directories"`
 	Bytes       int64  `json:"bytes"`
+	Errors      int64  `json:"errors"`
 	CurrentPath string `json:"currentPath,omitempty"`
 }
 
@@ -81,7 +83,7 @@ func scanSourceTree(ctx context.Context, roots []string, onProgress func(sourceS
 		if err := ctx.Err(); err != nil {
 			return result, err
 		}
-		if len(result.Nodes) >= maxSourceScanNodes {
+		if maxSourceScanNodes > 0 && len(result.Nodes) >= maxSourceScanNodes {
 			result.Truncated = true
 			break
 		}
@@ -92,6 +94,10 @@ func scanSourceTree(ctx context.Context, roots []string, onProgress func(sourceS
 	if err := walker.emitProgress(true); err != nil {
 		return result, err
 	}
+	result.TotalBytes = walker.progress.Bytes
+	result.FileCount = walker.progress.Files
+	result.DirectoryCount = walker.progress.Directories
+	result.ErrorCount = walker.progress.Errors
 	return result, nil
 }
 
@@ -106,8 +112,7 @@ func (w *sourceScanWalker) scanDirectory(ctx context.Context, path, parent strin
 		return node, err
 	}
 
-	estimated := len(node.Path) + len(node.Parent) + len(node.Name) + 160
-	if len(w.result.Nodes) >= maxSourceScanNodes || w.result.approxBytes+estimated > maxSourceScanApproxBytes {
+	if maxSourceScanNodes > 0 && len(w.result.Nodes) >= maxSourceScanNodes {
 		w.result.Truncated = true
 		return node, nil
 	}
@@ -115,8 +120,9 @@ func (w *sourceScanWalker) scanDirectory(ctx context.Context, path, parent strin
 	entries, err := os.ReadDir(path)
 	if err != nil {
 		node.Inaccessible = true
+		node.ErrorCount++
+		w.progress.Errors++
 		w.result.Nodes = append(w.result.Nodes, node)
-		w.result.approxBytes += estimated
 		return node, nil
 	}
 
@@ -126,7 +132,6 @@ func (w *sourceScanWalker) scanDirectory(ctx context.Context, path, parent strin
 	// leaving the browser with no top of the tree to render at all.
 	index := len(w.result.Nodes)
 	w.result.Nodes = append(w.result.Nodes, node)
-	w.result.approxBytes += estimated
 
 	for _, entry := range entries {
 		if err := ctx.Err(); err != nil {
@@ -137,7 +142,7 @@ func (w *sourceScanWalker) scanDirectory(ctx context.Context, path, parent strin
 		}
 		childPath := filepath.Join(path, entry.Name())
 		if entry.IsDir() {
-			if len(w.result.Nodes) >= maxSourceScanNodes {
+			if maxSourceScanNodes > 0 && len(w.result.Nodes) >= maxSourceScanNodes {
 				w.result.Truncated = true
 				break
 			}
@@ -148,10 +153,16 @@ func (w *sourceScanWalker) scanDirectory(ctx context.Context, path, parent strin
 			node.Bytes += child.Bytes
 			node.Files += child.Files
 			node.Directories += 1 + child.Directories
+			node.ErrorCount += child.ErrorCount
 			continue
 		}
 		info, infoErr := entry.Info()
-		if infoErr != nil || !info.Mode().IsRegular() {
+		if infoErr != nil {
+			node.ErrorCount++
+			w.progress.Errors++
+			continue
+		}
+		if !info.Mode().IsRegular() {
 			continue
 		}
 		size := info.Size()
