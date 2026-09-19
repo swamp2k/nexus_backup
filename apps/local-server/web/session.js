@@ -145,7 +145,62 @@ function installWorkstationDashboard() {
     document.body.append(modal); modal.querySelectorAll("[data-close]").forEach((button) => button.addEventListener("click", closeModal));
     const status = modal.querySelector("[data-status]"), tree = modal.querySelector("[data-tree]");
     let scan;
-    const loadScan = async () => { const data = await request(`/v1/local/workstations/${encodeURIComponent(ws.id)}/source-scan`); renderScan(data); return data; };
+    const scanCache = new Map();
+    const hydrateScanArtifact = async (value) => {
+      if (!value?.artifactAvailable) return value;
+      const cacheKey = value.sourceRunId || value.scannedAt;
+      if (scanCache.has(cacheKey)) return { ...value, nodes: scanCache.get(cacheKey) };
+      if (typeof DecompressionStream === "undefined") throw new Error("This browser cannot decompress TreeSize scan artifacts.");
+      const response = await fetch(`/v1/local/workstations/${encodeURIComponent(ws.id)}/source-scan/artifact`, { headers: { accept: "application/gzip" }, cache: "no-store" });
+      if (!response.ok || !response.body) throw new Error(`Could not load TreeSize scan artifact (HTTP ${response.status})`);
+      const reader = response.body.pipeThrough(new DecompressionStream("gzip")).getReader();
+      const decoder = new TextDecoder();
+      const nodes = [];
+      let buffer = "";
+      while (true) {
+        const { done, value: chunk } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(chunk, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          const record = JSON.parse(line);
+          if (record.record_type !== "directory" || record.schema_version !== 1) continue;
+          nodes.push({
+            path: record.path,
+            parent: record.parent_path || "",
+            name: record.name,
+            bytes: Number(record.size_bytes || 0),
+            files: Number(record.file_count || 0),
+            directories: Number(record.directory_count || 0),
+            inaccessible: Number(record.error_count || 0) > 0,
+          });
+        }
+      }
+      if (buffer.trim()) {
+        const record = JSON.parse(buffer);
+        if (record.record_type === "directory" && record.schema_version === 1) {
+          nodes.push({
+            path: record.path,
+            parent: record.parent_path || "",
+            name: record.name,
+            bytes: Number(record.size_bytes || 0),
+            files: Number(record.file_count || 0),
+            directories: Number(record.directory_count || 0),
+            inaccessible: Number(record.error_count || 0) > 0,
+          });
+        }
+      }
+      scanCache.set(cacheKey, nodes);
+      return { ...value, nodes };
+    };
+    const loadScan = async () => {
+      const data = await request(`/v1/local/workstations/${encodeURIComponent(ws.id)}/source-scan`);
+      if (data.scan?.artifactAvailable) data.scan = await hydrateScanArtifact(data.scan);
+      renderScan(data);
+      return data;
+    };
     const renderScan = (data) => {
       scan = data.scan; const run = data.run;
       if (run?.active) {
