@@ -120,7 +120,7 @@ func (a *agent) report() error {
 	hostname, _ := os.Hostname()
 	capabilities := []string{"workstation.backup.v1", "workstation.flat-file.v1", "windows-vss.v1"}
 	if runtime.GOOS == "windows" {
-		capabilities = append(capabilities, "workstation.source-scan.v1")
+		capabilities = append(capabilities, "workstation.source-scan.v1", "workstation.source-scan.v2")
 	}
 	response, err := a.client.reportDevice(deviceReport{
 		Version:      agentVersion(),
