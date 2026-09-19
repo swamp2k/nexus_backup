@@ -301,6 +301,11 @@ const gateway = createServer(async (request, response) => {
       await sendRepositoryZipDownload(response, Array.isArray(body?.paths) ? body.paths : []);
       return;
     }
+    if (path === "/v1/local/repositories/files" && request.method === "DELETE") {
+      const body = await readJsonBody(request);
+      sendJson(response, 200, await deleteRepositoryPaths(Array.isArray(body?.paths) ? body.paths : []));
+      return;
+    }
     if (path === "/v1/local/receiver-users" && request.method === "GET") {
       sendJson(response, 200, { users: await receiverUserService.list() });
       return;
@@ -570,6 +575,18 @@ async function sendRepositoryZipDownload(response, relativePaths) {
   response.setHeader("x-content-type-options", "nosniff");
   response.setHeader("cache-control", "no-store");
   await pipeline(createStoreZipStream(entries), response);
+}
+
+async function deleteRepositoryPaths(relativePaths) {
+  if (!relativePaths.length || relativePaths.length > 500) throw statusError(400, "Select between 1 and 500 items to delete");
+  const deleted = [];
+  for (const relativePath of relativePaths) {
+    const target = await repositoryService.paths.resolveRelative(relativePath, { allowMissing: false });
+    if (!target.relative) throw statusError(400, "Cannot delete the backup root");
+    await rm(target.absolute, { recursive: true });
+    deleted.push(target.relative);
+  }
+  return { deleted };
 }
 
 function contentDisposition(filename) {
