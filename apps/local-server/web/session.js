@@ -157,7 +157,7 @@ function installWorkstationDashboard() {
         if (progress.currentPath) bits.push(progress.currentPath);
         status.textContent = `${bits.join(" · ")} — previous completed scan remains available until this one finishes.`;
       } else if (scan) {
-        status.textContent = `Last TreeSize scan: ${new Date(scan.scannedAt).toLocaleString()} · ${scan.nodes.length} folders${scan.truncated ? " · truncated" : ""}`;
+        status.textContent = `Last TreeSize scan: ${new Date(scan.scannedAt).toLocaleString()} · ${scan.nodes.length} folders${scan.truncated ? " · INCOMPLETE: scan limit reached, some folders are missing — update the workstation agent and rescan." : ""}`;
       } else {
         status.textContent = "No saved TreeSize scan yet. Select one or more drives and run the scan once.";
       }
