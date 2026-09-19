@@ -18,8 +18,10 @@ test("TreeSize folder selection stays authoritative across lazy/collapsed branch
   // Every rendered [data-path] checkbox must update the authoritative Set on
   // change, so toggling a folder is never lost when its row is re-rendered
   // (e.g. after a rescan) or when a sibling branch is collapsed.
-  assert.match(body, /addEventListener\("change",\s*\(event\)\s*=>\s*\{\s*if\s*\(event\.currentTarget\.checked\)\s*selected\.add\(node\.path\);\s*else\s*selected\.delete\(node\.path\);\s*\}\)/,
-    "expected a change listener on the per-folder checkbox that adds/removes node.path from `selected`");
+  assert.match(body, /querySelector\("\[data-path\]"\)\.addEventListener\("change"/,
+    "expected a change listener on each rendered per-folder checkbox");
+  assert.match(body, /if\s*\(event\.currentTarget\.checked\)\s*selected\.add\(node\.path\);\s*else\s*selected\.delete\(node\.path\);/,
+    "expected the checkbox listener to add/remove node.path from `selected`");
 
   // Saving must read from the authoritative Set, not from whichever checkboxes
   // happen to be mounted in the DOM right now -- a collapsed/never-expanded
