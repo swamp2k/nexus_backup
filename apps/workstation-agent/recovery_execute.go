@@ -27,9 +27,28 @@ func (a *agent) execute(run workstationRun) {
 		_ = a.client.finishRun(run.ID, run.LeaseToken, "failure", map[string]any{"operation": operation}, err.Error())
 		return
 	}
-	nodes := make([]map[string]any, 0, len(result.Nodes))
-	for _, node := range result.Nodes {
-		nodes = append(nodes, map[string]any{"path": node.Path, "parent": node.Parent, "name": node.Name, "bytes": node.Bytes, "files": node.Files, "directories": node.Directories, "inaccessible": node.Inaccessible})
+	if err := a.client.reportProgress(run.ID, run.LeaseToken, backupProgress{
+		Phase: "source-scan-upload",
+		BytesDone: result.TotalBytes,
+		FilesDone: result.FileCount,
+		DirectoriesDone: result.DirectoryCount,
+	}); err != nil {
+		_ = a.client.finishRun(run.ID, run.LeaseToken, "failure", map[string]any{"operation": operation}, err.Error())
+		return
 	}
-	_ = a.client.finishRun(run.ID, run.LeaseToken, "success", map[string]any{"operation": operation, "drives": result.Drives, "nodes": nodes, "truncated": result.Truncated}, "")
+	if err := uploadSourceScanArtifact(ctx, a.client, run, result); err != nil {
+		_ = a.client.finishRun(run.ID, run.LeaseToken, "failure", map[string]any{"operation": operation}, err.Error())
+		return
+	}
+	_ = a.client.finishRun(run.ID, run.LeaseToken, "success", map[string]any{
+		"operation": operation,
+		"drives": result.Drives,
+		"artifactFormat": "gzip-ndjson-v1",
+		"schemaVersion": 1,
+		"directoryCount": result.DirectoryCount,
+		"fileCount": result.FileCount,
+		"totalBytes": result.TotalBytes,
+		"errorCount": result.ErrorCount,
+		"truncated": result.Truncated,
+	}, "")
 }
