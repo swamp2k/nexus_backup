@@ -30,4 +30,7 @@ test("workstation source-scan UI restores drive selection, polling, live progres
   assert.match(source, /expanded\.has\(node\.path\)/, "expected expansion state to be path based");
   assert.match(source, /renderChildren\(node\.path, depth \+ 1\)/, "expected recursive row rendering like PCWatch TreeSize");
   assert.doesNotMatch(source, /ws-source-children/, "legacy nested div tree should be removed");
+  assert.match(source, /source-scan\/artifact/, "expected saved scans to load from the streamed artifact endpoint");
+  assert.match(source, /DecompressionStream\("gzip"\)/, "expected browser-side streaming decompression like PCWatch TreeSize");
+  assert.match(source, /record\.record_type !== "directory"/, "expected PCWatch-style directory NDJSON records");
 });
