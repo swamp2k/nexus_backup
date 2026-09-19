@@ -163,25 +163,50 @@ function installWorkstationDashboard() {
       }
       renderTree();
     };
+    const expanded = new Set();
     const renderTree = () => {
       tree.innerHTML = ""; if (!scan?.nodes?.length) return;
       const children = new Map();
       for (const node of scan.nodes) { const key = node.parent || ""; if (!children.has(key)) children.set(key, []); children.get(key).push(node); }
       for (const group of children.values()) group.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
-      const renderChildren = (parent, host) => {
+
+      const shell = document.createElement("div");
+      shell.className = "ws-source-tree-table-wrap";
+      shell.innerHTML = `<table class="ws-source-tree-table"><thead><tr><th class="ws-source-check"></th><th>Name</th><th class="ws-source-number">Size</th><th class="ws-source-number">Files</th></tr></thead><tbody></tbody></table>`;
+      const body = shell.querySelector("tbody");
+
+      const renderChildren = (parent, depth) => {
         for (const node of children.get(parent) || []) {
-          const row = document.createElement("div"); row.className = "ws-source-row";
           const hasChildren = (children.get(node.path) || []).length > 0;
-          row.innerHTML = `<button type="button" class="icon-button compact" data-expand ${hasChildren ? "" : "disabled"}>${hasChildren ? "▸" : "·"}</button><label><input type="checkbox" data-path value="${attr(node.path)}" ${selected.has(node.path) ? "checked" : ""}> <strong>${esc(node.name)}</strong></label><span>${bytes(node.bytes)} · ${node.files} files${node.inaccessible ? " · inaccessible" : ""}</span>`;
-          row.querySelector("[data-path]").addEventListener("change", (event) => { if (event.currentTarget.checked) selected.add(node.path); else selected.delete(node.path); });
-          host.append(row);
-          if (hasChildren) {
-            const child = document.createElement("div"); child.className = "ws-source-children"; child.hidden = true; host.append(child);
-            row.querySelector("[data-expand]").addEventListener("click", (event) => { if (!child.dataset.loaded) { renderChildren(node.path, child); child.dataset.loaded = "1"; } child.hidden = !child.hidden; event.currentTarget.textContent = child.hidden ? "▸" : "▾"; });
-          }
+          const isExpanded = expanded.has(node.path);
+          const row = document.createElement("tr");
+          row.className = selected.has(node.path) ? "selected" : "";
+          row.innerHTML = `
+            <td class="ws-source-check"><input type="checkbox" data-path value="${attr(node.path)}" ${selected.has(node.path) ? "checked" : ""}></td>
+            <td>
+              <div class="ws-source-name" style="padding-left:${depth * 16}px">
+                ${hasChildren ? `<button type="button" class="ws-source-toggle" data-expand aria-label="${isExpanded ? "Collapse" : "Expand"}">${isExpanded ? "▼" : "▶"}</button>` : '<span class="ws-source-toggle-spacer"></span>'}
+                <span class="ws-source-folder" aria-hidden="true">📁</span>
+                <strong title="${attr(node.path)}">${esc(node.name)}</strong>
+                ${node.inaccessible ? '<span class="ws-source-warning" title="Some files or folders were inaccessible">⚠</span>' : ""}
+              </div>
+            </td>
+            <td class="ws-source-number">${bytes(node.bytes)}</td>
+            <td class="ws-source-number">${Number(node.files || 0).toLocaleString()}</td>`;
+          row.querySelector("[data-path]").addEventListener("change", (event) => {
+            if (event.currentTarget.checked) selected.add(node.path); else selected.delete(node.path);
+            row.classList.toggle("selected", event.currentTarget.checked);
+          });
+          row.querySelector("[data-expand]")?.addEventListener("click", () => {
+            if (expanded.has(node.path)) expanded.delete(node.path); else expanded.add(node.path);
+            renderTree();
+          });
+          body.append(row);
+          if (hasChildren && isExpanded) renderChildren(node.path, depth + 1);
         }
       };
-      renderChildren("", tree);
+      renderChildren("", 0);
+      tree.append(shell);
     };
     modal.querySelector("[data-scan]")?.addEventListener("click", async (event) => {
       const selectedDrives = [...modal.querySelectorAll("[data-drives] input:checked")].map((input) => input.value);
