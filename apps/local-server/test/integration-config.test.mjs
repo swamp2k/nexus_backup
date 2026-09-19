@@ -10,7 +10,17 @@ async function fixture() {
   const configPath = join(dir, "integrations.json");
   const rclonePath = join(dir, "rclone");
   await writeFile(rclonePath, `#!/bin/sh
+if [ "$1" = "config" ] && [ "$2" = "providers" ]; then
+  echo '[{"Name":"sftp","Options":[{"Name":"host"},{"Name":"user"},{"Name":"pass","IsPassword":true}]},{"Name":"local","Options":[]}]'
+  exit 0
+fi
 if [ "$1" = "obscure" ]; then echo "obscured:$2"; exit 0; fi
+if [ "$1" = "lsjson" ]; then
+  case "$2" in
+    *'pass=hunter2'*|*'pass="hunter2"'*) echo "plaintext password reached rclone" >&2; exit 9 ;;
+    *) exit 0 ;;
+  esac
+fi
 exit 0
 `);
   await chmod(rclonePath, 0o755);
@@ -69,6 +79,19 @@ test("destinations: builds an obscured connection string and never returns it", 
     const onDisk = JSON.parse(await readFile(f.configPath, "utf8"));
     assert.equal(onDisk.rcloneEndpoints.length, 1);
     assert.equal(onDisk.rcloneEndpoints[0].fs, ':sftp,host=example.com,user=swamp,pass="obscured:hunter2":');
+  } finally { await f.close(); }
+});
+
+test("destinations: connection test obscures passwords using the server-side provider schema", async () => {
+  const f = await fixture();
+  try {
+    const result = await f.service.testDestinationParams({
+      type: "sftp",
+      params: { host: "example.com", user: "swamp", pass: "hunter2" },
+      // A browser must not be able to downgrade a secret field to plaintext.
+      providerOptions: [{ Name: "pass", IsPassword: false }],
+    });
+    assert.deepEqual(result, { ok: true });
   } finally { await f.close(); }
 });
 
