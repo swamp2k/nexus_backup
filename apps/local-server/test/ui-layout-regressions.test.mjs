@@ -23,3 +23,10 @@ test("repository modal keeps its primary Save action in a sticky footer", () => 
   assert.match(styles, /\.modal>form>\.modal-actions\{position:sticky/);
   assert.match(repositories, /<button type="submit" class="button primary">Save<\/button>/);
 });
+
+
+test("workstation drive selector keeps compact checkbox layout", () => {
+  assert.match(styles, /\.ws-source-scan-controls\{display:flex;align-items:flex-end/);
+  assert.match(styles, /\.ws-source-scan-controls \[data-drives\]\{display:flex;flex-wrap:wrap;gap:7px 14px/);
+  assert.match(styles, /\.ws-source-scan-controls \[data-drives\] input\[type="checkbox"\]\{width:14px;height:14px;min-height:0/);
+});
