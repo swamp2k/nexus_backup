@@ -4,16 +4,16 @@ import { spawn } from "node:child_process";
 // Rather than hand-coding a form per backend type, ask rclone for its own
 // schema (`rclone config providers`) and drive the wizard from that, the
 // same trick Copyarr's Remotes page uses.
-let cachedProviders = null;
+const cachedProviders = new Map();
 
 export async function getRcloneProviders({ binary = "rclone", refresh = false } = {}) {
-  if (cachedProviders && !refresh) return cachedProviders;
+  if (cachedProviders.has(binary) && !refresh) return cachedProviders.get(binary);
   const result = await run(binary, ["config", "providers"]);
   if (result.code !== 0) throw new Error(`rclone config providers failed: ${result.stderr.trim().slice(-1000)}`);
   let providers;
   try { providers = JSON.parse(result.stdout); } catch { throw new Error("rclone config providers returned invalid JSON"); }
   if (!Array.isArray(providers)) throw new Error("rclone config providers returned an unexpected shape");
-  cachedProviders = providers;
+  cachedProviders.set(binary, providers);
   return providers;
 }
 
