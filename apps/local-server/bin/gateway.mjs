@@ -22,6 +22,7 @@ import { createTransferRuleService } from "../lib/transfer-rules.mjs";
 import { persistTransferDiscovery } from "../lib/transfer-rules.mjs";
 import { createLocalRepositoryTransferExecutor, loadLocalRcloneConfig } from "../lib/local-repository-transfer.mjs";
 import { createWorkstationService, workstationInstallCommand } from "../lib/workstations.mjs";
+import { createSourceScanStore } from "../lib/source-scan-store.mjs";
 
 const publicHost = process.env.NEXUS_BACKUP_HOST?.trim() || "0.0.0.0";
 const publicPort = positiveInteger(process.env.NEXUS_BACKUP_PORT ?? "8787", "NEXUS_BACKUP_PORT");
@@ -50,7 +51,14 @@ const repositoryService = createRepositoryService({ db, backupRoot });
 const receiverUserService = createReceiverUserService({ db, repositories: repositoryService });
 const remoteConnectionService = createRemoteConnectionService({ db });
 const integrationConfigService = createIntegrationConfigService({ path: integrationConfigPath });
-const workstationService = createWorkstationService({ db, deviceService, repositories: repositoryService, receiverUsers: receiverUserService });
+const sourceScanStore = createSourceScanStore({ root: join(configDir, "workstation-source-scans") });
+const workstationService = createWorkstationService({
+  db,
+  deviceService,
+  repositories: repositoryService,
+  receiverUsers: receiverUserService,
+  sourceScanStore,
+});
 const localRepositoryTransferExecutor = createLocalRepositoryTransferExecutor({
   db,
   repositories: repositoryService,
@@ -246,6 +254,20 @@ const gateway = createServer(async (request, response) => {
       sendJson(response, 200, { run: await workstationService.progress(requireBearerToken(request), decodePathPart(workstationProgressMatch[1]), await readJsonBody(request)) });
       return;
     }
+    const workstationSourceArtifactMatch = path.match(/^\/v1\/device\/workstation\/runs\/([^/]+)\/source-scan-artifact$/);
+    if (workstationSourceArtifactMatch && request.method === "PUT") {
+      const leaseToken = singleHeader(request.headers["x-nexus-lease-token"]);
+      const run = await workstationService.authorizeSourceScanUpload(
+        requireBearerToken(request),
+        decodePathPart(workstationSourceArtifactMatch[1]),
+        leaseToken,
+      );
+      const contentType = (singleHeader(request.headers["content-type"]) || "").split(";")[0].trim().toLowerCase();
+      if (contentType !== "application/gzip" && contentType !== "application/octet-stream") throw statusError(415, "Source scan artifact must be gzip data");
+      const stored = await sourceScanStore.write(run.deviceId, run.runId, request);
+      sendJson(response, 201, { stored: true, sizeBytes: stored.sizeBytes });
+      return;
+    }
     const workstationResultMatch = path.match(/^\/v1\/device\/workstation\/runs\/([^/]+)\/result$/);
     if (workstationResultMatch && request.method === "POST") {
       // Source scans can contain a cached directory tree. Keep the endpoint bounded,
@@ -431,6 +453,17 @@ const gateway = createServer(async (request, response) => {
     }
     if (workstationSourceScanMatch && request.method === "POST") {
       sendJson(response, 202, { run: await workstationService.queueSourceScan(decodePathPart(workstationSourceScanMatch[1]), await readJsonBody(request)) });
+      return;
+    }
+    const workstationSourceArtifactLocalMatch = path.match(/^\/v1\/local\/workstations\/([^/]+)\/source-scan\/artifact$/);
+    if (workstationSourceArtifactLocalMatch && request.method === "GET") {
+      const artifact = await workstationService.getSourceScanArtifact(decodePathPart(workstationSourceArtifactLocalMatch[1]));
+      response.statusCode = 200;
+      response.setHeader("content-type", "application/gzip");
+      response.setHeader("content-length", artifact.sizeBytes);
+      response.setHeader("cache-control", "no-store");
+      response.setHeader("x-content-type-options", "nosniff");
+      await pipeline(artifact.stream, response);
       return;
     }
     const workstationPolicyMatch = path.match(/^\/v1\/local\/workstations\/([^/]+)\/policy$/);
